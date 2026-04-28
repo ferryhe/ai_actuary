@@ -36,10 +36,10 @@ The deterministic calculator boundary now explicitly targets **CAS official `cha
 
 ## Intentionally Out of Scope for This Step
 
-- real calculator logic
-- real OpenAI Agents SDK runtime wiring
 - real Hermes CLI/API integration
 - benchmark execution logic
 - artifact persistence workflow
+
+The OpenAI planner side now includes a **minimal real OpenAI Agents SDK governed workflow entry point** for single-case execution, but it still keeps Hermes on the local callable adapter and does not yet cover review packets, batch workflows, or production runtime operations.
 
 See `docs/plans/openai-hermes-composition-design.md` for the full design and phased project plan.

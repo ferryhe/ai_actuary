@@ -1,4 +1,4 @@
-"""Offline planner workflow skeleton: intake → route → dispatch worker → collect result."""
+"""Planner runners for offline and real OpenAI Agents SDK governed workflows."""
 
 from __future__ import annotations
 
@@ -41,6 +41,59 @@ def run_planner_workflow(task: Any) -> dict[str, Any]:
         "worker_result": worker_result_payload,
         "planner_summary": planner_summary,
     }
+
+
+def run_openai_governed_workflow(task: Any, *, agents_module=None, user_prompt: str | None = None) -> dict[str, Any]:
+    routing_module = _load_sibling_module("routing.py", "openai_routing_sdk")
+    config_module = _load_sibling_module("config.py", "openai_config_sdk")
+    agents_file = _load_sibling_module("agents.py", "openai_agents_sdk")
+    route = routing_module.route_case_task(task)
+    if route.mode != "governed":
+        raise ValueError(f"Prompt 6 only supports governed workflow, got route {route.mode!r}")
+
+    sdk = agents_module or _import_agents_sdk()
+    agent = agents_file.build_workflow_manager_agent(task, agents_module=sdk)
+    run_config = config_module.build_openai_run_config(
+        workflow_name=config_module.DEFAULT_PLANNER_CONFIG["workflow_name"],
+        tracing_disabled=config_module.DEFAULT_PLANNER_CONFIG["tracing_disabled"],
+        trace_metadata={
+            "task_id": getattr(task, "task_id", None),
+            "case_id": getattr(task, "case_ref", None),
+        },
+        agents_module=sdk,
+    )
+    prompt = user_prompt or (
+        "Run the governed reserving workflow for this task. "
+        "Use the provided case-worker tool, then return only the structured summary. "
+        "Do not invent numeric values; cite only the worker result."
+    )
+    result = sdk.Runner.run_sync(agent, prompt, run_config=run_config)
+    final_output = result.final_output
+    final_output_payload = final_output.model_dump(mode="json") if hasattr(final_output, "model_dump") else final_output
+    worker_result = agent.tools[0]()
+
+    return {
+        "stage": "collect",
+        "route": route.to_dict(),
+        "prompt": prompt,
+        "agent": {"name": agent.name, "model": getattr(agent, "model", None)},
+        "trace": {
+            "workflow_name": run_config.kwargs["workflow_name"] if hasattr(run_config, "kwargs") else config_module.DEFAULT_PLANNER_CONFIG["workflow_name"],
+            "tracing_disabled": run_config.kwargs["tracing_disabled"] if hasattr(run_config, "kwargs") else config_module.DEFAULT_PLANNER_CONFIG["tracing_disabled"],
+        },
+        "worker_result": worker_result,
+        "final_output": final_output_payload,
+    }
+
+
+def _import_agents_sdk():
+    try:
+        import agents  # type: ignore
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError(
+            "OpenAI Agents SDK is required for Prompt 6. Install it with `pip install openai-agents` and set OPENAI_API_KEY."
+        ) from exc
+    return agents
 
 
 def _load_sibling_module(filename: str, module_name: str):

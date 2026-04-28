@@ -82,6 +82,33 @@
 
 ---
 
+## OpenAI Planner 最小运行配置（Prompt 6）
+
+当你要真正运行 **Prompt 6** 的最小 governed workflow 时，需要开始配置 OpenAI Agents SDK；但 **Hermes 真实运行时** 还不必现在就配。
+
+最小要求：
+
+```bash
+pip install -e .
+export OPENAI_API_KEY=***
+```
+
+当前仓库里：
+- `workflows/agent-runtimes/openai-agents/runner.py`
+  - `run_openai_governed_workflow(task)` 走真实 OpenAI Agents SDK 接口
+- `workflows/agent-runtimes/openai-agents/agents.py`
+  - 定义最小 `Workflow Manager Agent`
+- `workflows/agent-runtimes/openai-agents/tools.py`
+  - 通过 tool wrapper 调用 Hermes case worker local adapter
+- `workflows/agent-runtimes/openai-agents/config.py`
+  - 提供最小 tracing / workflow config
+
+当前阶段什么时候需要配置：
+- **OpenAI Agent**：从 Prompt 6 开始，需要，因为 planner 已开始走真实 OpenAI Agents SDK
+- **Hermes**：要等到你不再满足于当前 local callable worker，而要接真实 Hermes CLI / job / messaging / automation runtime 时才需要。也就是至少在后续 review / messaging / batch / automation 场景再配更合适
+
+---
+
 ## 下一步开发方向
 
 - 采用 **CAS 官方 `chainladder-python`** 作为 deterministic calculator 工具层，不自研新的准备金算法模块
