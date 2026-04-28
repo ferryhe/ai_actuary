@@ -38,6 +38,7 @@ def build_run_artifact_manifest(
     return RunArtifactManifest(
         case_id=case_id,
         run_id=run_id,
+        artifact_root=str(root),
         artifact_paths=artifact_paths,
         created_by=created_by,
         metadata=metadata or {},
