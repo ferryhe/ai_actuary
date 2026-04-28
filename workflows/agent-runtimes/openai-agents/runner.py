@@ -75,7 +75,13 @@ def run_openai_governed_workflow(task: Any, *, agents_module=None, user_prompt: 
     if worker_result is None:
         raise RuntimeError("Case-worker tool did not record a worker result during the OpenAI run.")
 
-    return {
+    review_packet = None
+    if worker_result.get("status") == "needs_review":
+        review_worker_module = _load_review_worker_module()
+        output_dir = ((getattr(task, "inputs", {}) or {}).get("artifact_dir") if task is not None else None)
+        review_packet = review_worker_module.build_review_packet(worker_result, output_dir=output_dir)
+
+    response = {
         "stage": "collect",
         "route": route.to_dict(),
         "prompt": prompt,
@@ -87,6 +93,9 @@ def run_openai_governed_workflow(task: Any, *, agents_module=None, user_prompt: 
         "worker_result": worker_result,
         "final_output": final_output_payload,
     }
+    if review_packet is not None:
+        response["review_packet"] = review_packet
+    return response
 
 
 def _import_agents_sdk():
@@ -97,6 +106,15 @@ def _import_agents_sdk():
             "OpenAI Agents SDK is required for Prompt 6. Install it with `pip install openai-agents` and set OPENAI_API_KEY."
         ) from exc
     return agents
+
+
+def _load_review_worker_module():
+    module_path = Path(__file__).resolve().parents[1] / "hermes-worker" / "review_worker.py"
+    spec = importlib.util.spec_from_file_location("hermes_review_worker", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load_sibling_module(filename: str, module_name: str):

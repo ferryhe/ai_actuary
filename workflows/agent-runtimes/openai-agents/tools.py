@@ -38,8 +38,10 @@ def run_batch_worker_tool(task: Any):
     raise NotImplementedError("Batch worker wrapper is reserved for Prompt 8.")
 
 
-def build_review_packet_tool(task: Any):
-    raise NotImplementedError("Review packet wrapper is reserved for Prompt 7.")
+def build_review_packet_tool(task: Any, worker_result: Any):
+    review_worker = _load_worker_module("review_worker.py", "hermes_review_worker")
+    output_dir = ((getattr(task, "inputs", {}) or {}).get("artifact_dir") if task is not None else None)
+    return review_worker.build_review_packet(worker_result, output_dir=output_dir)
 
 
 def get_tool_registry() -> dict[str, Callable[[Any], Any]]:
@@ -58,6 +60,10 @@ def _import_agents_sdk():
             "OpenAI Agents SDK is required for Prompt 6. Install it with `pip install openai-agents`."
         ) from exc
     return agents
+
+
+def _load_review_worker_module():
+    return _load_worker_module("review_worker.py", "hermes_review_worker")
 
 
 def _load_worker_module(filename: str, module_name: str):
