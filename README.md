@@ -102,6 +102,16 @@ export OPENAI_API_KEY=***
   - 通过 tool wrapper 调用 Hermes case worker local adapter
 - `workflows/agent-runtimes/openai-agents/config.py`
   - 提供最小 tracing / workflow config
+- `scripts/run_governed_case.py`
+  - 面向操作者的一键入口，直接运行单个 governed case
+
+最小操作者运行方式：
+
+```bash
+python scripts/run_governed_case.py \
+  --case-id demo-case \
+  --artifact-dir ./tmp/demo-case
+```
 
 当前阶段什么时候需要配置：
 - **OpenAI Agent**：从 Prompt 6 开始，需要，因为 planner 已开始走真实 OpenAI Agents SDK
