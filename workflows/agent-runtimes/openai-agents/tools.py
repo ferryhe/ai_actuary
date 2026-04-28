@@ -35,7 +35,8 @@ def build_openai_case_worker_tool(task: Any, *, agents_module=None):
 
 
 def run_batch_worker_tool(task: Any):
-    raise NotImplementedError("Batch worker wrapper is reserved for Prompt 8.")
+    worker_module = _load_worker_module("batch_worker.py", "hermes_batch_worker")
+    return worker_module.run_batch_worker(task)
 
 
 def build_review_packet_tool(task: Any, worker_result: Any):
