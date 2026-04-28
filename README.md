@@ -1,133 +1,242 @@
-# AI 精算部 / AI Actuary
+# AI Actuary
 
-> 采用 **CAS Core + OpenAI Planner + Hermes Workers** 组合架构构建的智能精算系统。
-
----
-
-## 当前定位
-
-这个仓库不再只是一个泛化的 “Skill 组合” 设想，而是一个明确的研究与工程项目工作区：
-
-- **CAS Core**：保存 deterministic reserving logic、constitution、benchmark、artifact schema；
-- **OpenAI Planner**：使用 OpenAI Agents Python 承担规划、路由、治理决策；
-- **Hermes Workers**：使用 Hermes 承担执行、打包、通知、流程经验沉淀。
-
-一句话：**OpenAI 负责想清楚做什么，Hermes 负责把事情做完，CAS Core 负责什么算对。**
+> A compositional actuarial-agent project built around **CAS Core + OpenAI Planner + Hermes Workers**.
 
 ---
 
-## 仓库结构
+## Project Positioning
+
+This repository is a focused research and engineering workspace, not a generic skill-composition sandbox.
+
+- **CAS Core** holds deterministic reserving logic, constitution rules, benchmark schemas, and artifact contracts.
+- **OpenAI Planner** handles planning, routing, and governed orchestration through the OpenAI Agents SDK.
+- **Hermes Workers** handle execution, packaging, operator flows, and future notification/runtime operations.
+
+One-line model:
+
+**OpenAI decides what to do, Hermes executes it, and CAS Core defines what is numerically correct.**
+
+---
+
+## Repository Layout
 
 ```text
 .
 ├── docs/
 │   ├── architecture/
-│   └── plans/
+│   ├── plans/
+│   └── reports/
 ├── prompts/
 │   └── codex/
-└── references/
-    └── upstream/
-        ├── cas/
-        ├── hermes/
-        └── openai-agents/
+├── references/
+│   └── upstream/
+├── scripts/
+├── src/
+├── tests/
+└── workflows/
 ```
 
-### 关键内容
+### Key Files
 
 - `docs/plans/openai-hermes-composition-design.md`
-  - 组合式设计、角色定义、工作流、项目阶段计划
+  - Full architecture, role boundaries, workflow design, and phased roadmap.
 - `prompts/codex/step-by-step-prompts.md`
-  - 分步骤交给 Codex 的开发提示词
+  - The implementation prompt sequence used to build the project incrementally.
+- `docs/architecture/overview.md`
+  - Concise architecture summary.
+- `scripts/run_governed_case.py`
+  - Operator-facing CLI entrypoint for a single governed case run.
 - `references/upstream/cas/`
-  - CAS 项目原始 proposal、architecture、plan、benchmark 说明
+  - Proposal, architecture, and benchmark context from the CAS-side source materials.
 - `references/upstream/openai-agents/`
-  - OpenAI Agents Python 核心文档快照
+  - OpenAI Agents SDK documentation snapshot.
 - `references/upstream/hermes/`
-  - Hermes 核心能力与开发文档快照
+  - Hermes documentation snapshot.
 
 ---
 
-## 先看什么
+## What To Read First
 
-1. 看 `docs/plans/openai-hermes-composition-design.md`
-2. 看 `docs/architecture/overview.md`
-3. 看 `prompts/codex/step-by-step-prompts.md`
-4. 需要背景时回查 `references/upstream/*`
-
----
-
-## 当前代码骨架
-
-本分支已经建立最小项目骨架，供后续按步骤实现：
-
-- `pyproject.toml`
-  - 最小 Python 项目配置；当前仅包含 `pydantic` 与 `pytest`
-- `src/reserving_workflow/`
-  - `schemas/`：CAS Core 的基础 schema
-  - `calculators/`：基于 **CAS 官方 `chainladder-python`** 的 deterministic calculator adapter boundary
-  - `artifacts/`、`constitution/`、`review/`、`evaluation/`：最小模块边界
-- `workflows/agent-runtimes/openai-agents/`
-  - planner 侧占位文件：`agents.py`、`tools.py`、`runner.py`、`routing.py`、`config.py`
-- `workflows/agent-runtimes/hermes-worker/`
-  - worker 侧占位文件：`task_contracts.py`、`case_worker.py`、`batch_worker.py`、`review_worker.py`、`artifact_packager.py`
-- `tests/`
-  - 最小单元测试，验证 core schema 与 worker contract 的创建和序列化
-
-当前刻意**不包含**：
-
-- 真实 reserving calculator
-- 真实 OpenAI API / OpenAI Agents SDK 接线
-- 真实 Hermes CLI / Hermes API 调用
-- benchmark runner 与 artifact store 具体实现
+1. `docs/plans/openai-hermes-composition-design.md`
+2. `docs/architecture/overview.md`
+3. `prompts/codex/step-by-step-prompts.md`
+4. `docs/reports/current-workflow-report.md`
+5. `references/upstream/*` when deeper context is needed
 
 ---
 
-## OpenAI Planner 最小运行配置（Prompt 6）
+## Current Implementation Scope
 
-当你要真正运行 **Prompt 6** 的最小 governed workflow 时，需要开始配置 OpenAI Agents SDK；但 **Hermes 真实运行时** 还不必现在就配。
+The repository now contains a working minimum governed single-case flow.
 
-最小要求：
+### CAS Core
+
+- Core schemas under `src/reserving_workflow/schemas/`
+- Deterministic calculator adapter under `src/reserving_workflow/calculators/`
+- Constitution engine under `src/reserving_workflow/constitution/`
+
+### OpenAI Planner
+
+- Real OpenAI Agents SDK governed workflow entrypoint
+- Workflow manager agent definition
+- Planner routing and tool wrappers
+- Minimal tracing/run configuration
+
+### Hermes Workers
+
+- Worker task/result contracts
+- Single-case worker loop
+- Artifact packager
+- Review packet worker
+
+### Operator Entry
+
+- A CLI operator can run a governed case directly from:
+  - `scripts/run_governed_case.py`
+
+---
+
+## Current Capabilities
+
+The current branch supports:
+
+- deterministic reserving via the CAS `chainladder-python` boundary
+- governed single-case execution through OpenAI Agents SDK
+- worker-produced narrative draft stubs
+- constitution checks with pass / fail / review-required states
+- artifact generation for the case run
+- review packet generation when review is triggered
+- operator-facing CLI execution for pass and review scenarios
+
+---
+
+## Intentionally Out of Scope So Far
+
+The current branch does **not** yet include:
+
+- real Hermes CLI/API runtime integration for worker orchestration
+- benchmark batch execution
+- replay and repeatability hooks
+- persistent artifact store beyond local files
+- messaging-platform delivery of review packets
+
+---
+
+## Environment and Runtime Setup
+
+### Minimum project setup
 
 ```bash
+cd /tmp/ai_actuary
 pip install -e .
 export OPENAI_API_KEY=***
 ```
 
-当前仓库里：
-- `workflows/agent-runtimes/openai-agents/runner.py`
-  - `run_openai_governed_workflow(task)` 走真实 OpenAI Agents SDK 接口
-- `workflows/agent-runtimes/openai-agents/agents.py`
-  - 定义最小 `Workflow Manager Agent`
-- `workflows/agent-runtimes/openai-agents/tools.py`
-  - 通过 tool wrapper 调用 Hermes case worker local adapter
-- `workflows/agent-runtimes/openai-agents/config.py`
-  - 提供最小 tracing / workflow config
-- `scripts/run_governed_case.py`
-  - 面向操作者的一键入口，直接运行单个 governed case
-
-最小操作者运行方式：
+If you keep the key in a repository-local `.env` file:
 
 ```bash
+cd /tmp/ai_actuary
+set -a && . ./.env && set +a
+```
+
+### What must be configured when
+
+- **OpenAI Agents SDK** is required from the governed planner stage onward.
+- **Hermes full runtime integration** is not yet required for the current local callable worker flow.
+- **Messaging / review delivery integration** becomes relevant after the review packet stage when packets need to leave the local filesystem.
+
+---
+
+## Operator CLI Usage
+
+### Minimal governed pass run
+
+```bash
+cd /tmp/ai_actuary
+set -a && . ./.env && set +a
 python scripts/run_governed_case.py \
   --case-id demo-case \
   --artifact-dir ./tmp/demo-case
 ```
 
-当前阶段什么时候需要配置：
-- **OpenAI Agent**：从 Prompt 6 开始，需要，因为 planner 已开始走真实 OpenAI Agents SDK
-- **Hermes**：要等到你不再满足于当前 local callable worker，而要接真实 Hermes CLI / job / messaging / automation runtime 时才需要。也就是至少在后续 review / messaging / batch / automation 场景再配更合适
+### Minimal review-triggered run
+
+```bash
+cd /tmp/ai_actuary
+set -a && . ./.env && set +a
+python scripts/run_governed_case.py \
+  --case-id review-case \
+  --artifact-dir ./tmp/review-case \
+  --review-threshold-origin-count 5
+```
+
+### Output shape
+
+The CLI returns JSON with the main fields below:
+
+- `route`
+- `worker_result`
+- `final_output`
+- `review_packet` when review is triggered
 
 ---
 
-## 下一步开发方向
+## Hermes CLI As Operator
 
-- 采用 **CAS 官方 `chainladder-python`** 作为 deterministic calculator 工具层，不自研新的准备金算法模块
-- 在本仓库中实现 chainladder adapter boundary，并统一映射到 `DeterministicReserveResult`
-- 再实现 constitution rule engine v1
-- 然后接 Hermes worker contract 与 OpenAI planner skeleton 到真实运行链路
+Hermes itself can act as the operator for this repository.
+
+Typical usage:
+
+```bash
+cd /tmp/ai_actuary
+set -a && . ./.env && set +a
+hermes chat -q "Run a governed case smoke test in this repository."
+```
+
+Hermes CLI must have:
+
+- a working provider/model configuration for Hermes itself
+- local terminal/file tool access
+- access to the repository-local `OPENAI_API_KEY` when running this project workflow
+
+Hermes global configuration paths on this machine:
+
+- config: `/home/ec2-user/.hermes/config.yaml`
+- env: `/home/ec2-user/.hermes/.env`
+
+Project runtime env for this repository:
+
+- `/tmp/ai_actuary/.env`
 
 ---
 
-## 说明
+## Current Validation Status
 
-当前提交重点是把 **计划、结构、参考材料、最小代码骨架** 放进一个独立项目仓库，便于后续用 Codex / Hermes 逐步实现。
+The current implementation has been validated through:
+
+- unit and integration tests in `tests/`
+- real OpenAI Agents SDK governed workflow smoke runs
+- operator CLI pass-path execution
+- operator CLI review-path execution
+- Hermes CLI acting as an operator on the repository
+
+---
+
+## Next Recommended Steps
+
+1. benchmark batch runner and baseline comparison
+2. replay and repeatability hooks
+3. artifact-store hardening
+4. Hermes/Feishu review-packet delivery integration
+
+---
+
+## Notes
+
+This repository is meant to preserve a clean separation of responsibilities:
+
+- **CAS Core** owns truth
+- **OpenAI Planner** owns governed orchestration
+- **Hermes Workers** own execution and operational packaging
+
+That separation is the main architectural idea of the project.
