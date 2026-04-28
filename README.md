@@ -60,7 +60,7 @@ One-line model:
 1. `docs/plans/openai-hermes-composition-design.md`
 2. `docs/architecture/overview.md`
 3. `prompts/codex/step-by-step-prompts.md`
-4. `docs/reports/current-workflow-report.md`
+4. `docs/reports/current-workflow-report.md` — current actuarial run report
 5. `references/upstream/*` when deeper context is needed
 
 ---
