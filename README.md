@@ -56,15 +56,40 @@
 
 ---
 
+## 当前代码骨架
+
+本分支已经建立最小项目骨架，供后续按步骤实现：
+
+- `pyproject.toml`
+  - 最小 Python 项目配置；当前仅包含 `pydantic` 与 `pytest`
+- `src/reserving_workflow/`
+  - `schemas/`：CAS Core 的基础 schema
+  - `artifacts/`、`constitution/`、`review/`、`evaluation/`：最小模块边界
+- `workflows/agent-runtimes/openai-agents/`
+  - planner 侧占位文件：`agents.py`、`tools.py`、`runner.py`、`routing.py`、`config.py`
+- `workflows/agent-runtimes/hermes-worker/`
+  - worker 侧占位文件：`task_contracts.py`、`case_worker.py`、`batch_worker.py`、`review_worker.py`、`artifact_packager.py`
+- `tests/`
+  - 最小单元测试，验证 core schema 与 worker contract 的创建和序列化
+
+当前刻意**不包含**：
+
+- 真实 reserving calculator
+- 真实 OpenAI API / OpenAI Agents SDK 接线
+- 真实 Hermes CLI / Hermes API 调用
+- benchmark runner 与 artifact store 具体实现
+
+---
+
 ## 下一步开发方向
 
-- 在本仓库中创建真正的 `src/`, `workflows/`, `benchmarks/`, `tests/` 代码骨架
-- 先实现 deterministic calculator boundary
+- 采用 **CAS 官方 `chainladder-python`** 作为 deterministic calculator 工具层，不自研新的准备金算法模块
+- 在本仓库中实现 chainladder adapter boundary，并统一映射到 `DeterministicReserveResult`
 - 再实现 constitution rule engine v1
-- 然后接 Hermes worker contract 与 OpenAI planner skeleton
+- 然后接 Hermes worker contract 与 OpenAI planner skeleton 到真实运行链路
 
 ---
 
 ## 说明
 
-当前提交重点是把 **计划、结构、参考材料** 放进一个独立项目仓库，便于后续用 Codex / Hermes 逐步实现。
+当前提交重点是把 **计划、结构、参考材料、最小代码骨架** 放进一个独立项目仓库，便于后续用 Codex / Hermes 逐步实现。
