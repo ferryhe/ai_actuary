@@ -51,6 +51,7 @@ class ReviewDecision(BaseModel):
 class RunArtifactManifest(BaseModel):
     case_id: str
     run_id: str
+    artifact_root: str | None = None
     artifact_paths: dict[str, str] = Field(default_factory=dict)
     created_by: str = "skeleton"
     metadata: dict[str, Any] = Field(default_factory=dict)
