@@ -170,14 +170,45 @@ python scripts/run_governed_case.py \
   --review-threshold-origin-count 5
 ```
 
-### Output shape
+### Minimal batch comparison run
 
-The CLI returns JSON with the main fields below:
+1. Create a JSON file with benchmark cases, for example:
+
+```json
+[
+  {"case_id": "batch-case-1", "sample_name": "RAA"},
+  {"case_id": "batch-case-2", "sample_name": "RAA", "review_threshold_origin_count": 5}
+]
+```
+
+2. Run the batch comparison script:
+
+```bash
+cd /tmp/ai_actuary
+set -a && . ./.env && set +a
+python scripts/run_batch_benchmark.py \
+  --cases-json ./cases.json \
+  --artifact-root ./tmp/batch-run
+```
+
+### Governed run output shape
+
+The governed CLI returns JSON with the main fields below:
 
 - `route`
 - `worker_result`
 - `final_output`
 - `review_packet` when review is triggered
+
+### Batch output shape
+
+The batch script returns JSON with the main fields below:
+
+- `case_count`
+- `modes`
+- `mode_summaries`
+- `case_comparisons`
+- `comparison_report_path`
 
 ---
 

@@ -141,3 +141,25 @@ def test_run_batch_worker_returns_completed_summary(tmp_path):
     assert result.task_kind == "run_batch"
     assert result.metrics["case_count"] == 1
     assert result.artifact_paths["comparison_report"].endswith("comparison_report.json")
+
+
+def test_run_batch_benchmark_script_emits_json(tmp_path):
+    script_path = REPO_ROOT / "scripts" / "run_batch_benchmark.py"
+    helper = tmp_path / "invoke_batch_script.py"
+    cases_path = tmp_path / "cases.json"
+    cases_path.write_text(json.dumps([{"case_id": "batch-case-1", "sample_name": "RAA"}]), encoding="utf-8")
+    helper.write_text(
+        "import importlib.util, types\n"
+        f"script_spec=importlib.util.spec_from_file_location('run_batch_benchmark', {str(script_path)!r})\n"
+        "script=importlib.util.module_from_spec(script_spec)\n"
+        "script_spec.loader.exec_module(script)\n"
+        "script._load_batch_runner_module=lambda: types.SimpleNamespace(run_batch_benchmark=lambda **kwargs: {'ok': True, 'case_count': 1, 'artifact_root': kwargs['artifact_root']})\n"
+        f"script.main(['--cases-json', {str(cases_path)!r}, '--artifact-root', './tmp/batch-cli'])\n"
+    )
+
+    proc = __import__('subprocess').run([__import__('sys').executable, str(helper)], capture_output=True, text=True, check=False)
+
+    assert proc.returncode == 0
+    payload = json.loads(proc.stdout)
+    assert payload["ok"] is True
+    assert payload["case_count"] == 1
