@@ -70,7 +70,10 @@ def run_openai_governed_workflow(task: Any, *, agents_module=None, user_prompt: 
     result = sdk.Runner.run_sync(agent, prompt, run_config=run_config)
     final_output = result.final_output
     final_output_payload = final_output.model_dump(mode="json") if hasattr(final_output, "model_dump") else final_output
-    worker_result = agent.tools[0]()
+    tool_state = getattr(agent.tools[0], "_tool_state", {})
+    worker_result = tool_state.get("last_result")
+    if worker_result is None:
+        raise RuntimeError("Case-worker tool did not record a worker result during the OpenAI run.")
 
     return {
         "stage": "collect",

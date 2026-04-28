@@ -28,12 +28,28 @@ class FakeAgent:
         self.output_type = kwargs.get("output_type")
 
 
+class FakeAgentOutputSchema:
+    def __init__(self, output_type, strict_json_schema=False):
+        self.output_type = output_type
+        self.strict_json_schema = strict_json_schema
+
+
+class FakeFunctionTool:
+    def __init__(self, fn):
+        self._fn = fn
+        self._tool_state = getattr(fn, "_tool_state", None)
+
+    def invoke(self):
+        return self._fn()
+
+
 class FakeRunner:
     @staticmethod
     def run_sync(agent, prompt, run_config=None):
-        tool_output = agent.tools[0]()
+        tool_output = agent.tools[0].invoke()
         worker_status = tool_output["status"]
-        final_output = agent.output_type(
+        output_type = agent.output_type.output_type if hasattr(agent.output_type, "output_type") else agent.output_type
+        final_output = output_type(
             case_id=tool_output["case_id"],
             worker_status=worker_status,
             deterministic_method=tool_output["deterministic_result"]["method"],
@@ -47,12 +63,13 @@ class FakeRunner:
 
 def fake_function_tool(fn):
     fn._is_fake_tool = True
-    return fn
+    return FakeFunctionTool(fn)
 
 
 def _install_fake_agents_module(monkeypatch):
     fake_agents = types.SimpleNamespace(
         Agent=FakeAgent,
+        AgentOutputSchema=FakeAgentOutputSchema,
         Runner=FakeRunner,
         RunConfig=FakeRunConfig,
         function_tool=fake_function_tool,
@@ -125,7 +142,8 @@ def test_build_workflow_manager_agent_uses_sdk_agent_and_structured_output(monke
     assert workflow_agent.name == "Workflow Manager Agent"
     assert workflow_agent.model is not None
     assert workflow_agent.tools
-    assert workflow_agent.output_type.__name__ == "GovernedCaseSummary"
+    assert workflow_agent.output_type.output_type.__name__ == "GovernedCaseSummary"
+    assert workflow_agent.output_type.strict_json_schema is False
 
 
 def test_openai_case_worker_tool_returns_worker_result_payload(monkeypatch, tmp_path):
@@ -134,7 +152,7 @@ def test_openai_case_worker_tool_returns_worker_result_payload(monkeypatch, tmp_
     task = _make_task(tmp_path)
 
     tool = tools_module.build_openai_case_worker_tool(task)
-    result = tool()
+    result = tool.invoke()
 
     assert result["status"] == "completed"
     assert result["case_id"] == "openai-runtime-case"

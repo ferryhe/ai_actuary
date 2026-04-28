@@ -21,12 +21,16 @@ def run_case_worker_tool(task: Any):
 
 def build_openai_case_worker_tool(task: Any, *, agents_module=None):
     agents_sdk = agents_module or _import_agents_sdk()
+    tool_state = {"last_result": None}
 
     @agents_sdk.function_tool
     def run_case_worker_tool_bound() -> dict[str, Any]:
         result = run_case_worker_tool(task)
-        return result.model_dump(mode="json") if hasattr(result, "model_dump") else dict(result)
+        payload = result.model_dump(mode="json") if hasattr(result, "model_dump") else dict(result)
+        tool_state["last_result"] = payload
+        return payload
 
+    setattr(run_case_worker_tool_bound, "_tool_state", tool_state)
     return run_case_worker_tool_bound
 
 

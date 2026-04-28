@@ -57,6 +57,9 @@ def build_workflow_manager_agent(task: Any, *, agents_module=None, model: str | 
     tools_module = _load_sibling_module("tools.py", "openai_tools_runtime")
     config_module = _load_sibling_module("config.py", "openai_config_runtime")
     tool = tools_module.build_openai_case_worker_tool(task, agents_module=agents_sdk)
+    output_type = GovernedCaseSummary
+    if hasattr(agents_sdk, "AgentOutputSchema"):
+        output_type = agents_sdk.AgentOutputSchema(GovernedCaseSummary, strict_json_schema=False)
     return agents_sdk.Agent(
         name="Workflow Manager Agent",
         instructions=(
@@ -67,7 +70,7 @@ def build_workflow_manager_agent(task: Any, *, agents_module=None, model: str | 
         ),
         model=model or config_module.DEFAULT_PLANNER_CONFIG["model"],
         tools=[tool],
-        output_type=GovernedCaseSummary,
+        output_type=output_type,
     )
 
 
