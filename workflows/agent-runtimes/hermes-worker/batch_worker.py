@@ -21,10 +21,26 @@ def run_batch_worker(task: Any, *, batch_runner_module=None):
     )
 
     inputs = getattr(task, "inputs", {}) or {}
-    report = runner_module.run_batch_benchmark(
-        cases=list(inputs.get("cases", [])),
-        artifact_root=inputs.get("artifact_root") or getattr(task, "artifact_root", None) or (Path.cwd() / "artifacts" / "batch-runs"),
-    )
+    artifact_root = inputs.get("artifact_root") or getattr(task, "artifact_root", None) or (Path.cwd() / "artifacts" / "batch-runs")
+    try:
+        report = runner_module.run_batch_benchmark(
+            cases=list(inputs.get("cases", [])),
+            artifact_root=artifact_root,
+        )
+    except Exception as exc:
+        return WorkerResult(
+            task_id=getattr(task, "task_id", "unknown-batch-task"),
+            task_kind=SUPPORTED_TASK,
+            case_id=None,
+            run_id=getattr(task, "run_id", None),
+            status="failed",
+            summary="Batch benchmark failed.",
+            errors=[str(exc)],
+            artifact_paths={"artifact_root": str(artifact_root)},
+            metrics={},
+            artifact_manifest={},
+            worker_metadata={"adapter": "local-callable-batch"},
+        )
     return WorkerResult(
         task_id=getattr(task, "task_id", "unknown-batch-task"),
         task_kind=SUPPORTED_TASK,

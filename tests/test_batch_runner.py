@@ -105,6 +105,25 @@ def test_run_batch_benchmark_generates_comparison_report(tmp_path):
     assert Path(saved_report["mode_artifact_manifests"]["governed_workflow"][0]).parent.parent.name == "governed_workflow"
 
 
+def test_run_batch_benchmark_records_failed_mode_and_still_writes_report(tmp_path):
+    batch_runner = _load_module("batch_runner_module_fail", BATCH_RUNNER_PATH)
+
+    def failing_governed_runner(task, *, user_prompt=None):
+        raise RuntimeError("governed runner unavailable")
+
+    report = batch_runner.run_batch_benchmark(
+        cases=[{"case_id": "batch-case-1", "sample_name": "RAA"}],
+        artifact_root=tmp_path,
+        governed_runner=failing_governed_runner,
+    )
+
+    assert Path(report["comparison_report_path"]).exists()
+    governed_result = report["mode_results"]["governed_workflow"][0]
+    assert governed_result["status"] == "failed"
+    assert "RuntimeError" in governed_result["errors"][0]
+    assert report["mode_artifact_manifests"]["governed_workflow"] == []
+
+
 def test_run_batch_worker_returns_completed_summary(tmp_path):
     task_contracts = _load_module("batch_task_contracts", HERMES_WORKER_DIR / "task_contracts.py")
     batch_worker = _load_module("batch_worker_module", HERMES_WORKER_DIR / "batch_worker.py")
@@ -141,6 +160,34 @@ def test_run_batch_worker_returns_completed_summary(tmp_path):
     assert result.task_kind == "run_batch"
     assert result.metrics["case_count"] == 1
     assert result.artifact_paths["comparison_report"].endswith("comparison_report.json")
+
+
+def test_run_batch_worker_returns_failed_worker_result_on_batch_error(tmp_path):
+    task_contracts = _load_module("batch_task_contracts_fail", HERMES_WORKER_DIR / "task_contracts.py")
+    batch_worker = _load_module("batch_worker_module_fail", HERMES_WORKER_DIR / "batch_worker.py")
+
+    task = task_contracts.WorkerTask(
+        task_id="batch-task-err-001",
+        task_kind="run_batch",
+        objective="Run benchmark batch",
+        inputs={
+            "artifact_root": str(tmp_path),
+            "cases": [{"case_id": "batch-case-1", "sample_name": "RAA"}],
+        },
+    )
+
+    result = batch_worker.run_batch_worker(
+        task,
+        batch_runner_module=type(
+            "FailingBatchRunnerModule",
+            (),
+            {"run_batch_benchmark": staticmethod(lambda **kwargs: (_ for _ in ()).throw(RuntimeError("batch runner exploded")))},
+        ),
+    )
+
+    assert result.status == "failed"
+    assert "batch runner exploded" in result.errors[0]
+    assert result.artifact_paths["artifact_root"].endswith(str(tmp_path))
 
 
 def test_run_batch_benchmark_script_emits_json(tmp_path):
