@@ -19,10 +19,11 @@ def load_manifest(manifest_path: str | Path) -> RunArtifactManifest:
 
 
 def replay_case_from_manifest(manifest_path: str | Path) -> dict[str, Any]:
-    manifest = load_manifest(manifest_path)
-    case_input_payload = _read_json(manifest.artifact_paths["case_input"])
-    saved_result_payload = _read_json(manifest.artifact_paths["deterministic_result"])
-    saved_constitution_payload = _read_json(manifest.artifact_paths["constitution_check"])
+    manifest_file = Path(manifest_path).expanduser().resolve()
+    manifest = load_manifest(manifest_file)
+    case_input_payload = _read_artifact_json(manifest, manifest_file, "case_input")
+    saved_result_payload = _read_artifact_json(manifest, manifest_file, "deterministic_result")
+    saved_constitution_payload = _read_artifact_json(manifest, manifest_file, "constitution_check")
 
     case_input = ReservingCaseInput.model_validate(case_input_payload)
     replayed_result = calculate_deterministic_reserve(case_input_payload).model_dump(mode="json")
@@ -48,9 +49,10 @@ def compare_repeatability(manifest_paths: list[str | Path]) -> dict[str, Any]:
     runs: list[dict[str, Any]] = []
     case_ids: set[str] = set()
     for manifest_path in manifest_paths:
-        manifest = load_manifest(manifest_path)
-        deterministic_payload = _read_json(manifest.artifact_paths["deterministic_result"])
-        constitution_payload = _read_json(manifest.artifact_paths["constitution_check"])
+        manifest_file = Path(manifest_path).expanduser().resolve()
+        manifest = load_manifest(manifest_file)
+        deterministic_payload = _read_artifact_json(manifest, manifest_file, "deterministic_result")
+        constitution_payload = _read_artifact_json(manifest, manifest_file, "constitution_check")
         case_ids.add(manifest.case_id)
         runs.append(
             {
@@ -64,16 +66,36 @@ def compare_repeatability(manifest_paths: list[str | Path]) -> dict[str, Any]:
     if len(case_ids) != 1:
         raise ValueError("compare_repeatability requires manifests for exactly one case_id")
 
-    ibnrs = [float(run["reserve_summary"].get("ibnr")) for run in runs if run["reserve_summary"].get("ibnr") is not None]
+    ibnr_values = [
+        None if run["reserve_summary"].get("ibnr") is None else float(run["reserve_summary"]["ibnr"])
+        for run in runs
+    ]
+    present_ibnrs = [ibnr for ibnr in ibnr_values if ibnr is not None]
     statuses = [str(run["status"]) for run in runs]
     return {
         "case_id": next(iter(case_ids)),
         "run_count": len(runs),
         "all_statuses": statuses,
-        "stable_ibnr": len(set(ibnrs)) <= 1,
-        "ibnr_values": ibnrs,
+        "stable_ibnr": len(present_ibnrs) == len(ibnr_values) and len(set(present_ibnrs)) <= 1,
+        "ibnr_values": ibnr_values,
         "runs": runs,
     }
+
+
+
+def _read_artifact_json(manifest: RunArtifactManifest, manifest_path: Path, artifact_name: str) -> dict[str, Any]:
+    artifact_path = _resolve_artifact_path(manifest, manifest_path, manifest.artifact_paths[artifact_name])
+    return _read_json(artifact_path)
+
+
+
+def _resolve_artifact_path(manifest: RunArtifactManifest, manifest_path: Path, artifact_path: str | Path) -> Path:
+    path = Path(artifact_path).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    if manifest.artifact_root:
+        return (Path(manifest.artifact_root).expanduser().resolve() / path).resolve()
+    return (manifest_path.resolve().parent / path).resolve()
 
 
 

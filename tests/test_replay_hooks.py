@@ -114,7 +114,74 @@ def test_compare_repeatability_summarizes_multiple_manifests(tmp_path):
     assert summary["run_count"] == 2
     assert summary["all_statuses"] == ["completed", "completed"]
     assert summary["stable_ibnr"] is True
+    assert summary["ibnr_values"] == [52135.228261210155, 52135.228261210155]
     assert len(summary["runs"]) == 2
+
+
+
+def test_replay_case_from_manifest_resolves_relative_artifact_paths(tmp_path):
+    case_worker = _load_module("replay_relative_case_worker", HERMES_WORKER_DIR / "case_worker.py")
+
+    task = _make_run_case_task(
+        task_id="replay-relative-001",
+        case_id="replay-relative-case",
+        artifact_dir=tmp_path / "replay-relative-case",
+    )
+    result = case_worker.run_case_worker(task)
+    manifest_path = Path(result.artifact_paths["run_manifest"])
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifact_root = Path(manifest_payload["artifact_root"])
+    manifest_payload["artifact_paths"] = {
+        name: str(Path(path).resolve().relative_to(artifact_root)) for name, path in manifest_payload["artifact_paths"].items()
+    }
+    manifest_path.write_text(json.dumps(manifest_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "replay_case.py"), "--manifest-path", str(manifest_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd="/tmp",
+    )
+
+    assert proc.returncode == 0
+    payload = json.loads(proc.stdout)
+    assert payload["case_id"] == "replay-relative-case"
+    assert payload["matches_saved_result"] is True
+
+
+
+def test_compare_repeatability_marks_missing_ibnr_as_unstable(tmp_path):
+    case_worker = _load_module("repeatability_missing_ibnr_worker", HERMES_WORKER_DIR / "case_worker.py")
+    replay_module = _load_module("repeatability_missing_ibnr_module", REPLAY_PATH)
+
+    run_one = case_worker.run_case_worker(
+        _make_run_case_task(
+            task_id="repeat-missing-001",
+            case_id="repeat-missing-case",
+            artifact_dir=tmp_path / "repeat-missing-one",
+        )
+    )
+    run_two = case_worker.run_case_worker(
+        _make_run_case_task(
+            task_id="repeat-missing-002",
+            case_id="repeat-missing-case",
+            artifact_dir=tmp_path / "repeat-missing-two",
+        )
+    )
+
+    deterministic_path = Path(run_two.artifact_paths["deterministic_result"])
+    deterministic_payload = json.loads(deterministic_path.read_text(encoding="utf-8"))
+    deterministic_payload["reserve_summary"].pop("ibnr", None)
+    deterministic_path.write_text(json.dumps(deterministic_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    summary = replay_module.compare_repeatability(
+        [run_one.artifact_paths["run_manifest"], run_two.artifact_paths["run_manifest"]]
+    )
+
+    assert summary["stable_ibnr"] is False
+    assert summary["ibnr_values"] == [52135.228261210155, None]
+
 
 
 def test_replay_case_script_emits_json(tmp_path):
