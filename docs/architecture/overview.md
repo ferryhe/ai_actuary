@@ -10,8 +10,11 @@ This repo follows a three-layer composition model:
 
 This branch only establishes the minimum project skeleton needed for later implementation.
 
+The deterministic calculator boundary now explicitly targets **CAS official `chainladder-python`** as the underlying reserving tool, instead of reimplementing reserve methods inside this repo.
+
 ### CAS Core
 - `src/reserving_workflow/schemas/core.py`
+- `src/reserving_workflow/calculators/`
 - `src/reserving_workflow/artifacts/`
 - `src/reserving_workflow/constitution/`
 - `src/reserving_workflow/review/`

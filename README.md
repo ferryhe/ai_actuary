@@ -64,6 +64,7 @@
   - 最小 Python 项目配置；当前仅包含 `pydantic` 与 `pytest`
 - `src/reserving_workflow/`
   - `schemas/`：CAS Core 的基础 schema
+  - `calculators/`：基于 **CAS 官方 `chainladder-python`** 的 deterministic calculator adapter boundary
   - `artifacts/`、`constitution/`、`review/`、`evaluation/`：最小模块边界
 - `workflows/agent-runtimes/openai-agents/`
   - planner 侧占位文件：`agents.py`、`tools.py`、`runner.py`、`routing.py`、`config.py`

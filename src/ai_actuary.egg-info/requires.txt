@@ -1,4 +1,0 @@
-pydantic<3,>=2.7
-
-[dev]
-pytest<9,>=8

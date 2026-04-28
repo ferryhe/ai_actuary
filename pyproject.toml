@@ -9,6 +9,7 @@ description = "AI Actuary project skeleton with CAS Core, OpenAI Planner, and He
 requires-python = ">=3.11"
 dependencies = [
   "pydantic>=2.7,<3",
+  "chainladder>=0.9,<1",
 ]
 
 [project.optional-dependencies]
