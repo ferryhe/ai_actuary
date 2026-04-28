@@ -105,20 +105,34 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
 def _load_task_contracts_module():
     return _load_module(
         "operator_task_contracts",
-        Path(__file__).resolve().parents[2] / "workflows" / "agent-runtimes" / "hermes-worker" / "task_contracts.py",
+        _workflow_source_path("agent-runtimes", "hermes-worker", "task_contracts.py"),
     )
 
 
 def _load_runner_module():
     return _load_module(
         "operator_openai_runner",
-        Path(__file__).resolve().parents[2] / "workflows" / "agent-runtimes" / "openai-agents" / "runner.py",
+        _workflow_source_path("agent-runtimes", "openai-agents", "runner.py"),
     )
+
+
+def _workflow_source_path(*relative_parts: str) -> Path:
+    repo_root = Path(__file__).resolve().parents[2]
+    path = repo_root.joinpath("workflows", *relative_parts)
+    if not path.is_file():
+        raise FileNotFoundError(
+            "Required workflow source file is not available at "
+            f"{path}. This operator entrypoint loads workflow modules from the repository's "
+            "workflows/ directory, which may be missing in an installed package. Run from a "
+            "repository checkout or install the project in editable mode so workflows/ is present."
+        )
+    return path
 
 
 def _load_module(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load module spec for {path}")
     module = importlib.util.module_from_spec(spec)
-    assert spec is not None and spec.loader is not None
     spec.loader.exec_module(module)
     return module

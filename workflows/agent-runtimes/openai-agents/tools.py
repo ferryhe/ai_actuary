@@ -48,7 +48,6 @@ def get_tool_registry() -> dict[str, Callable[[Any], Any]]:
     return {
         "run_case_worker": run_case_worker_tool,
         "run_batch_worker": run_batch_worker_tool,
-        "build_review_packet": build_review_packet_tool,
     }
 
 
@@ -68,8 +67,11 @@ def _load_review_worker_module():
 
 def _load_worker_module(filename: str, module_name: str):
     worker_path = Path(__file__).resolve().parents[1] / "hermes-worker" / filename
+    if not worker_path.is_file():
+        raise FileNotFoundError(f"Worker module file not found: {worker_path}")
     spec = importlib.util.spec_from_file_location(module_name, worker_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load worker module spec for {worker_path}")
     module = importlib.util.module_from_spec(spec)
-    assert spec is not None and spec.loader is not None
     spec.loader.exec_module(module)
     return module

@@ -93,6 +93,28 @@ def test_run_operator_flow_returns_governed_result(tmp_path):
     assert result["final_output"]["deterministic_method"] == "chainladder"
 
 
+def test_workflow_source_path_raises_clear_error_when_workflow_file_is_missing(monkeypatch):
+    module = _load_module()
+
+    missing_root = ROOT / "missing-repo-root"
+
+    class FakeResolvedPath:
+        @property
+        def parents(self):
+            return [None, None, missing_root]
+
+    monkeypatch.setattr(module.Path, "resolve", lambda self: FakeResolvedPath())
+
+    try:
+        module._workflow_source_path("agent-runtimes", "openai-agents", "runner.py")
+    except FileNotFoundError as exc:
+        message = str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("Expected _workflow_source_path to raise FileNotFoundError")
+
+    assert "workflows/" in message
+    assert "editable mode" in message
+
 
 def test_run_governed_case_script_emits_json(tmp_path):
     helper = tmp_path / "invoke_operator_script.py"

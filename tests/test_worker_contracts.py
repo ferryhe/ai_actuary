@@ -23,7 +23,7 @@ def test_worker_task_and_result_serialization():
         objective="Run governed case",
         inputs={"mode": "governed"},
         allowed_actions=["calculator_call"],
-        required_artifacts=["run_manifest.json"],
+        required_artifacts=["run_manifest"],
     )
     result = module.WorkerResult(
         task_id="task-001",

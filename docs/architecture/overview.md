@@ -40,6 +40,6 @@ The deterministic calculator boundary now explicitly targets **CAS official `cha
 - benchmark execution logic
 - artifact persistence workflow
 
-The OpenAI planner side now includes a **minimal real OpenAI Agents SDK governed workflow entry point** for single-case execution, but it still keeps Hermes on the local callable adapter and does not yet cover review packets, batch workflows, or production runtime operations.
+The OpenAI planner side now includes a **minimal real OpenAI Agents SDK governed workflow entry point** for single-case execution. It still keeps Hermes on the local callable adapter, now covers review-packet generation for `needs_review` outcomes, and does not yet cover batch workflows or production runtime operations.
 
 See `docs/plans/openai-hermes-composition-design.md` for the full design and phased project plan.

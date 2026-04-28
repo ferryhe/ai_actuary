@@ -110,9 +110,12 @@ def _import_agents_sdk():
 
 def _load_review_worker_module():
     module_path = Path(__file__).resolve().parents[1] / "hermes-worker" / "review_worker.py"
+    if not module_path.is_file():
+        raise FileNotFoundError(f"Review worker module file not found: {module_path}")
     spec = importlib.util.spec_from_file_location("hermes_review_worker", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load review worker module spec for {module_path}")
     module = importlib.util.module_from_spec(spec)
-    assert spec is not None and spec.loader is not None
     spec.loader.exec_module(module)
     return module
 
