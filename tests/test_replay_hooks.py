@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -113,3 +115,67 @@ def test_compare_repeatability_summarizes_multiple_manifests(tmp_path):
     assert summary["all_statuses"] == ["completed", "completed"]
     assert summary["stable_ibnr"] is True
     assert len(summary["runs"]) == 2
+
+
+def test_replay_case_script_emits_json(tmp_path):
+    case_worker = _load_module("replay_case_worker_cli", HERMES_WORKER_DIR / "case_worker.py")
+    script_path = REPO_ROOT / "scripts" / "replay_case.py"
+
+    task = _make_run_case_task(
+        task_id="replay-script-001",
+        case_id="replay-script-case",
+        artifact_dir=tmp_path / "replay-script-case",
+    )
+    result = case_worker.run_case_worker(task)
+
+    proc = subprocess.run(
+        [sys.executable, str(script_path), "--manifest-path", result.artifact_paths["run_manifest"]],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    payload = json.loads(proc.stdout)
+    assert payload["case_id"] == "replay-script-case"
+    assert payload["matches_saved_result"] is True
+
+
+def test_compare_repeatability_script_emits_json(tmp_path):
+    case_worker = _load_module("repeatability_case_worker_cli", HERMES_WORKER_DIR / "case_worker.py")
+    script_path = REPO_ROOT / "scripts" / "compare_repeatability.py"
+
+    run_one = case_worker.run_case_worker(
+        _make_run_case_task(
+            task_id="repeat-script-001",
+            case_id="repeat-script-case",
+            artifact_dir=tmp_path / "repeat-script-one",
+        )
+    )
+    run_two = case_worker.run_case_worker(
+        _make_run_case_task(
+            task_id="repeat-script-002",
+            case_id="repeat-script-case",
+            artifact_dir=tmp_path / "repeat-script-two",
+        )
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(script_path),
+            "--manifest-path",
+            run_one.artifact_paths["run_manifest"],
+            "--manifest-path",
+            run_two.artifact_paths["run_manifest"],
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    payload = json.loads(proc.stdout)
+    assert payload["case_id"] == "repeat-script-case"
+    assert payload["run_count"] == 2
+    assert payload["stable_ibnr"] is True
