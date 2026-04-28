@@ -618,22 +618,29 @@ tests/
 2. 测试命令与结果
 3. 下一步建议
 
-### Prompt 2：实现 deterministic calculator boundary
+### Prompt 2：接入 chainladder-python 作为 deterministic calculator boundary
 
-基于现有仓库，实现 deterministic reserving calculator boundary，只做可测试的最小版本，不做复杂精算算法扩展。
+基于现有仓库，实现 deterministic reserving calculator boundary，但**不要自研新的准备金计算模块**。请直接采用 CAS 官方开源项目 `chainladder-python` 作为外部精算计算工具，通过适配层接入本项目。
+
+参考来源：
+- `https://github.com/casact/chainladder-python`
+- `references/upstream/cas/Proposal/CAS-Research-Proposal.md`
+- `references/upstream/cas/docs/architecture.md`
 
 要求：
-- 在 `src/reserving_workflow/calculators/` 中加入最小 calculator interface。
-- 提供一个可重复、可测试的 mock reserving calculator，输入 case data，输出 `DeterministicReserveResult`。
+- 在 `src/reserving_workflow/calculators/` 中加入最小 calculator interface / adapter boundary。
+- 新实现必须以 `chainladder-python` 为底层计算引擎，把它当作工具依赖来调用，而不是重写 Chainladder / Mack / BF / Cape Cod 的核心算法。
+- 第一版只需要把 adapter 设计清楚，并至少接通一个最小可测试 reserving path（例如 Chainladder，若样例允许也可预留 MackChainladder / BornhuetterFerguson 扩展位）。
+- 输出仍统一映射到本项目的 `DeterministicReserveResult`。
 - 输出字段至少包括 reserve summary、关键 diagnostics、validation-ready metadata。
-- 保持 calculator 与任何 agent runtime 解耦。
-- 为 calculator 写单元测试，覆盖正常输入、缺字段、非法值。
-- 如果已有相关结构，优先复用，不要重复造轮子。
+- 保持 calculator adapter 与 OpenAI Planner / Hermes Worker 解耦。
+- 为 adapter 写单元测试，覆盖正常输入、缺字段、非法值；测试重点是“本项目 contract 是否正确”，不是重复验证 chainladder-python 自身算法正确性。
+- 如果需要增加依赖或文档，请只做当前步骤所需最小修改。
 
 完成后输出：
 1. 修改文件列表
 2. 测试命令与结果
-3. 当前 deterministic boundary 还缺什么
+3. 当前 chainladder adapter boundary 还缺什么
 
 ### Prompt 3：实现 constitution rule engine v1
 
