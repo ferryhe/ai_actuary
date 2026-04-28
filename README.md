@@ -1,83 +1,70 @@
-# AI 精算部 (AI Actuary Department)
+# AI 精算部 / AI Actuary
 
-> 采用各工具 Skill 组合方式构建的智能精算部门，让 AI 覆盖精算工作的全流程。
-
----
-
-## 项目简介
-
-本项目以 **工具 Skill 组合（Tool-Skill Composition）** 为核心理念，将多个专业 AI 能力模块串联起来，模拟一个完整的精算部门的日常工作流程。每个 Skill 负责一个独立的精算职能，通过统一的调度层协作完成复杂的精算任务。
+> 采用 **CAS Core + OpenAI Planner + Hermes Workers** 组合架构构建的智能精算系统。
 
 ---
 
-## 架构概览
+## 当前定位
 
-```
-用户 / 业务系统
-      │
-      ▼
-┌─────────────────────────────┐
-│       AI 精算部 调度层        │  ← 任务拆解 & Skill 路由
-└─────────────────────────────┘
-      │
-      ├── 数据处理 Skill        →  数据清洗、结构化、异常检测
-      ├── 定价分析 Skill        →  费率厘定、风险定价模型
-      ├── 准备金计算 Skill      →  IBNR / IBNER 估算、链梯法
-      ├── 偿付能力分析 Skill    →  资本充足率、压力测试
-      ├── 报告生成 Skill        →  监管报告、管理报告自动生成
-      └── 知识问答 Skill        →  精算准则、法规、行业知识 Q&A
-```
+这个仓库不再只是一个泛化的 “Skill 组合” 设想，而是一个明确的研究与工程项目工作区：
+
+- **CAS Core**：保存 deterministic reserving logic、constitution、benchmark、artifact schema；
+- **OpenAI Planner**：使用 OpenAI Agents Python 承担规划、路由、治理决策；
+- **Hermes Workers**：使用 Hermes 承担执行、打包、通知、流程经验沉淀。
+
+一句话：**OpenAI 负责想清楚做什么，Hermes 负责把事情做完，CAS Core 负责什么算对。**
 
 ---
 
-## 核心 Skill 说明
+## 仓库结构
 
-| Skill | 描述 | 主要技术 |
-|---|---|---|
-| **数据处理** | 对承保、理赔等原始数据进行清洗与结构化 | Python / Pandas / SQL |
-| **定价分析** | 基于历史损失数据与风险因子进行费率厘定 | GLM / 机器学习 / LLM 辅助 |
-| **准备金计算** | 使用链梯法等精算方法估算未决赔款准备金 | 链梯法 / BF 法 / LLM 校验 |
-| **偿付能力分析** | 评估资本充足率并执行压力测试与情景分析 | 蒙特卡洛模拟 / 风险模型 |
-| **报告生成** | 将计算结果自动生成符合监管要求的报告 | LLM / 模板引擎 |
-| **知识问答** | 回答精算准则、监管法规及行业标准相关问题 | RAG / 向量数据库 / LLM |
-
----
-
-## 快速开始
-
-```bash
-# 克隆仓库
-git clone https://github.com/ferryhe/ai_actuary.git
-cd ai_actuary
-
-# 安装依赖（后续补充）
-pip install -r requirements.txt
-
-# 运行示例（后续补充）
-python main.py
+```text
+.
+├── docs/
+│   ├── architecture/
+│   └── plans/
+├── prompts/
+│   └── codex/
+└── references/
+    └── upstream/
+        ├── cas/
+        ├── hermes/
+        └── openai-agents/
 ```
 
----
+### 关键内容
 
-## 路线图
-
-- [ ] 搭建调度层框架（Skill Router）
-- [ ] 实现数据处理 Skill
-- [ ] 实现定价分析 Skill
-- [ ] 实现准备金计算 Skill
-- [ ] 实现偿付能力分析 Skill
-- [ ] 实现报告生成 Skill
-- [ ] 实现知识问答 Skill
-- [ ] 集成测试 & 示例 Demo
-
----
-
-## 贡献
-
-欢迎提交 Issue 或 Pull Request！
+- `docs/plans/openai-hermes-composition-design.md`
+  - 组合式设计、角色定义、工作流、项目阶段计划
+- `prompts/codex/step-by-step-prompts.md`
+  - 分步骤交给 Codex 的开发提示词
+- `references/upstream/cas/`
+  - CAS 项目原始 proposal、architecture、plan、benchmark 说明
+- `references/upstream/openai-agents/`
+  - OpenAI Agents Python 核心文档快照
+- `references/upstream/hermes/`
+  - Hermes 核心能力与开发文档快照
 
 ---
 
-## 许可证
+## 先看什么
 
-[MIT](LICENSE)
+1. 看 `docs/plans/openai-hermes-composition-design.md`
+2. 看 `docs/architecture/overview.md`
+3. 看 `prompts/codex/step-by-step-prompts.md`
+4. 需要背景时回查 `references/upstream/*`
+
+---
+
+## 下一步开发方向
+
+- 在本仓库中创建真正的 `src/`, `workflows/`, `benchmarks/`, `tests/` 代码骨架
+- 先实现 deterministic calculator boundary
+- 再实现 constitution rule engine v1
+- 然后接 Hermes worker contract 与 OpenAI planner skeleton
+
+---
+
+## 说明
+
+当前提交重点是把 **计划、结构、参考材料** 放进一个独立项目仓库，便于后续用 Codex / Hermes 逐步实现。
