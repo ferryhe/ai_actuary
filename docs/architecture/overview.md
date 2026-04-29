@@ -1,45 +1,38 @@
-# AI Actuary Combined Architecture
+# AI Actuary Architecture Overview
 
-This repo follows a three-layer composition model:
+This repository currently operates as a three-layer governed workflow prototype:
 
-1. **CAS Core** — deterministic actuarial truth, constitution rules, benchmark schemas, artifacts.
-2. **OpenAI Planner** — workflow planning, routing, guardrails, orchestration.
-3. **Hermes Workers** — execution, packaging, notifications, recurring operations, process memory.
+1. **CAS Core** — deterministic actuarial truth, constitution rules, replay helpers, and benchmark comparison logic.
+2. **OpenAI Planner** — governed routing and orchestration through the OpenAI Agents SDK.
+3. **Hermes Workers** — task execution, artifact packaging, review flow generation, batch worker behavior, and operator-facing runtime entry.
 
-## Current Skeleton Scope
+## Current Operator Paths
 
-This branch only establishes the minimum project skeleton needed for later implementation.
+- single-case governed CLI: `scripts/run_governed_case.py`
+- batch benchmark CLI: `scripts/run_batch_benchmark.py`
+- replay CLI: `scripts/replay_case.py`
+- repeatability CLI: `scripts/compare_repeatability.py`
 
-The deterministic calculator boundary now explicitly targets **CAS official `chainladder-python`** as the underlying reserving tool, instead of reimplementing reserve methods inside this repo.
+## Responsibility Split
 
-### CAS Core
-- `src/reserving_workflow/schemas/core.py`
-- `src/reserving_workflow/calculators/`
-- `src/reserving_workflow/artifacts/`
-- `src/reserving_workflow/constitution/`
-- `src/reserving_workflow/review/`
-- `src/reserving_workflow/evaluation/`
+### Human
+- prepares environment and secrets
+- launches the desired workflow CLI
+- reads artifacts and review outputs
+- decides approvals, follow-up, and code changes
 
-### OpenAI Planner
-- `workflows/agent-runtimes/openai-agents/agents.py`
-- `workflows/agent-runtimes/openai-agents/tools.py`
-- `workflows/agent-runtimes/openai-agents/runner.py`
-- `workflows/agent-runtimes/openai-agents/routing.py`
-- `workflows/agent-runtimes/openai-agents/config.py`
+### Agent
+- routes and executes workflows
+- writes artifact outputs and manifests
+- generates review flow, replay, and comparison results
+- keeps runtime behavior aligned with the contract boundary
 
-### Hermes Workers
-- `workflows/agent-runtimes/hermes-worker/task_contracts.py`
-- `workflows/agent-runtimes/hermes-worker/case_worker.py`
-- `workflows/agent-runtimes/hermes-worker/batch_worker.py`
-- `workflows/agent-runtimes/hermes-worker/review_worker.py`
-- `workflows/agent-runtimes/hermes-worker/artifact_packager.py`
+## Current Boundaries
 
-## Intentionally Out of Scope for This Step
+- CAS Core still owns numeric reserve truth.
+- OpenAI planner still owns planning and orchestration only.
+- Hermes workers still own execution plus local artifact production.
+- Review flow exists today and produces `review_packet.json` and `review_packet.md`.
+- Replay and repeatability exist today and are driven by `run_manifest.json`.
 
-- real Hermes CLI/API integration
-- benchmark execution logic
-- artifact persistence workflow
-
-The OpenAI planner side now includes a **minimal real OpenAI Agents SDK governed workflow entry point** for single-case execution. It still keeps Hermes on the local callable adapter, now covers review-packet generation for `needs_review` outcomes, and does not yet cover batch workflows or production runtime operations.
-
-See `docs/plans/openai-hermes-composition-design.md` for the full design and phased project plan.
+For fuller detail, see `docs/architecture.md` and `docs/project-plan.md`.

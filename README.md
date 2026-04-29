@@ -1,16 +1,16 @@
 # AI Actuary
 
-> A compositional actuarial-agent project built around **CAS Core + OpenAI Planner + Hermes Workers**.
+> A compositional actuarial-agent workspace built around **CAS Core + OpenAI Planner + Hermes Workers**.
 
 ---
 
 ## Project Positioning
 
-This repository is a focused research and engineering workspace, not a generic skill-composition sandbox.
+This repository is a governed actuarial workflow prototype.
 
-- **CAS Core** holds deterministic reserving logic, constitution rules, benchmark schemas, and artifact contracts.
-- **OpenAI Planner** handles planning, routing, and governed orchestration through the OpenAI Agents SDK.
-- **Hermes Workers** handle execution, packaging, operator flows, and future notification/runtime operations.
+- **CAS Core** owns deterministic actuarial truth, governance rules, benchmark scoring, and artifact contracts.
+- **OpenAI Planner** owns planning, routing, and governed orchestration.
+- **Hermes Workers** own execution loops, artifact packaging, review handoff generation, and operator-facing runtime flows.
 
 One-line model:
 
@@ -22,6 +22,7 @@ One-line model:
 
 ```text
 .
+├── benchmarks/
 ├── docs/
 │   ├── architecture/
 │   ├── plans/
@@ -36,143 +37,96 @@ One-line model:
 └── workflows/
 ```
 
-### Key Files
+### Key handoff docs
 
-- `docs/plans/openai-hermes-composition-design.md`
-  - Full architecture, role boundaries, workflow design, and phased roadmap.
-- `prompts/codex/step-by-step-prompts.md`
-  - The implementation prompt sequence used to build the project incrementally.
-- `docs/architecture/overview.md`
-  - Concise architecture summary.
-- `scripts/run_governed_case.py`
-  - Operator-facing CLI entrypoint for a single governed case run.
-- `references/upstream/cas/`
-  - Proposal, architecture, and benchmark context from the CAS-side source materials.
-- `references/upstream/openai-agents/`
-  - OpenAI Agents SDK documentation snapshot.
-- `references/upstream/hermes/`
-  - Hermes documentation snapshot.
+- `docs/architecture.md` — current three-layer architecture and runtime boundaries
+- `docs/project-plan.md` — completed scope, remaining gaps, and next recommended steps
+- `docs/architecture/overview.md` — short architecture summary for quick orientation
+- `docs/plans/openai-hermes-composition-design.md` — full original design and phased roadmap
+- `prompts/codex/step-by-step-prompts.md` — staged implementation prompt sequence
 
 ---
 
-## What To Read First
-
-1. `docs/plans/openai-hermes-composition-design.md`
-2. `docs/architecture/overview.md`
-3. `prompts/codex/step-by-step-prompts.md`
-4. `docs/reports/current-workflow-report.md` — current actuarial run report
-5. `references/upstream/*` when deeper context is needed
-
----
-
-## Current Implementation Scope
-
-The repository now contains a working minimum governed single-case flow.
+## Current Working Surface
 
 ### CAS Core
 
-- Core schemas under `src/reserving_workflow/schemas/`
-- Deterministic calculator adapter under `src/reserving_workflow/calculators/`
-- Constitution engine under `src/reserving_workflow/constitution/`
+- `src/reserving_workflow/schemas/`
+- `src/reserving_workflow/calculators/`
+- `src/reserving_workflow/constitution/`
+- `src/reserving_workflow/artifacts/`
+- `src/reserving_workflow/evaluation/`
 
 ### OpenAI Planner
 
-- Real OpenAI Agents SDK governed workflow entrypoint
-- Workflow manager agent definition
-- Planner routing and tool wrappers
-- Minimal tracing/run configuration
+- `workflows/agent-runtimes/openai-agents/agents.py`
+- `workflows/agent-runtimes/openai-agents/routing.py`
+- `workflows/agent-runtimes/openai-agents/tools.py`
+- `workflows/agent-runtimes/openai-agents/runner.py`
 
 ### Hermes Workers
 
-- Worker task/result contracts
-- Single-case worker loop
-- Artifact packager
-- Review packet worker
-
-### Operator Entry
-
-- A CLI operator can run a governed case directly from:
-  - `scripts/run_governed_case.py`
+- `workflows/agent-runtimes/hermes-worker/task_contracts.py`
+- `workflows/agent-runtimes/hermes-worker/case_worker.py`
+- `workflows/agent-runtimes/hermes-worker/review_worker.py`
+- `workflows/agent-runtimes/hermes-worker/batch_worker.py`
+- `workflows/agent-runtimes/hermes-worker/artifact_packager.py`
 
 ---
 
-## Current Capabilities
+## Operator CLI Entry Points
 
-The current branch supports:
+All current operator-facing entry points are machine-readable JSON CLIs.
 
-- deterministic reserving via the CAS `chainladder-python` boundary
-- governed single-case execution through OpenAI Agents SDK
-- worker-produced narrative draft stubs
-- constitution checks with pass / fail / review-required states
-- artifact generation for the case run
-- review packet generation when review is triggered
-- operator-facing CLI execution for pass and review scenarios
+1. `scripts/run_governed_case.py`
+2. `scripts/run_batch_benchmark.py`
+3. `scripts/replay_case.py`
+4. `scripts/compare_repeatability.py`
 
 ---
 
-## Intentionally Out of Scope So Far
+## Step-by-Step Operating Guide
 
-The current branch does **not** yet include:
+### A. Run one governed case
 
-- real Hermes CLI/API runtime integration for worker orchestration
-- benchmark batch execution
-- replay and repeatability hooks
-- persistent artifact store beyond local files
-- messaging-platform delivery of review packets
-
----
-
-## Environment and Runtime Setup
-
-### Minimum project setup
+**Step 1 — Human:** prepare local environment.
 
 ```bash
 cd /tmp/ai_actuary
 pip install -e .
-export OPENAI_API_KEY=***
-```
-
-If you keep the key in a repository-local `.env` file:
-
-```bash
-cd /tmp/ai_actuary
 set -a && . ./.env && set +a
 ```
 
-### What must be configured when
-
-- **OpenAI Agents SDK** is required from the governed planner stage onward.
-- **Hermes full runtime integration** is not yet required for the current local callable worker flow.
-- **Messaging / review delivery integration** becomes relevant after the review packet stage when packets need to leave the local filesystem.
-
----
-
-## Operator CLI Usage
-
-### Minimal governed pass run
+**Step 2 — Human:** start the single-case CLI.
 
 ```bash
-cd /tmp/ai_actuary
-set -a && . ./.env && set +a
 python scripts/run_governed_case.py \
   --case-id demo-case \
   --artifact-dir ./tmp/demo-case
 ```
 
-### Minimal review-triggered run
+**Step 3 — Agent system:** the OpenAI planner routes the governed run and Hermes worker executes the case.
+
+**Step 4 — Human:** inspect artifacts under `./tmp/demo-case/`, starting with `run_manifest.json`.
+
+### B. Trigger review flow
+
+**Step 1 — Human:** run the same workflow with a tighter review threshold.
 
 ```bash
-cd /tmp/ai_actuary
-set -a && . ./.env && set +a
 python scripts/run_governed_case.py \
   --case-id review-case \
   --artifact-dir ./tmp/review-case \
   --review-threshold-origin-count 5
 ```
 
-### Minimal batch comparison run
+**Step 2 — Agent system:** the worker produces governance outputs and, when required, writes `review_packet.json` and `review_packet.md`.
 
-1. Create a JSON file with benchmark cases, for example:
+**Step 3 — Human:** inspect `constitution_check.json`, then read `review_packet.md`.
+
+### C. Run a batch benchmark comparison
+
+**Step 1 — Human:** create `cases.json`, for example:
 
 ```json
 [
@@ -181,93 +135,167 @@ python scripts/run_governed_case.py \
 ]
 ```
 
-2. Run the batch comparison script:
+**Step 2 — Human:** start the batch CLI.
 
 ```bash
-cd /tmp/ai_actuary
-set -a && . ./.env && set +a
 python scripts/run_batch_benchmark.py \
   --cases-json ./cases.json \
   --artifact-root ./tmp/batch-run
 ```
 
-### Governed run output shape
+**Step 3 — Agent system:** baseline and governed modes are executed and scored.
 
-The governed CLI returns JSON with the main fields below:
+**Step 4 — Human:** inspect `./tmp/batch-run/comparison_report.json`.
 
-- `route`
-- `worker_result`
-- `final_output`
-- `review_packet` when review is triggered
+### D. Replay one saved run
 
-### Batch output shape
+**Step 1 — Human:** point to a saved `run_manifest.json`.
 
-The batch script returns JSON with the main fields below:
+```bash
+python scripts/replay_case.py \
+  --manifest-path ./tmp/demo-case/run_manifest.json
+```
 
-- `case_count`
-- `modes`
-- `mode_summaries`
-- `case_comparisons`
-- `comparison_report_path`
+**Step 2 — Agent system:** replay loads saved artifacts and recomputes the deterministic result.
+
+**Step 3 — Human:** compare `saved_summary` and `replayed_summary` in the JSON output.
+
+### E. Compare repeatability across multiple runs
+
+**Step 1 — Human:** collect two or more manifests for the same case.
+
+```bash
+python scripts/compare_repeatability.py \
+  --manifest-path ./tmp/repeat-a/run_manifest.json \
+  --manifest-path ./tmp/repeat-b/run_manifest.json
+```
+
+**Step 2 — Agent system:** repeatability loads each run and evaluates status plus IBNR stability.
+
+**Step 3 — Human:** inspect `stable_ibnr`, `ibnr_values`, and `all_statuses`.
 
 ---
 
-## Hermes CLI As Operator
+## Artifact Model
 
-Hermes itself can act as the operator for this repository.
+A governed run writes local JSON artifacts under the chosen artifact directory.
 
-Typical usage:
+### Standard artifacts
+
+- `case_input.json`
+- `deterministic_result.json`
+- `narrative_draft.json`
+- `constitution_check.json`
+- `run_manifest.json`
+
+### Review artifacts
+
+When governance escalates the case, the run also writes:
+
+- `review_packet.json`
+- `review_packet.md`
+
+### How to inspect artifacts
+
+1. Read `run_manifest.json` first — it is the run-level index of produced files.
+2. Read `deterministic_result.json` for reserve outputs.
+3. Read `constitution_check.json` for governance status.
+4. Read `review_packet.md` for the human-readable review handoff.
+
+---
+
+## Human Responsibilities vs Agent Responsibilities
+
+### Human responsibilities
+
+- prepare Python environment and secrets
+- choose case IDs, artifact directories, and review thresholds
+- launch CLI entry points
+- inspect artifacts and make release/review decisions
+- decide what changes should become commits and PRs
+
+### Agent responsibilities
+
+- plan and route governed execution through the OpenAI layer
+- run deterministic calculation and governance checks through worker paths
+- write artifacts and manifests
+- generate review flow outputs when escalation is required
+- produce replay, repeatability, and batch comparison outputs from artifact contracts
+
+### Shared boundary
+
+- humans own operational intent and approval
+- agents own execution and artifact production
+- CAS Core remains the numeric source of truth regardless of which agent runtime is active
+
+---
+
+## Environment Setup
 
 ```bash
 cd /tmp/ai_actuary
+pip install -e .
 set -a && . ./.env && set +a
-hermes chat -q "Run a governed case smoke test in this repository."
 ```
 
-Hermes CLI must have:
+Minimum runtime requirements:
 
-- a working provider/model configuration for Hermes itself
-- local terminal/file tool access
-- access to the repository-local `OPENAI_API_KEY` when running this project workflow
-
-Hermes global configuration paths on this machine:
-
-- config: `/home/ec2-user/.hermes/config.yaml`
-- env: `/home/ec2-user/.hermes/.env`
-
-Project runtime env for this repository:
-
-- `/tmp/ai_actuary/.env`
+- Python environment with project dependencies installed
+- `OPENAI_API_KEY` for governed planner runs
+- repository checkout or editable install, because operator entrypoints load modules from `workflows/`
 
 ---
 
-## Current Validation Status
+## Current Scope Status
 
-The current implementation has been validated through:
+### Completed
+
+- Prompt 1-7: governed single-case workflow, review escalation path, and operator CLI
+- Prompt 8: batch benchmark runner with baseline vs governed comparison
+- Prompt 9: replay and repeatability helpers plus CLI wrappers
+- Prompt 10: developer handoff documentation closeout
+
+### Not Yet Implemented
+
+- persistent artifact store beyond local filesystem
+- outbound messaging/delivery of review packets
+- production Hermes runtime orchestration instead of local callable worker modules
+- richer actuarial methods, multi-dataset benchmark catalogs, and formal sign-off workflows
+- service-layer HTTP API
+
+### Next Recommended Steps
+
+1. add artifact-store and retention strategy
+2. add review-packet delivery adapters after packet generation
+3. add HTTP/API surface only after current artifact contracts stabilize
+4. expand benchmark coverage beyond the current sample-driven path
+5. harden replay/repeatability into CI-grade regression workflows
+
+---
+
+## Validation Status
+
+The repository has been validated through:
 
 - unit and integration tests in `tests/`
-- real OpenAI Agents SDK governed workflow smoke runs
-- operator CLI pass-path execution
-- operator CLI review-path execution
-- Hermes CLI acting as an operator on the repository
+- real OpenAI governed case smoke runs
+- review-triggered governed run checks
+- batch benchmark smoke runs
+- replay and repeatability regression tests
+- Hermes CLI acting as an operator against the repo
+
+For the latest business-facing workflow memo, see:
+
+- `docs/reports/current-workflow-report.md`
 
 ---
 
-## Next Recommended Steps
+## Read This First If You Are Taking Over
 
-1. benchmark batch runner and baseline comparison
-2. replay and repeatability hooks
-3. artifact-store hardening
-4. Hermes/Feishu review-packet delivery integration
+1. `README.md`
+2. `docs/architecture.md`
+3. `docs/project-plan.md`
+4. `docs/plans/openai-hermes-composition-design.md`
+5. `docs/reports/current-workflow-report.md`
 
----
-
-## Notes
-
-This repository is meant to preserve a clean separation of responsibilities:
-
-- **CAS Core** owns truth
-- **OpenAI Planner** owns governed orchestration
-- **Hermes Workers** own execution and operational packaging
-
-That separation is the main architectural idea of the project.
+That reading order gives a new developer or future worker enough context to continue without rediscovering the current boundaries.

@@ -26,7 +26,7 @@
 
 ### 来源
 
-CAS proposal、`docs/architecture.md`、`docs/project-plan.md` 已明确强调：
+项目设计原则、`docs/architecture.md`、`docs/project-plan.md` 已明确强调：
 - 数值真值不能来自 LLM；
 - governance 要可执行；
 - workflow 要可审计、可回放；
