@@ -264,6 +264,54 @@ def test_run_operator_flow_delivers_review_packet_when_outbox_is_configured(tmp_
     assert Path(result["review_delivery"]["delivered_paths"]["markdown"]).exists()
 
 
+class BrokenReviewDeliveryRunnerModule:
+    @staticmethod
+    def run_openai_governed_workflow(task, *, user_prompt=None):
+        return {
+            "route": {"mode": "governed"},
+            "worker_result": {
+                "status": "needs_review",
+                "case_id": task.case_ref,
+                "run_id": f"operator-{task.case_ref}-local",
+                "summary": "review required",
+                "artifact_paths": {},
+                "metrics": {},
+                "review_reasons": ["threshold breach"],
+                "errors": [],
+                "worker_metadata": {"adapter": "local-callable"},
+            },
+            "final_output": {
+                "case_id": task.case_ref,
+                "worker_status": "needs_review",
+                "deterministic_method": "chainladder",
+                "cited_values": {"ibnr": 1.0},
+                "review_reasons": ["threshold breach"],
+                "artifact_manifest_path": None,
+                "narrative_summary": "needs review",
+            },
+            "review_packet": {"case_id": task.case_ref, "run_id": f"operator-{task.case_ref}-local", "packet_paths": {}},
+        }
+
+
+def test_run_operator_flow_returns_structured_delivery_error_when_outbox_delivery_fails(tmp_path):
+    module = _load_module()
+
+    result = module.run_operator_flow(
+        case_id="broken-delivery-case",
+        artifact_dir=tmp_path / "artifacts",
+        objective="Operator flow",
+        runner_module=BrokenReviewDeliveryRunnerModule,
+        task_contracts_module=FakeTaskContractsModule,
+        review_delivery_dir=tmp_path / "outbox",
+    )
+
+    assert result["status"] == "needs_review"
+    assert result["review_delivery"]["ok"] is False
+    assert result["review_delivery"]["status"] == "failed"
+    assert result["review_delivery"]["error_type"] == "ValueError"
+    assert any(item.startswith("review_delivery_failed:") for item in result["errors"])
+
+
 def test_run_operator_flow_returns_structured_failure_payload_when_runner_crashes(tmp_path):
     module = _load_module()
 

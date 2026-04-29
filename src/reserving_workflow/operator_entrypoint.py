@@ -80,11 +80,24 @@ def run_operator_flow(
         return _build_operator_failure_result(task, exc)
     normalized = _normalize_operator_result(task, raw_result)
     if review_delivery_dir is not None and normalized.get("status") == "needs_review" and normalized.get("review_packet"):
-        delivery_module = _load_review_delivery_module()
-        normalized["review_delivery"] = delivery_module.deliver_review_packet(
-            normalized["review_packet"],
-            destination_dir=review_delivery_dir,
-        )
+        try:
+            delivery_module = _load_review_delivery_module()
+            normalized["review_delivery"] = delivery_module.deliver_review_packet(
+                normalized["review_packet"],
+                destination_dir=review_delivery_dir,
+            )
+        except Exception as exc:
+            normalized["review_delivery"] = {
+                "ok": False,
+                "status": "failed",
+                "destination": "local_outbox",
+                "destination_dir": str(Path(review_delivery_dir).expanduser().resolve()),
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            }
+            normalized.setdefault("errors", []).append(
+                f"review_delivery_failed: {type(exc).__name__}: {exc}"
+            )
     return normalized
 
 
