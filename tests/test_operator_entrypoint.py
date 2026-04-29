@@ -27,7 +27,17 @@ class FakeRunnerModule:
         return {
             "stage": "collect",
             "route": {"mode": "governed"},
-            "worker_result": {"status": "completed"},
+            "worker_result": {
+                "status": "completed",
+                "case_id": task.case_ref,
+                "run_id": f"operator-{task.case_ref}-local",
+                "summary": "worker complete",
+                "artifact_paths": {"run_manifest": str(Path(task.inputs["artifact_dir"]) / "run_manifest.json")},
+                "metrics": {},
+                "review_reasons": [],
+                "errors": [],
+                "worker_metadata": {"adapter": "local-callable"},
+            },
             "final_output": {
                 "case_id": task.case_ref,
                 "worker_status": "completed",
@@ -88,9 +98,127 @@ def test_run_operator_flow_returns_governed_result(tmp_path):
         user_prompt="use tool",
     )
 
+    assert result["ok"] is True
+    assert result["status"] == "completed"
+    assert result["case_id"] == "operator-case"
     assert result["route"]["mode"] == "governed"
+    assert result["worker_result"]["status"] == "completed"
+    assert result["run_id"] == "operator-operator-case-local"
     assert result["final_output"]["case_id"] == "operator-case"
     assert result["final_output"]["deterministic_method"] == "chainladder"
+    assert "review_packet" not in result
+
+
+class MissingRunIdRunnerModule:
+    @staticmethod
+    def run_openai_governed_workflow(task, *, user_prompt=None):
+        return {
+            "route": {"mode": "governed"},
+            "worker_result": {
+                "status": "completed",
+                "case_id": task.case_ref,
+                "summary": "worker complete",
+                "artifact_paths": {},
+                "metrics": {},
+                "review_reasons": [],
+                "errors": [],
+                "worker_metadata": {"adapter": "local-callable"},
+            },
+            "final_output": {
+                "case_id": task.case_ref,
+                "worker_status": "completed",
+                "deterministic_method": "chainladder",
+                "cited_values": {"ibnr": 1.0},
+                "review_reasons": [],
+                "artifact_manifest_path": None,
+                "narrative_summary": "ok",
+            },
+        }
+
+
+class SpuriousReviewPacketRunnerModule:
+    @staticmethod
+    def run_openai_governed_workflow(task, *, user_prompt=None):
+        return {
+            "route": {"mode": "governed"},
+            "worker_result": {
+                "status": "completed",
+                "case_id": task.case_ref,
+                "run_id": f"operator-{task.case_ref}-local",
+                "summary": "worker complete",
+                "artifact_paths": {},
+                "metrics": {},
+                "review_reasons": [],
+                "errors": [],
+                "worker_metadata": {"adapter": "local-callable"},
+            },
+            "final_output": {
+                "case_id": task.case_ref,
+                "worker_status": "completed",
+                "deterministic_method": "chainladder",
+                "cited_values": {"ibnr": 1.0},
+                "review_reasons": [],
+                "artifact_manifest_path": None,
+                "narrative_summary": "ok",
+            },
+            "review_packet": {"status": "review_required"},
+        }
+
+
+def test_run_operator_flow_falls_back_to_deterministic_run_id_when_runner_omits_it(tmp_path):
+    module = _load_module()
+
+    result = module.run_operator_flow(
+        case_id="missing-run-id",
+        artifact_dir=tmp_path,
+        objective="Operator flow",
+        runner_module=MissingRunIdRunnerModule,
+        task_contracts_module=FakeTaskContractsModule,
+    )
+
+    assert result["status"] == "completed"
+    assert result["run_id"] == "operator-missing-run-id-local"
+
+
+def test_run_operator_flow_drops_review_packet_when_status_is_not_review(tmp_path):
+    module = _load_module()
+
+    result = module.run_operator_flow(
+        case_id="spurious-review-packet",
+        artifact_dir=tmp_path,
+        objective="Operator flow",
+        runner_module=SpuriousReviewPacketRunnerModule,
+        task_contracts_module=FakeTaskContractsModule,
+    )
+
+    assert result["status"] == "completed"
+    assert "review_packet" not in result
+
+
+class ExplodingRunnerModule:
+    @staticmethod
+    def run_openai_governed_workflow(task, *, user_prompt=None):
+        raise RuntimeError("runner unavailable")
+
+
+def test_run_operator_flow_returns_structured_failure_payload_when_runner_crashes(tmp_path):
+    module = _load_module()
+
+    result = module.run_operator_flow(
+        case_id="broken-case",
+        artifact_dir=tmp_path,
+        objective="Operator flow",
+        runner_module=ExplodingRunnerModule,
+        task_contracts_module=FakeTaskContractsModule,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "failed"
+    assert result["case_id"] == "broken-case"
+    assert result["error_category"] == "planner_runtime"
+    assert result["errors"] == ["runner unavailable"]
+    assert result["worker_result"]["status"] == "failed"
+    assert result["worker_result"]["worker_metadata"]["failure_stage"] == "planner_runtime"
 
 
 def test_workflow_source_path_raises_clear_error_when_workflow_file_is_missing(monkeypatch):
@@ -123,7 +251,7 @@ def test_run_governed_case_script_emits_json(tmp_path):
         f"script_spec=importlib.util.spec_from_file_location('run_governed_case', {str(SCRIPT_PATH)!r})\n"
         "script=importlib.util.module_from_spec(script_spec)\n"
         "script_spec.loader.exec_module(script)\n"
-        "script._load_operator_module=lambda: types.SimpleNamespace(main=lambda argv=None: {'ok': True, 'argv': argv or []})\n"
+        "script._load_operator_module=lambda: types.SimpleNamespace(main=lambda argv=None: {'ok': True, 'status': 'completed', 'case_id': 'cli-case', 'argv': argv or []})\n"
         "script.main(['--case-id','cli-case','--artifact-dir','./tmp/test-cli'])\n"
     )
 
@@ -132,4 +260,6 @@ def test_run_governed_case_script_emits_json(tmp_path):
     assert proc.returncode == 0
     payload = json.loads(proc.stdout)
     assert payload["ok"] is True
+    assert payload["status"] == "completed"
+    assert payload["case_id"] == "cli-case"
     assert "--case-id" in payload["argv"]

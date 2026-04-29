@@ -109,6 +109,27 @@ python scripts/run_governed_case.py \
 
 **Step 4 — Human:** inspect artifacts under `./tmp/demo-case/`, starting with `run_manifest.json`.
 
+**Expected top-level CLI JSON fields**
+
+- `ok` — boolean success flag; `false` means the operator/planner path failed before a usable governed result was produced
+- `status` — stable single-run status: `completed`, `needs_review`, or `failed`
+- `case_id`
+- `run_id`
+- `summary`
+- `route`
+- `trace`
+- `worker_result`
+- `final_output`
+- `errors`
+- `error_category`
+- `review_packet` — present only when `status == "needs_review"`
+
+**Failure semantics**
+
+- `needs_review` means the workflow executed successfully but governance escalated the case
+- `failed` means the run did not complete successfully
+- worker-side invalid input failures expose structured metadata under `worker_result.worker_metadata`, including `failure_category`, `failure_stage`, and `error_type`
+
 ### B. Trigger review flow
 
 **Step 1 — Human:** run the same workflow with a tighter review threshold.

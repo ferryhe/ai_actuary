@@ -73,7 +73,11 @@ def run_operator_flow(
         task_contracts_module=task_contracts_module,
     )
     runner = runner_module or _load_runner_module()
-    return runner.run_openai_governed_workflow(task, user_prompt=user_prompt)
+    try:
+        raw_result = runner.run_openai_governed_workflow(task, user_prompt=user_prompt)
+    except Exception as exc:
+        return _build_operator_failure_result(task, exc)
+    return _normalize_operator_result(task, raw_result)
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
@@ -100,6 +104,68 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         review_threshold_origin_count=args.review_threshold_origin_count,
         user_prompt=args.user_prompt,
     )
+
+
+def _normalize_operator_result(task: Any, raw_result: dict[str, Any]) -> dict[str, Any]:
+    worker_result = dict(raw_result.get("worker_result", {}) or {})
+    final_output = dict(raw_result.get("final_output", {}) or {})
+    status = worker_result.get("status") or final_output.get("worker_status") or "failed"
+    review_packet = raw_result.get("review_packet") if status == "needs_review" else None
+    summary = worker_result.get("summary") or final_output.get("narrative_summary") or f"Operator run for {task.case_ref} finished with status {status}."
+    run_id = worker_result.get("run_id") or getattr(task, "run_id", None) or f"{getattr(task, 'task_id', 'task')}-local"
+    response = {
+        "ok": status != "failed",
+        "status": status,
+        "case_id": worker_result.get("case_id") or final_output.get("case_id") or getattr(task, "case_ref", None),
+        "run_id": run_id,
+        "summary": summary,
+        "route": raw_result.get("route", {}),
+        "trace": raw_result.get("trace", {}),
+        "worker_result": worker_result,
+        "final_output": final_output,
+        "errors": list(worker_result.get("errors", []) or []),
+        "error_category": None,
+    }
+    if review_packet is not None:
+        response["review_packet"] = review_packet
+    return response
+
+
+def _build_operator_failure_result(task: Any, exc: Exception) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "status": "failed",
+        "case_id": getattr(task, "case_ref", None),
+        "run_id": getattr(task, "run_id", None),
+        "summary": f"Operator run failed for {getattr(task, 'case_ref', 'unknown-case')}",
+        "route": {},
+        "trace": {},
+        "worker_result": {
+            "task_id": getattr(task, "task_id", None),
+            "task_kind": getattr(task, "task_kind", None),
+            "case_id": getattr(task, "case_ref", None),
+            "run_id": getattr(task, "run_id", None),
+            "status": "failed",
+            "summary": f"Planner runtime failed for {getattr(task, 'case_ref', 'unknown-case')}",
+            "artifact_paths": {},
+            "metrics": {},
+            "review_reasons": [],
+            "errors": [str(exc)],
+            "deterministic_result": {},
+            "narrative_draft": {},
+            "constitution_check": {},
+            "artifact_manifest": {},
+            "worker_metadata": {
+                "adapter": "operator-entrypoint",
+                "failure_category": "planner_runtime",
+                "failure_stage": "planner_runtime",
+                "error_type": type(exc).__name__,
+            },
+        },
+        "final_output": {},
+        "errors": [str(exc)],
+        "error_category": "planner_runtime",
+    }
 
 
 def _load_task_contracts_module():
