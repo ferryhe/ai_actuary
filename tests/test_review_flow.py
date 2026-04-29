@@ -4,6 +4,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HERMES_WORKER_DIR = REPO_ROOT / "workflows" / "agent-runtimes" / "hermes-worker"
@@ -74,6 +76,42 @@ def test_review_worker_builds_json_and_markdown_packets(tmp_path):
     assert packet["packet_paths"]["markdown"].endswith("review_packet.md")
     assert Path(packet["packet_paths"]["json"]).exists()
     assert Path(packet["packet_paths"]["markdown"]).exists()
+
+
+
+def test_review_delivery_copies_packet_to_local_outbox(tmp_path):
+    review_worker = _load_module("review_worker_delivery_test", HERMES_WORKER_DIR / "review_worker.py")
+    delivery_module = _load_module("review_delivery_module", REPO_ROOT / "src" / "reserving_workflow" / "review" / "delivery.py")
+    worker_result = _make_review_worker_result(tmp_path)
+    packet = review_worker.build_review_packet(worker_result, output_dir=tmp_path / "packet")
+
+    receipt = delivery_module.deliver_review_packet(packet, destination_dir=tmp_path / "outbox")
+
+    assert receipt["destination"] == "local_outbox"
+    assert Path(receipt["delivered_paths"]["json"]).exists()
+    assert Path(receipt["delivered_paths"]["markdown"]).exists()
+    assert receipt["case_id"] == "review-case-001"
+
+
+
+def test_review_delivery_rejects_missing_packet_paths_and_invalid_case_segments(tmp_path):
+    delivery_module = _load_module("review_delivery_validation", REPO_ROOT / "src" / "reserving_workflow" / "review" / "delivery.py")
+
+    with pytest.raises(ValueError):
+        delivery_module.deliver_review_packet({"case_id": "case-a", "run_id": "run-a", "packet_paths": {}}, destination_dir=tmp_path / "outbox")
+
+    with pytest.raises(ValueError):
+        delivery_module.deliver_review_packet(
+            {
+                "case_id": "../../escape",
+                "run_id": "run-a",
+                "packet_paths": {
+                    "json": str(tmp_path / "missing.json"),
+                    "markdown": str(tmp_path / "missing.md"),
+                },
+            },
+            destination_dir=tmp_path / "outbox",
+        )
 
 
 def test_openai_runner_adds_review_packet_when_worker_needs_review(tmp_path):

@@ -144,6 +144,13 @@ The artifact contract is the shared boundary between layers.
 - `review_packet.json`
 - `review_packet.md`
 
+### Review delivery path
+
+When the operator configures `--review-delivery-dir`, the runtime copies generated review packets into a local outbox directory outside planner/core logic. This keeps review delivery as a post-packet adapter step rather than a planner concern.
+
+The current concrete delivery target is:
+- `local_outbox` — copies `review_packet.json` and `review_packet.md` into `<outbox>/<case_id>/<run_id>/`
+
 ### Batch file
 
 - `comparison_report.json`

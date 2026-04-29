@@ -60,6 +60,7 @@ def run_operator_flow(
     method: str = "chainladder",
     review_threshold_origin_count: int | None = None,
     user_prompt: str | None = None,
+    review_delivery_dir: str | Path | None = None,
     runner_module=None,
     task_contracts_module=None,
 ):
@@ -77,7 +78,27 @@ def run_operator_flow(
         raw_result = runner.run_openai_governed_workflow(task, user_prompt=user_prompt)
     except Exception as exc:
         return _build_operator_failure_result(task, exc)
-    return _normalize_operator_result(task, raw_result)
+    normalized = _normalize_operator_result(task, raw_result)
+    if review_delivery_dir is not None and normalized.get("status") == "needs_review" and normalized.get("review_packet"):
+        try:
+            delivery_module = _load_review_delivery_module()
+            normalized["review_delivery"] = delivery_module.deliver_review_packet(
+                normalized["review_packet"],
+                destination_dir=review_delivery_dir,
+            )
+        except Exception as exc:
+            normalized["review_delivery"] = {
+                "ok": False,
+                "status": "failed",
+                "destination": "local_outbox",
+                "destination_dir": str(Path(review_delivery_dir).expanduser().resolve()),
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            }
+            normalized.setdefault("errors", []).append(
+                f"review_delivery_failed: {type(exc).__name__}: {exc}"
+            )
+    return normalized
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
@@ -89,6 +110,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("--method", default="chainladder", help="Deterministic reserving method.")
     parser.add_argument("--review-threshold-origin-count", type=int, default=None, help="Optional origin_count threshold to intentionally trigger review.")
     parser.add_argument("--user-prompt", default=None, help="Optional custom prompt for the OpenAI workflow manager.")
+    parser.add_argument("--review-delivery-dir", default=None, help="Optional directory where generated review packets should be copied as operator-facing outbox artifacts.")
     return parser
 
 
@@ -103,6 +125,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         method=args.method,
         review_threshold_origin_count=args.review_threshold_origin_count,
         user_prompt=args.user_prompt,
+        review_delivery_dir=args.review_delivery_dir,
     )
 
 
@@ -179,6 +202,13 @@ def _load_runner_module():
     return _load_module(
         "operator_openai_runner",
         _workflow_source_path("agent-runtimes", "openai-agents", "runner.py"),
+    )
+
+
+def _load_review_delivery_module():
+    return _load_module(
+        "operator_review_delivery",
+        Path(__file__).resolve().parent / "review" / "delivery.py",
     )
 
 

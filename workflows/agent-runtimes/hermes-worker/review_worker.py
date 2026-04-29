@@ -1,10 +1,10 @@
 """Review packet generation for Hermes worker flows."""
-
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
+
+from reserving_workflow.artifacts.storage import write_json_artifact, write_text_artifact
 
 SUPPORTED_TASK = "build_review_packet"
 
@@ -32,8 +32,8 @@ def build_review_packet(worker_result: Any, *, output_dir: str | Path | None = N
         "json": str(json_path),
         "markdown": str(markdown_path),
     }
-    markdown_path.write_text(_render_markdown_packet(packet), encoding="utf-8")
-    json_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    write_text_artifact(markdown_path, _render_markdown_packet(packet))
+    write_json_artifact(json_path, packet)
     return packet
 
 

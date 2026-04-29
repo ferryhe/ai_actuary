@@ -201,6 +201,117 @@ class ExplodingRunnerModule:
         raise RuntimeError("runner unavailable")
 
 
+class ReviewDeliveryRunnerModule:
+    @staticmethod
+    def run_openai_governed_workflow(task, *, user_prompt=None):
+        packet_dir = Path(task.inputs["artifact_dir"]) / "packet"
+        packet_dir.mkdir(parents=True, exist_ok=True)
+        packet_json = packet_dir / "review_packet.json"
+        packet_markdown = packet_dir / "review_packet.md"
+        packet_json.write_text('{"status":"review_required"}', encoding="utf-8")
+        packet_markdown.write_text('# Review Packet\n', encoding="utf-8")
+        return {
+            "route": {"mode": "governed"},
+            "worker_result": {
+                "status": "needs_review",
+                "case_id": task.case_ref,
+                "run_id": f"operator-{task.case_ref}-local",
+                "summary": "review required",
+                "artifact_paths": {"run_manifest": str(Path(task.inputs["artifact_dir"]) / "run_manifest.json")},
+                "metrics": {},
+                "review_reasons": ["threshold breach"],
+                "errors": [],
+                "worker_metadata": {"adapter": "local-callable"},
+            },
+            "final_output": {
+                "case_id": task.case_ref,
+                "worker_status": "needs_review",
+                "deterministic_method": "chainladder",
+                "cited_values": {"ibnr": 1.0},
+                "review_reasons": ["threshold breach"],
+                "artifact_manifest_path": str(Path(task.inputs["artifact_dir"]) / "run_manifest.json"),
+                "narrative_summary": "needs review",
+            },
+            "review_packet": {
+                "case_id": task.case_ref,
+                "run_id": f"operator-{task.case_ref}-local",
+                "status": "review_required",
+                "case_summary": "review required",
+                "deterministic_outputs": {},
+                "failed_checks": ["threshold breach"],
+                "draft_narrative": {},
+                "artifact_links": {},
+                "packet_paths": {"json": str(packet_json), "markdown": str(packet_markdown)},
+            },
+        }
+
+
+def test_run_operator_flow_delivers_review_packet_when_outbox_is_configured(tmp_path):
+    module = _load_module()
+
+    result = module.run_operator_flow(
+        case_id="review-delivery-case",
+        artifact_dir=tmp_path / "artifacts",
+        objective="Operator flow",
+        runner_module=ReviewDeliveryRunnerModule,
+        task_contracts_module=FakeTaskContractsModule,
+        review_delivery_dir=tmp_path / "outbox",
+    )
+
+    assert result["status"] == "needs_review"
+    assert result["review_delivery"]["destination"] == "local_outbox"
+    assert Path(result["review_delivery"]["delivered_paths"]["json"]).exists()
+    assert Path(result["review_delivery"]["delivered_paths"]["markdown"]).exists()
+
+
+class BrokenReviewDeliveryRunnerModule:
+    @staticmethod
+    def run_openai_governed_workflow(task, *, user_prompt=None):
+        return {
+            "route": {"mode": "governed"},
+            "worker_result": {
+                "status": "needs_review",
+                "case_id": task.case_ref,
+                "run_id": f"operator-{task.case_ref}-local",
+                "summary": "review required",
+                "artifact_paths": {},
+                "metrics": {},
+                "review_reasons": ["threshold breach"],
+                "errors": [],
+                "worker_metadata": {"adapter": "local-callable"},
+            },
+            "final_output": {
+                "case_id": task.case_ref,
+                "worker_status": "needs_review",
+                "deterministic_method": "chainladder",
+                "cited_values": {"ibnr": 1.0},
+                "review_reasons": ["threshold breach"],
+                "artifact_manifest_path": None,
+                "narrative_summary": "needs review",
+            },
+            "review_packet": {"case_id": task.case_ref, "run_id": f"operator-{task.case_ref}-local", "packet_paths": {}},
+        }
+
+
+def test_run_operator_flow_returns_structured_delivery_error_when_outbox_delivery_fails(tmp_path):
+    module = _load_module()
+
+    result = module.run_operator_flow(
+        case_id="broken-delivery-case",
+        artifact_dir=tmp_path / "artifacts",
+        objective="Operator flow",
+        runner_module=BrokenReviewDeliveryRunnerModule,
+        task_contracts_module=FakeTaskContractsModule,
+        review_delivery_dir=tmp_path / "outbox",
+    )
+
+    assert result["status"] == "needs_review"
+    assert result["review_delivery"]["ok"] is False
+    assert result["review_delivery"]["status"] == "failed"
+    assert result["review_delivery"]["error_type"] == "ValueError"
+    assert any(item.startswith("review_delivery_failed:") for item in result["errors"])
+
+
 def test_run_operator_flow_returns_structured_failure_payload_when_runner_crashes(tmp_path):
     module = _load_module()
 
