@@ -76,6 +76,21 @@ def test_review_worker_builds_json_and_markdown_packets(tmp_path):
     assert Path(packet["packet_paths"]["markdown"]).exists()
 
 
+
+def test_review_delivery_copies_packet_to_local_outbox(tmp_path):
+    review_worker = _load_module("review_worker_delivery_test", HERMES_WORKER_DIR / "review_worker.py")
+    delivery_module = _load_module("review_delivery_module", REPO_ROOT / "src" / "reserving_workflow" / "review" / "delivery.py")
+    worker_result = _make_review_worker_result(tmp_path)
+    packet = review_worker.build_review_packet(worker_result, output_dir=tmp_path / "packet")
+
+    receipt = delivery_module.deliver_review_packet(packet, destination_dir=tmp_path / "outbox")
+
+    assert receipt["destination"] == "local_outbox"
+    assert Path(receipt["delivered_paths"]["json"]).exists()
+    assert Path(receipt["delivered_paths"]["markdown"]).exists()
+    assert receipt["case_id"] == "review-case-001"
+
+
 def test_openai_runner_adds_review_packet_when_worker_needs_review(tmp_path):
     runner_module = _load_module("runner_review_flow", OPENAI_RUNTIME_DIR / "runner.py")
 

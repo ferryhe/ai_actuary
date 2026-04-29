@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
+from reserving_workflow.artifacts.storage import read_json_artifact
 from reserving_workflow.calculators import calculate_deterministic_reserve
 from reserving_workflow.schemas import ReservingCaseInput, RunArtifactManifest
 
@@ -13,7 +13,7 @@ from reserving_workflow.schemas import ReservingCaseInput, RunArtifactManifest
 
 def load_manifest(manifest_path: str | Path) -> RunArtifactManifest:
     path = Path(manifest_path).expanduser().resolve()
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = read_json_artifact(path)
     return RunArtifactManifest.model_validate(payload)
 
 
@@ -100,7 +100,7 @@ def _resolve_artifact_path(manifest: RunArtifactManifest, manifest_path: Path, a
 
 
 def _read_json(path: str | Path) -> dict[str, Any]:
-    return json.loads(Path(path).expanduser().resolve().read_text(encoding="utf-8"))
+    return read_json_artifact(path)
 
 
 

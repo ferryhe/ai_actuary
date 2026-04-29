@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from reserving_workflow.artifacts.storage import resolve_artifact_path, resolve_artifact_root, write_json_artifact
 from reserving_workflow.schemas import RunArtifactManifest
 
 DEFAULT_ARTIFACTS = (
@@ -26,15 +26,14 @@ def build_run_artifact_manifest(
     created_by: str = "local-case-worker",
     metadata: dict[str, Any] | None = None,
 ) -> RunArtifactManifest:
-    root = Path(artifact_dir).expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True)
+    root = resolve_artifact_root(artifact_dir)
 
     artifact_names: list[str] = []
     for name in [*(required_artifacts or []), *DEFAULT_ARTIFACTS]:
         if name not in artifact_names:
             artifact_names.append(name)
 
-    artifact_paths = {name: str(root / f"{name}.json") for name in artifact_names}
+    artifact_paths = {name: str(resolve_artifact_path(root, f"{name}.json")) for name in artifact_names}
     return RunArtifactManifest(
         case_id=case_id,
         run_id=run_id,
@@ -46,27 +45,13 @@ def build_run_artifact_manifest(
 
 
 def write_artifacts(manifest: RunArtifactManifest, artifacts: Mapping[str, Any]) -> RunArtifactManifest:
+    artifact_root = resolve_artifact_root(manifest.artifact_root)
     for artifact_name, payload in artifacts.items():
         target_path = manifest.artifact_paths.get(artifact_name)
         if target_path is None:
-            target_path = str(Path(next(iter(manifest.artifact_paths.values()))).resolve().parent / f"{artifact_name}.json")
+            target_path = str(resolve_artifact_path(artifact_root, f"{artifact_name}.json"))
             manifest.artifact_paths[artifact_name] = target_path
-        path = Path(target_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(_to_serializable(payload), indent=2, sort_keys=True), encoding="utf-8")
+        write_json_artifact(target_path, payload)
 
-    run_manifest_path = Path(manifest.artifact_paths["run_manifest"])
-    run_manifest_path.write_text(json.dumps(_to_serializable(manifest), indent=2, sort_keys=True), encoding="utf-8")
+    write_json_artifact(manifest.artifact_paths["run_manifest"], manifest)
     return manifest
-
-
-def _to_serializable(payload: Any) -> Any:
-    if hasattr(payload, "model_dump"):
-        return payload.model_dump(mode="json")
-    if isinstance(payload, Path):
-        return str(payload)
-    if isinstance(payload, dict):
-        return {str(key): _to_serializable(value) for key, value in payload.items()}
-    if isinstance(payload, (list, tuple)):
-        return [_to_serializable(item) for item in payload]
-    return payload

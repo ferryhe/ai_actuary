@@ -141,6 +141,16 @@ python scripts/run_governed_case.py \
   --review-threshold-origin-count 5
 ```
 
+**Optional operator delivery outbox:**
+
+```bash
+python scripts/run_governed_case.py \
+  --case-id review-case \
+  --artifact-dir ./tmp/review-case \
+  --review-threshold-origin-count 5 \
+  --review-delivery-dir ./tmp/review-outbox
+```
+
 **Step 2 — Agent system:** the worker produces governance outputs and, when required, writes `review_packet.json` and `review_packet.md`.
 
 **Step 3 — Human:** inspect `constitution_check.json`, then read `review_packet.md`.
