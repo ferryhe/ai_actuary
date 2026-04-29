@@ -110,13 +110,14 @@ def _normalize_operator_result(task: Any, raw_result: dict[str, Any]) -> dict[st
     worker_result = dict(raw_result.get("worker_result", {}) or {})
     final_output = dict(raw_result.get("final_output", {}) or {})
     status = worker_result.get("status") or final_output.get("worker_status") or "failed"
-    review_packet = raw_result.get("review_packet")
+    review_packet = raw_result.get("review_packet") if status == "needs_review" else None
     summary = worker_result.get("summary") or final_output.get("narrative_summary") or f"Operator run for {task.case_ref} finished with status {status}."
+    run_id = worker_result.get("run_id") or getattr(task, "run_id", None) or f"{getattr(task, 'task_id', 'task')}-local"
     response = {
         "ok": status != "failed",
         "status": status,
         "case_id": worker_result.get("case_id") or final_output.get("case_id") or getattr(task, "case_ref", None),
-        "run_id": worker_result.get("run_id"),
+        "run_id": run_id,
         "summary": summary,
         "route": raw_result.get("route", {}),
         "trace": raw_result.get("trace", {}),

@@ -109,7 +109,7 @@ def run_case_worker(task: Any):
             worker_metadata={
                 "adapter": "local-callable",
                 "failure_category": _classify_failure_category(exc),
-                "failure_stage": "worker_input" if isinstance(exc, (KeyError, ValidationError, ValueError)) else "deterministic_engine",
+                "failure_stage": _classify_failure_stage(exc),
                 "error_type": type(exc).__name__,
             },
         )
@@ -120,6 +120,14 @@ def _classify_failure_category(exc: Exception) -> str:
         return "deterministic_engine"
     if isinstance(exc, (KeyError, ValidationError, ValueError)):
         return "input_validation"
+    return "worker_runtime"
+
+
+def _classify_failure_stage(exc: Exception) -> str:
+    if isinstance(exc, ChainladderAdapterError):
+        return "deterministic_engine"
+    if isinstance(exc, (KeyError, ValidationError, ValueError)):
+        return "worker_input"
     return "worker_runtime"
 
 

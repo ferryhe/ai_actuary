@@ -138,3 +138,48 @@ def test_run_case_worker_returns_structured_failure_metadata_for_invalid_input(t
     assert result.worker_metadata["adapter"] == "local-callable"
     assert result.worker_metadata["failure_category"] == "input_validation"
     assert result.worker_metadata["failure_stage"] == "worker_input"
+
+
+
+def test_run_case_worker_labels_chainladder_adapter_failures_as_deterministic_engine(tmp_path):
+    task_contracts = _load_module(
+        "task_contracts_adapter_failure",
+        "workflows/agent-runtimes/hermes-worker/task_contracts.py",
+    )
+    case_worker = _load_module(
+        "case_worker_adapter_failure",
+        "workflows/agent-runtimes/hermes-worker/case_worker.py",
+    )
+
+    task = task_contracts.WorkerTask(
+        task_id="task-fail-002",
+        task_kind="run_case",
+        case_ref="adapter-failure-case",
+        objective="Run worker with malformed triangle rows",
+        inputs={
+            "artifact_dir": str(tmp_path / "adapter-failure-artifacts"),
+            "case_payload": {
+                "case_id": "adapter-failure-case",
+                "metadata": {
+                    "triangle_rows": [{"origin": 2018, "development": 12}],
+                },
+                "run_config": {
+                    "method": "chainladder",
+                    "required_artifacts": [
+                        "case_input",
+                        "deterministic_result",
+                        "narrative_draft",
+                        "constitution_check",
+                        "run_manifest",
+                    ],
+                },
+            },
+        },
+    )
+
+    result = case_worker.run_case_worker(task)
+
+    assert result.status == "failed"
+    assert result.worker_metadata["failure_category"] == "deterministic_engine"
+    assert result.worker_metadata["failure_stage"] == "deterministic_engine"
+    assert result.worker_metadata["error_type"] == "ChainladderAdapterError"

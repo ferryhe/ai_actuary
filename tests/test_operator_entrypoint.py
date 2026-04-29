@@ -103,8 +103,96 @@ def test_run_operator_flow_returns_governed_result(tmp_path):
     assert result["case_id"] == "operator-case"
     assert result["route"]["mode"] == "governed"
     assert result["worker_result"]["status"] == "completed"
+    assert result["run_id"] == "operator-operator-case-local"
     assert result["final_output"]["case_id"] == "operator-case"
     assert result["final_output"]["deterministic_method"] == "chainladder"
+    assert "review_packet" not in result
+
+
+class MissingRunIdRunnerModule:
+    @staticmethod
+    def run_openai_governed_workflow(task, *, user_prompt=None):
+        return {
+            "route": {"mode": "governed"},
+            "worker_result": {
+                "status": "completed",
+                "case_id": task.case_ref,
+                "summary": "worker complete",
+                "artifact_paths": {},
+                "metrics": {},
+                "review_reasons": [],
+                "errors": [],
+                "worker_metadata": {"adapter": "local-callable"},
+            },
+            "final_output": {
+                "case_id": task.case_ref,
+                "worker_status": "completed",
+                "deterministic_method": "chainladder",
+                "cited_values": {"ibnr": 1.0},
+                "review_reasons": [],
+                "artifact_manifest_path": None,
+                "narrative_summary": "ok",
+            },
+        }
+
+
+class SpuriousReviewPacketRunnerModule:
+    @staticmethod
+    def run_openai_governed_workflow(task, *, user_prompt=None):
+        return {
+            "route": {"mode": "governed"},
+            "worker_result": {
+                "status": "completed",
+                "case_id": task.case_ref,
+                "run_id": f"operator-{task.case_ref}-local",
+                "summary": "worker complete",
+                "artifact_paths": {},
+                "metrics": {},
+                "review_reasons": [],
+                "errors": [],
+                "worker_metadata": {"adapter": "local-callable"},
+            },
+            "final_output": {
+                "case_id": task.case_ref,
+                "worker_status": "completed",
+                "deterministic_method": "chainladder",
+                "cited_values": {"ibnr": 1.0},
+                "review_reasons": [],
+                "artifact_manifest_path": None,
+                "narrative_summary": "ok",
+            },
+            "review_packet": {"status": "review_required"},
+        }
+
+
+def test_run_operator_flow_falls_back_to_deterministic_run_id_when_runner_omits_it(tmp_path):
+    module = _load_module()
+
+    result = module.run_operator_flow(
+        case_id="missing-run-id",
+        artifact_dir=tmp_path,
+        objective="Operator flow",
+        runner_module=MissingRunIdRunnerModule,
+        task_contracts_module=FakeTaskContractsModule,
+    )
+
+    assert result["status"] == "completed"
+    assert result["run_id"] == "operator-missing-run-id-local"
+
+
+def test_run_operator_flow_drops_review_packet_when_status_is_not_review(tmp_path):
+    module = _load_module()
+
+    result = module.run_operator_flow(
+        case_id="spurious-review-packet",
+        artifact_dir=tmp_path,
+        objective="Operator flow",
+        runner_module=SpuriousReviewPacketRunnerModule,
+        task_contracts_module=FakeTaskContractsModule,
+    )
+
+    assert result["status"] == "completed"
+    assert "review_packet" not in result
 
 
 class ExplodingRunnerModule:
