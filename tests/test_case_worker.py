@@ -109,3 +109,32 @@ def test_run_case_worker_marks_review_when_constitution_requests_it(tmp_path):
         item.startswith("diagnostic_threshold:origin_count")
         for item in result.review_reasons
     )
+
+
+
+def test_run_case_worker_returns_structured_failure_metadata_for_invalid_input(tmp_path):
+    task_contracts = _load_module(
+        "task_contracts_invalid_input",
+        "workflows/agent-runtimes/hermes-worker/task_contracts.py",
+    )
+    case_worker = _load_module(
+        "case_worker_invalid_input",
+        "workflows/agent-runtimes/hermes-worker/case_worker.py",
+    )
+
+    task = task_contracts.WorkerTask(
+        task_id="task-fail-001",
+        task_kind="run_case",
+        case_ref="broken-case",
+        objective="Run worker with invalid payload",
+        inputs={"artifact_dir": str(tmp_path / "broken-artifacts")},
+    )
+
+    result = case_worker.run_case_worker(task)
+
+    assert result.status == "failed"
+    assert result.case_id == "broken-case"
+    assert result.errors
+    assert result.worker_metadata["adapter"] == "local-callable"
+    assert result.worker_metadata["failure_category"] == "input_validation"
+    assert result.worker_metadata["failure_stage"] == "worker_input"

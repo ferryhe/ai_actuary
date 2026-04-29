@@ -85,6 +85,23 @@ Responsibilities:
 5. **Hermes Worker:** writes artifacts to disk.
 6. **Human:** inspects outputs and decides whether review or follow-up is needed.
 
+The current operator CLI is intentionally contract-first. For single-case governed runs, the top-level JSON response now exposes a stable envelope:
+
+- `ok`
+- `status` (`completed`, `needs_review`, `failed`)
+- `case_id`
+- `run_id`
+- `summary`
+- `route`
+- `trace`
+- `worker_result`
+- `final_output`
+- `errors`
+- `error_category`
+- optional `review_packet`
+
+This keeps operator-facing automation on a stable response surface even when planner/runtime failures occur before a usable business result exists.
+
 ### Batch benchmark path
 
 1. **Human:** prepares a list of cases.

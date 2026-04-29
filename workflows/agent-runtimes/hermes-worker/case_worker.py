@@ -106,8 +106,21 @@ def run_case_worker(task: Any):
             status="failed",
             summary=f"Case worker failed for task {getattr(task, 'task_id', 'unknown-task')}",
             errors=[str(exc)],
-            worker_metadata={"adapter": "local-callable"},
+            worker_metadata={
+                "adapter": "local-callable",
+                "failure_category": _classify_failure_category(exc),
+                "failure_stage": "worker_input" if isinstance(exc, (KeyError, ValidationError, ValueError)) else "deterministic_engine",
+                "error_type": type(exc).__name__,
+            },
         )
+
+
+def _classify_failure_category(exc: Exception) -> str:
+    if isinstance(exc, ChainladderAdapterError):
+        return "deterministic_engine"
+    if isinstance(exc, (KeyError, ValidationError, ValueError)):
+        return "input_validation"
+    return "worker_runtime"
 
 
 def _resolve_artifact_dir(*, task: Any, case_input: ReservingCaseInput, run_id: str) -> Path:
