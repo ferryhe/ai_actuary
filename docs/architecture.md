@@ -131,13 +131,14 @@ This keeps operator-facing automation on a stable response surface even when pla
 
 The API layer in `reserving_workflow.api.app` is a transport/control-plane wrapper over the existing CLI-grade contracts. It does not replace the planner, worker, artifact, or registry layers.
 
-PR4 routes are intentionally aligned to the future Symphony-style operator console shape:
+The FastAPI routes are intentionally aligned to the future Symphony-style operator console shape:
 
 - `GET /console` — serve a lightweight operator console shell without a frontend build system
 - `GET /console/state` — return console-ready run cards, selected-run detail, timeline, artifact, review, and action panels
-- `POST /runs` — start a governed single-case run through the existing operator entrypoint
+- `POST /runs` — start a governed single-case run through the existing operator entrypoint; with `background=true`, accept immediately and execute through FastAPI background tasks
 - `GET /runs` — list registry-backed run summaries
 - `GET /runs/{run_id}` — return registry detail, derived run events, artifact manifest, and review metadata
+- `GET /runs/{run_id}/events` — return the polling-friendly lifecycle event stream for one run
 - `POST /runs/{run_id}/rerun` — rerun a recorded run through the existing registry/operator path
 - `GET /runs/{run_id}/artifacts` — expose artifact manifest and artifact paths for an artifact panel
 - `GET /runs/{run_id}/review-packet` — expose review packet metadata for a review panel
@@ -145,7 +146,7 @@ PR4 routes are intentionally aligned to the future Symphony-style operator conso
 - `POST /repeatability` — wrap the existing repeatability helper
 - `POST /benchmarks/batch` — wrap the existing batch benchmark runner
 
-Derived events are mapped from registry `status_history` into `run.queued`, `run.running`, `run.completed`, `run.needs_review`, or `run.failed` event types. The PR5 console shell reuses those events and the existing artifact/review/rerun endpoints to present a thin operator-facing workspace. It remains a shell: no background queue, streaming transport, authentication layer, or separate business runtime is introduced.
+Derived events are mapped from registry `status_history` into `run.accepted`, `run.queued`, `run.running`, `run.completed`, `run.needs_review`, or `run.failed` event types. The PR5 console shell reuses those events and the existing artifact/review/rerun endpoints to present a thin operator-facing workspace. PR6 adds a bounded background mode: the API writes an initial `accepted` registry event, schedules the same operator entrypoint through FastAPI background tasks, and exposes `/runs/{run_id}/events` for polling. This is still not a production queue, streaming bus, or separate business runtime.
 
 ---
 
@@ -233,6 +234,7 @@ The system currently treats the local filesystem as the artifact store. That is 
 - replay from saved manifests
 - repeatability checks across multiple manifests
 - FastAPI control-plane routes for runs, reruns, artifacts, review packets, replay, repeatability, and batch benchmarks
+- background run acceptance with polling-friendly `/runs/{run_id}/events`
 - lightweight operator console shell plus `/console/state` panel payload
 - Symphony-style derived run events from the registry status history
 
@@ -242,5 +244,5 @@ The system currently treats the local filesystem as the artifact store. That is 
 - production Hermes queue/runtime orchestration
 - outbound messaging delivery of review packets beyond local outbox
 - production operator web console with authentication, streaming updates, and multi-user state
-- background execution, streaming event transport, and multi-user access control
+- production queue workers, streaming event transport, and multi-user access control
 - broader actuarial methods and richer benchmark suites

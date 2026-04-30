@@ -6,11 +6,12 @@ boundaries instead of introducing a second runtime implementation.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from reserving_workflow import operator_entrypoint
@@ -36,6 +37,7 @@ class RunCreateRequest(BaseModel):
     review_threshold_origin_count: int | None = None
     user_prompt: str | None = None
     review_delivery_dir: str | Path | None = None
+    background: bool = False
 
 
 class RerunRequest(BaseModel):
@@ -63,6 +65,7 @@ def create_app(
     task_contracts_module=None,
     replay_module=None,
     batch_runner_module=None,
+    background_task_runner=None,
 ) -> FastAPI:
     """Create the FastAPI control plane app.
 
@@ -90,7 +93,7 @@ def create_app(
         return _console_state_payload(selected_entry, runs)
 
     @app.post("/runs")
-    def create_run(request: RunCreateRequest) -> dict[str, Any]:
+    def create_run(request: RunCreateRequest, background_tasks: BackgroundTasks) -> Any:
         try:
             artifact_dir = request.artifact_dir or _default_artifact_dir(resolved_settings, request.case_id)
         except ValueError as exc:
@@ -98,19 +101,28 @@ def create_app(
         review_delivery_dir = request.review_delivery_dir
         if review_delivery_dir is None:
             review_delivery_dir = resolved_settings.review_delivery_dir
-        return operator_entrypoint.run_operator_flow(
-            case_id=request.case_id,
+        operator_params = _operator_params_from_request(
+            request,
             artifact_dir=artifact_dir,
-            objective=request.objective,
-            sample_name=request.sample_name,
-            method=request.method,
-            review_threshold_origin_count=request.review_threshold_origin_count,
-            user_prompt=request.user_prompt,
             review_delivery_dir=review_delivery_dir,
             registry_path=resolved_settings.registry_path,
             runner_module=runner_module,
             task_contracts_module=task_contracts_module,
         )
+        if request.background:
+            run_id = _generate_api_run_id(request.case_id)
+            operator_params["run_id"] = run_id
+            accepted_payload = _record_background_acceptance(
+                request,
+                artifact_dir=artifact_dir,
+                review_delivery_dir=review_delivery_dir,
+                registry_path=resolved_settings.registry_path,
+                run_id=run_id,
+            )
+            scheduler = background_task_runner or background_tasks.add_task
+            scheduler(_run_operator_flow_background, operator_params)
+            return JSONResponse(status_code=202, content=accepted_payload)
+        return operator_entrypoint.run_operator_flow(**operator_params)
 
     @app.get("/runs")
     def list_runs() -> dict[str, Any]:
@@ -133,6 +145,12 @@ def create_app(
             "review_packet": review_packet.get("packet") if review_packet.get("present") else None,
             "review_delivery": entry.get("review_delivery"),
         }
+
+    @app.get("/runs/{run_id}/events")
+    def get_run_events(run_id: str) -> dict[str, Any]:
+        entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+        events = [_event_from_history(run_id, item) for item in entry.get("status_history", [])]
+        return {"run_id": run_id, "event_count": len(events), "events": events}
 
     @app.post("/runs/{run_id}/rerun")
     def rerun(run_id: str, request: RerunRequest) -> dict[str, Any]:
@@ -192,6 +210,108 @@ def create_app(
 
 def _default_artifact_dir(settings: ApiSettings, case_id: str) -> Path:
     return resolve_artifact_path(settings.artifact_root, _safe_artifact_component(case_id, field_name="case_id"))
+
+
+def _operator_params_from_request(
+    request: RunCreateRequest,
+    *,
+    artifact_dir: str | Path,
+    review_delivery_dir: str | Path | None,
+    registry_path: str | Path,
+    runner_module=None,
+    task_contracts_module=None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "case_id": request.case_id,
+        "artifact_dir": artifact_dir,
+        "objective": request.objective,
+        "sample_name": request.sample_name,
+        "method": request.method,
+        "review_threshold_origin_count": request.review_threshold_origin_count,
+        "user_prompt": request.user_prompt,
+        "review_delivery_dir": review_delivery_dir,
+        "registry_path": registry_path,
+    }
+    if runner_module is not None:
+        params["runner_module"] = runner_module
+    if task_contracts_module is not None:
+        params["task_contracts_module"] = task_contracts_module
+    return params
+
+
+def _record_background_acceptance(
+    request: RunCreateRequest,
+    *,
+    artifact_dir: str | Path,
+    review_delivery_dir: str | Path | None,
+    registry_path: str | Path,
+    run_id: str,
+) -> dict[str, Any]:
+    task_id = f"operator-{request.case_id}"
+    operator_params = {
+        "case_id": request.case_id,
+        "artifact_dir": str(artifact_dir),
+        "objective": request.objective,
+        "sample_name": request.sample_name,
+        "method": request.method,
+        "review_threshold_origin_count": request.review_threshold_origin_count,
+        "user_prompt": request.user_prompt,
+        "review_delivery_dir": str(review_delivery_dir) if review_delivery_dir is not None else None,
+    }
+    entry = run_registry.record_run_event(
+        registry_path=registry_path,
+        task_id=task_id,
+        case_id=request.case_id,
+        run_id=run_id,
+        status="accepted",
+        artifact_root=str(Path(artifact_dir).expanduser().resolve()),
+        summary=f"Accepted background operator run for {request.case_id}",
+        operator_params=operator_params,
+        review_required=False,
+    )
+    events = [_event_from_history(run_id, item) for item in entry.get("status_history", [])]
+    return {
+        "ok": True,
+        "status": "accepted",
+        "execution_mode": "background",
+        "case_id": request.case_id,
+        "run_id": run_id,
+        "summary": f"Accepted background operator run for {request.case_id}",
+        "events": events,
+    }
+
+
+def _run_operator_flow_background(operator_params: dict[str, Any]) -> None:
+    try:
+        operator_entrypoint.run_operator_flow(**operator_params)
+    except Exception as exc:
+        _record_background_failure(operator_params, exc)
+
+
+def _record_background_failure(operator_params: dict[str, Any], exc: Exception) -> None:
+    registry_path = operator_params.get("registry_path")
+    if registry_path is None:
+        return
+    case_id = operator_params.get("case_id")
+    run_id = operator_params.get("run_id") or _generate_api_run_id(str(case_id or "case"))
+    artifact_dir = operator_params.get("artifact_dir") or "./tmp/api-artifacts/background-failed"
+    run_registry.record_run_event(
+        registry_path=registry_path,
+        task_id=f"operator-{case_id or 'unknown-case'}",
+        case_id=str(case_id) if case_id is not None else None,
+        run_id=str(run_id),
+        status="failed",
+        artifact_root=str(Path(artifact_dir).expanduser().resolve()),
+        summary=f"Background operator run failed for {case_id or 'unknown-case'}",
+        review_required=False,
+        error_category="background_runtime",
+        errors=[str(exc)],
+    )
+
+
+def _generate_api_run_id(case_id: str) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"operator-{case_id}-{timestamp}"
 
 
 def _safe_artifact_component(value: Any, *, field_name: str) -> str:
@@ -345,6 +465,7 @@ def _event_from_history(run_id: str, history_item: dict[str, Any]) -> dict[str, 
 
 def _event_type_for_status(status: Any) -> str:
     mapping = {
+        "accepted": "run.accepted",
         "queued": "run.queued",
         "running": "run.running",
         "completed": "run.completed",
