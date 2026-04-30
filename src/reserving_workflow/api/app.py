@@ -95,6 +95,7 @@ def create_app(
     @app.post("/runs")
     def create_run(request: RunCreateRequest, background_tasks: BackgroundTasks) -> Any:
         try:
+            _safe_artifact_component(request.case_id, field_name="case_id")
             artifact_dir = request.artifact_dir or _default_artifact_dir(resolved_settings, request.case_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

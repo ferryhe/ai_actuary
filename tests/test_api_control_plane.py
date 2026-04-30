@@ -210,6 +210,19 @@ def test_post_run_rejects_unsafe_default_artifact_case_id(tmp_path):
     assert not (tmp_path / "escape").exists()
 
 
+def test_post_run_rejects_unsafe_case_id_even_with_explicit_artifact_dir(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/runs",
+        json={"case_id": "bad/case", "artifact_dir": str(tmp_path / "explicit-artifacts"), "background": True},
+    )
+
+    assert response.status_code == 400
+    assert "Invalid case_id" in response.json()["detail"]
+    assert not (tmp_path / "run-registry.json").exists()
+
+
 def test_run_detail_exposes_symphony_style_events_and_artifacts(tmp_path):
     client = _client(tmp_path)
     run = client.post("/runs", json={"case_id": "detail-case"}).json()
