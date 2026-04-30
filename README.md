@@ -267,7 +267,9 @@ Key routes:
 - `POST /repeatability`
 - `POST /benchmarks/batch`
 
-The `/runs/{run_id}` detail payload includes derived `events` such as `run.queued`, `run.running`, and `run.completed`. PR5 adds `/console` and `/console/state` on top of the same data, giving operators a simple run queue, timeline, artifact panel, review panel, and rerun action panel without introducing a second runtime contract or a frontend build system. PR6 adds a bounded background execution mode: `POST /runs` can return `202 accepted` with a `run.accepted` event, then the existing operator flow appends `run.queued`, `run.running`, and the final lifecycle event for polling through `/runs/{run_id}/events`.
+The `/runs/{run_id}` detail payload includes derived `events` such as `run.queued`, `run.running`, and `run.completed`. PR5 adds `/console` and `/console/state` on top of the same data, giving operators a simple run queue, timeline, artifact panel, review panel, and rerun action panel without introducing a second runtime contract or a frontend build system. PR6 adds a bounded background execution mode: `POST /runs` can return `202 accepted` with a `run.accepted` event, then the existing operator flow appends `run.queued`, `run.running`, and the final lifecycle event for polling through `/runs/{run_id}/events`. PR7 keeps the same lightweight shell but makes it operational: the console can create governed runs through `POST /runs`, poll background lifecycle events through `GET /runs/{run_id}/events`, and trigger the existing rerun contract through `POST /runs/{run_id}/rerun`.
+
+The console intentionally remains text-contract first. The visible inputs (`case_id`, `sample_name`, `method`, `background`, and optional `review_threshold_origin_count`) map directly to the `RunCreateRequest` JSON contract so operators, agents, and tests all exercise the same API surface. The default deterministic method remains `chainladder`; richer actuarial methods should plug into this same composable `method` contract rather than requiring bespoke routes or UI-only wiring.
 
 ---
 
@@ -354,6 +356,7 @@ Minimum runtime requirements:
 - PR4: FastAPI control plane skeleton aligned to the OpenAI Agents runtime contract and Symphony-style run/event views
 - PR5: lightweight Symphony-style operator console shell over the run/event/artifact/review payloads
 - PR6: bounded background execution mode and `/runs/{run_id}/events` lifecycle polling
+- PR7: actionable lightweight console for creating governed runs, polling background events, and rerunning recorded cases through the existing API contracts
 
 ### Not Yet Implemented
 
@@ -361,7 +364,7 @@ Minimum runtime requirements:
 - outbound messaging/delivery of review packets
 - production Hermes runtime orchestration instead of local callable worker modules
 - richer actuarial methods, multi-dataset benchmark catalogs, and formal sign-off workflows
-- full operator web console, production queue worker, streaming event bus, and multi-user access control
+- production-grade operator web console, production queue worker, streaming event bus, and multi-user access control
 
 ### Next Recommended Steps
 

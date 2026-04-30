@@ -538,19 +538,32 @@ def _operator_console_html() -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI Actuary Operator Console</title>
   <style>
-    :root { color-scheme: light; --border: #d9e2ec; --muted: #52606d; --accent: #2457c5; }
+    :root { color-scheme: light; --border: #d9e2ec; --muted: #52606d; --accent: #2457c5; --danger: #b42318; --ok: #027a48; }
     body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f7fb; color: #102a43; }
     header { padding: 24px 32px; background: #102a43; color: white; }
     header p { margin: 8px 0 0; color: #bcccdc; }
-    main { display: grid; grid-template-columns: 300px 1fr; gap: 16px; padding: 16px; }
+    main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px; }
     section { background: white; border: 1px solid var(--border); border-radius: 12px; padding: 16px; box-shadow: 0 1px 2px rgba(16, 42, 67, 0.08); }
     .workspace { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
     h1, h2 { margin: 0 0 12px; }
     h2 { font-size: 16px; }
-    button, .pill { border: 1px solid var(--border); border-radius: 999px; padding: 6px 10px; background: #f8fafc; }
+    label { display: block; margin: 10px 0; font-size: 13px; color: var(--muted); }
+    input { box-sizing: border-box; width: 100%; margin-top: 4px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; color: #102a43; background: white; }
+    input[type="checkbox"] { width: auto; margin-right: 6px; }
+    button, .pill { border: 1px solid var(--border); border-radius: 999px; padding: 6px 10px; background: #f8fafc; cursor: pointer; }
+    button.primary { border-color: var(--accent); background: var(--accent); color: white; }
+    button:disabled { cursor: not-allowed; opacity: 0.55; }
     .run-card { display: block; width: 100%; margin: 0 0 8px; text-align: left; border-radius: 10px; }
     .run-card[selected] { border-color: var(--accent); color: var(--accent); }
-    pre { white-space: pre-wrap; word-break: break-word; background: #f8fafc; border-radius: 8px; padding: 12px; max-height: 360px; overflow: auto; }
+    .status { min-height: 18px; margin: 8px 0 16px; color: var(--muted); font-size: 13px; }
+    .status.error { color: var(--danger); }
+    .status.ok { color: var(--ok); }
+    pre, .panel-body { white-space: pre-wrap; word-break: break-word; background: #f8fafc; border-radius: 8px; padding: 12px; max-height: 360px; overflow: auto; }
+    .timeline-list { margin: 0; padding: 0; list-style: none; }
+    .timeline-list li { padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .timeline-list li:last-child { border-bottom: 0; }
+    .event-type { color: var(--accent); font-weight: 700; }
+    .event-time { display: block; color: var(--muted); font-size: 12px; }
     .empty { color: var(--muted); }
     @media (max-width: 900px) { main, .workspace { grid-template-columns: 1fr; } }
   </style>
@@ -562,68 +575,245 @@ def _operator_console_html() -> str:
   </header>
   <main>
     <section aria-label="Run Queue">
+      <h2>Create Governed Run</h2>
+      <form id="create-run-form" onsubmit="createRun(event)">
+        <label>case_id<input name="case_id" required placeholder="demo-case"></label>
+        <label>sample_name<input name="sample_name" value="RAA"></label>
+        <label>method<input name="method" value="chainladder"></label>
+        <label>review_threshold_origin_count<input name="review_threshold_origin_count" type="number" min="0" step="1" placeholder="optional"></label>
+        <label><input name="background" type="checkbox" checked> background</label>
+        <button id="create-run-button" class="primary" type="submit">Create run</button>
+      </form>
+      <div id="operation-status" class="status" aria-live="polite"></div>
       <h2>Run Queue</h2>
       <div id="run-queue" class="empty">Loading runs…</div>
     </section>
     <div class="workspace">
-      <section aria-label="Timeline"><h2>Timeline</h2><pre id="timeline">Loading…</pre></section>
+      <section aria-label="Timeline"><h2>Timeline</h2><div id="timeline" class="panel-body">Loading…</div></section>
       <section aria-label="Artifact Panel"><h2>Artifact Panel</h2><pre id="artifact-panel">Loading…</pre></section>
       <section aria-label="Review Panel"><h2>Review Panel</h2><pre id="review-panel">Loading…</pre></section>
-      <section aria-label="Action Panel"><h2>Action Panel</h2><pre id="action-panel">Loading…</pre></section>
+      <section aria-label="Action Panel"><h2>Action Panel</h2><div id="action-panel" class="panel-body">Loading…</div></section>
     </div>
   </main>
   <script>
+    let selectedRunId = null;
+    let pollTimer = null;
+    const activeEventTypes = ["run.accepted", "run.queued", "run.running"];
+    const terminalEventTypes = ["run.completed", "run.failed", "run.needs_review"];
+
+    function setOperationStatus(message, statusClass = "") {
+      const status = document.getElementById("operation-status");
+      status.textContent = message || "";
+      status.className = statusClass ? `status ${statusClass}` : "status";
+    }
+
     function renderConsoleError(message) {
       const queue = document.getElementById("run-queue");
       queue.textContent = message;
       queue.className = "empty";
-      document.getElementById("timeline").textContent = message;
+      renderTimeline([{event_type: "run.failed", summary: message}]);
       document.getElementById("artifact-panel").textContent = message;
       document.getElementById("review-panel").textContent = message;
       document.getElementById("action-panel").textContent = message;
     }
 
-    async function loadConsole(runId) {
+    async function parseJsonOrThrow(response, context) {
+      const body = await response.text();
+      let payload;
+      try {
+        payload = body ? JSON.parse(body) : {};
+      } catch (error) {
+        throw new Error(`${context} response was not valid JSON.`);
+      }
+      if (!response.ok) {
+        const detail = payload.detail ? `: ${payload.detail}` : "";
+        throw new Error(`${context} failed (${response.status} ${response.statusText})${detail}`);
+      }
+      return payload;
+    }
+
+    function renderTimeline(events) {
+      const timeline = document.getElementById("timeline");
+      timeline.innerHTML = "";
+      if (!events || events.length === 0) {
+        timeline.textContent = "No events recorded yet.";
+        timeline.className = "panel-body empty";
+        return;
+      }
+      timeline.className = "panel-body";
+      const list = document.createElement("ul");
+      list.className = "timeline-list";
+      for (const event of events) {
+        const item = document.createElement("li");
+        const type = document.createElement("span");
+        type.className = "event-type";
+        type.textContent = event.event_type || "run.unknown";
+        const time = document.createElement("span");
+        time.className = "event-time";
+        time.textContent = event.timestamp || "pending timestamp";
+        const summary = document.createElement("span");
+        summary.textContent = event.summary ? ` — ${event.summary}` : "";
+        item.append(type, summary, time);
+        list.appendChild(item);
+      }
+      timeline.appendChild(list);
+    }
+
+    function shouldPollEvents(events) {
+      if (!events || events.length === 0) return false;
+      if (events.some((event) => terminalEventTypes.includes(event.event_type))) return false;
+      return events.some((event) => activeEventTypes.includes(event.event_type));
+    }
+
+    function stopPolling() {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    }
+
+    function startPolling(runId) {
+      stopPolling();
+      if (!runId) return;
+      selectedRunId = runId;
+      pollRunEvents(runId);
+      pollTimer = setInterval(() => pollRunEvents(runId), 2000);
+    }
+
+    async function pollRunEvents(runId) {
+      try {
+        const response = await fetch(`/runs/${encodeURIComponent(runId)}/events`);
+        const payload = await parseJsonOrThrow(response, "Run events");
+        renderTimeline(payload.events || []);
+        if (!shouldPollEvents(payload.events || [])) {
+          stopPolling();
+          await loadConsole(runId, { preservePolling: true });
+        }
+      } catch (error) {
+        stopPolling();
+        const message = error instanceof Error ? error.message : "Failed to poll run events.";
+        setOperationStatus(message, "error");
+      }
+    }
+
+    function renderRunQueue(state) {
+      const queue = document.getElementById("run-queue");
+      queue.innerHTML = "";
+      if (!state.run_cards.length) {
+        queue.textContent = "No runs recorded yet.";
+        queue.className = "empty";
+        return;
+      }
+      queue.className = "";
+      for (const card of state.run_cards) {
+        const button = document.createElement("button");
+        button.className = "run-card";
+        if (card.selected) button.setAttribute("selected", "selected");
+        button.textContent = `${card.case_id || "unknown case"} · ${card.status || "unknown"}`;
+        button.onclick = () => loadConsole(card.run_id);
+        queue.appendChild(button);
+      }
+    }
+
+    function renderActionPanel(actionPanel) {
+      const container = document.getElementById("action-panel");
+      container.innerHTML = "";
+      const actions = (actionPanel && actionPanel.actions) || [];
+      if (actions.length === 0) {
+        container.textContent = "No actions available.";
+        container.className = "panel-body empty";
+        return;
+      }
+      container.className = "panel-body";
+      for (const action of actions) {
+        const button = document.createElement("button");
+        button.textContent = action.label || action.action_id || "Run action";
+        button.disabled = !action.enabled;
+        button.onclick = () => runConsoleAction(action);
+        container.appendChild(button);
+      }
+    }
+
+    async function loadConsole(runId, options = {}) {
       const suffix = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
       try {
         const response = await fetch(`/console/state${suffix}`);
-        const body = await response.text();
-        let state;
-        try {
-          state = JSON.parse(body);
-        } catch (error) {
-          throw new Error("Console state response was not valid JSON.");
-        }
-
-        if (!response.ok) {
-          throw new Error(`Failed to load console state (${response.status} ${response.statusText}).`);
-        }
-
-        const queue = document.getElementById("run-queue");
-        queue.innerHTML = "";
-        if (!state.run_cards.length) {
-          queue.textContent = "No runs recorded yet.";
-          queue.className = "empty";
-        } else {
-          queue.className = "";
-          for (const card of state.run_cards) {
-            const button = document.createElement("button");
-            button.className = "run-card";
-            if (card.selected) button.setAttribute("selected", "selected");
-            button.textContent = `${card.case_id || "unknown case"} · ${card.status || "unknown"}`;
-            button.onclick = () => loadConsole(card.run_id);
-            queue.appendChild(button);
-          }
-        }
-        document.getElementById("timeline").textContent = JSON.stringify(state.timeline, null, 2);
+        const state = await parseJsonOrThrow(response, "Console state");
+        selectedRunId = state.selected_run_id;
+        renderRunQueue(state);
+        renderTimeline(state.timeline || []);
         document.getElementById("artifact-panel").textContent = JSON.stringify(state.artifact_panel, null, 2);
         document.getElementById("review-panel").textContent = JSON.stringify(state.review_panel, null, 2);
-        document.getElementById("action-panel").textContent = JSON.stringify(state.action_panel, null, 2);
+        renderActionPanel(state.action_panel);
+        if (!options.preservePolling && shouldPollEvents(state.timeline || [])) {
+          startPolling(state.selected_run_id);
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to load console state.";
         renderConsoleError(message);
       }
     }
+
+    async function createRun(event) {
+      event.preventDefault();
+      stopPolling();
+      const form = event.currentTarget;
+      const formData = new FormData(form);
+      const thresholdValue = formData.get("review_threshold_origin_count");
+      const payload = {
+        case_id: String(formData.get("case_id") || "").trim(),
+        sample_name: String(formData.get("sample_name") || "RAA").trim() || "RAA",
+        method: String(formData.get("method") || "chainladder").trim() || "chainladder",
+        background: formData.get("background") === "on",
+      };
+      if (thresholdValue !== null && String(thresholdValue).trim() !== "") {
+        payload.review_threshold_origin_count = Number(thresholdValue);
+      }
+      setOperationStatus("Creating governed run…");
+      try {
+        const response = await fetch("/runs", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const result = await parseJsonOrThrow(response, "Create run");
+        setOperationStatus(`${result.status || "created"}: ${result.run_id || result.case_id || "run"}`, "ok");
+        await loadConsole(result.run_id);
+        if (result.run_id && (result.execution_mode === "background" || activeEventTypes.includes(`run.${result.status}`))) {
+          startPolling(result.run_id);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to create run.";
+        setOperationStatus(message, "error");
+      }
+    }
+
+    async function runConsoleAction(action) {
+      if (!action || !action.enabled) return;
+      stopPolling();
+      setOperationStatus(`Running action: ${action.label || action.action_id || "action"}…`);
+      try {
+        const response = await fetch(action.path, {
+          method: action.method || "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        });
+        const result = await parseJsonOrThrow(response, action.label || "Console action");
+        setOperationStatus(`${result.status || "completed"}: ${result.run_id || "action complete"}`, "ok");
+        if (result.run_id) {
+          await loadConsole(result.run_id);
+          if (activeEventTypes.includes(`run.${result.status}`)) {
+            startPolling(result.run_id);
+          }
+        } else {
+          await loadConsole(selectedRunId);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to run console action.";
+        setOperationStatus(message, "error");
+      }
+    }
+
     loadConsole();
   </script>
 </body>

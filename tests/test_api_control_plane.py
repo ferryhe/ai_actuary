@@ -258,6 +258,36 @@ def test_console_shell_serves_operator_console_html(tmp_path):
     assert "renderConsoleError" in html
     assert "response.ok" in html
     assert "JSON.parse" in html
+    assert "Create Governed Run" in html
+    assert "case_id" in html
+    assert "sample_name" in html
+    assert "method" in html
+    assert "review_threshold_origin_count" in html
+    assert "background" in html
+    assert "createRun(" in html
+    assert "pollRunEvents(" in html
+    assert "runConsoleAction(" in html
+
+
+def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path):
+    client = _client(tmp_path)
+
+    html = client.get("/console").text
+
+    assert "name=\"sample_name\"" in html
+    assert "value=\"RAA\"" in html
+    assert "name=\"method\"" in html
+    assert "value=\"chainladder\"" in html
+    assert "name=\"background\"" in html
+    assert "checked" in html
+    assert "fetch(\"/runs\"" in html
+    assert "fetch(`/runs/${encodeURIComponent(runId)}/events`)" in html
+    assert "run.accepted" in html
+    assert "run.queued" in html
+    assert "run.running" in html
+    assert "run.completed" in html
+    assert "run.needs_review" in html
+    assert "run.failed" in html
 
 
 def test_console_state_exposes_symphony_style_panels(tmp_path):
