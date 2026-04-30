@@ -193,6 +193,60 @@ def test_run_detail_exposes_symphony_style_events_and_artifacts(tmp_path):
     assert detail["artifact_manifest"]["case_id"] == "detail-case"
 
 
+def test_console_shell_serves_operator_console_html(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.get("/console")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    html = response.text
+    assert "AI Actuary Operator Console" in html
+    assert "Run Queue" in html
+    assert "Timeline" in html
+    assert "Artifact Panel" in html
+    assert "Review Panel" in html
+    assert "Action Panel" in html
+    assert "/console/state" in html
+
+
+def test_console_state_exposes_symphony_style_panels(tmp_path):
+    client = _client(tmp_path, runner_module=ReviewRunnerModule)
+    run = client.post("/runs", json={"case_id": "console-case"}).json()
+
+    response = client.get(f"/console/state?run_id={run['run_id']}")
+
+    assert response.status_code == 200
+    state = response.json()
+    assert state["console"]["title"] == "AI Actuary Operator Console"
+    assert state["selected_run_id"] == run["run_id"]
+    assert state["run_cards"][0]["run_id"] == run["run_id"]
+    assert state["run_cards"][0]["needs_review"] is True
+    assert [event["event_type"] for event in state["timeline"]] == [
+        "run.queued",
+        "run.running",
+        "run.needs_review",
+    ]
+    assert state["artifact_panel"]["artifact_root"]
+    assert state["review_panel"]["present"] is True
+    assert state["review_panel"]["status"] == "review_required"
+    assert [action["action_id"] for action in state["action_panel"]["actions"]] == ["rerun"]
+
+
+def test_console_state_defaults_to_latest_run(tmp_path):
+    client = _client(tmp_path)
+    older = client.post("/runs", json={"case_id": "older-console-case"}).json()
+    newer = client.post("/runs", json={"case_id": "newer-console-case"}).json()
+
+    response = client.get("/console/state")
+
+    assert response.status_code == 200
+    state = response.json()
+    assert state["selected_run_id"] == newer["run_id"]
+    assert state["selected_run"]["run_id"] == newer["run_id"]
+    assert {card["run_id"] for card in state["run_cards"]} == {older["run_id"], newer["run_id"]}
+
+
 def test_rerun_endpoint_creates_distinct_run_id(tmp_path):
     client = _client(tmp_path)
     original = client.post("/runs", json={"case_id": "rerun-case"}).json()

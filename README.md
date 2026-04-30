@@ -254,6 +254,8 @@ uvicorn 'reserving_workflow.api.app:create_app' --factory --host 0.0.0.0 --port 
 
 Key routes:
 
+- `GET /console` — serve a lightweight operator console shell
+- `GET /console/state` — return the console-ready run queue, timeline, artifact, review, and action panels
 - `POST /runs`
 - `GET /runs`
 - `GET /runs/{run_id}`
@@ -264,7 +266,7 @@ Key routes:
 - `POST /repeatability`
 - `POST /benchmarks/batch`
 
-The `/runs/{run_id}` detail payload includes derived `events` such as `run.queued`, `run.running`, and `run.completed`, so the future UI can render a timeline without creating a second runtime contract.
+The `/runs/{run_id}` detail payload includes derived `events` such as `run.queued`, `run.running`, and `run.completed`. PR5 adds `/console` and `/console/state` on top of the same data, giving operators a simple run queue, timeline, artifact panel, review panel, and rerun action panel without introducing a second runtime contract or a frontend build system.
 
 ---
 
