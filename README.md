@@ -243,6 +243,29 @@ python scripts/rerun_case.py \
   --artifact-dir ./tmp/registry-case-rerun
 ```
 
+### G. Use the FastAPI control plane
+
+PR4 adds a service/control-plane wrapper that reuses the same operator, registry, artifact, replay, repeatability, and batch helpers used by the CLI. It is designed as the backend shape for a future Symphony-style operator console.
+
+```bash
+pip install -e '.[api]'
+uvicorn 'reserving_workflow.api.app:create_app' --factory --host 0.0.0.0 --port 8000
+```
+
+Key routes:
+
+- `POST /runs`
+- `GET /runs`
+- `GET /runs/{run_id}`
+- `POST /runs/{run_id}/rerun`
+- `GET /runs/{run_id}/artifacts`
+- `GET /runs/{run_id}/review-packet`
+- `POST /replay`
+- `POST /repeatability`
+- `POST /benchmarks/batch`
+
+The `/runs/{run_id}` detail payload includes derived `events` such as `run.queued`, `run.running`, and `run.completed`, so the future UI can render a timeline without creating a second runtime contract.
+
 ---
 
 ## Artifact Model
@@ -312,6 +335,7 @@ Minimum runtime requirements:
 - Python environment with project dependencies installed
 - `OPENAI_API_KEY` for governed planner runs
 - repository checkout or editable install, because operator entrypoints load modules from `workflows/`
+- FastAPI runtime dependencies installed with `pip install -e '.[api]'` for the local control plane
 
 ---
 
@@ -323,6 +347,8 @@ Minimum runtime requirements:
 - Prompt 8: batch benchmark runner with baseline vs governed comparison
 - Prompt 9: replay and repeatability helpers plus CLI wrappers
 - Prompt 10: developer handoff documentation closeout
+- PR1-PR3: stable operator contract, artifact/review delivery boundary, and local run registry/rerun tooling
+- PR4: FastAPI control plane skeleton aligned to the OpenAI Agents runtime contract and Symphony-style run/event views
 
 ### Not Yet Implemented
 
@@ -330,13 +356,13 @@ Minimum runtime requirements:
 - outbound messaging/delivery of review packets
 - production Hermes runtime orchestration instead of local callable worker modules
 - richer actuarial methods, multi-dataset benchmark catalogs, and formal sign-off workflows
-- service-layer HTTP API
+- full operator web console, background queue, streaming event bus, and multi-user access control
 
 ### Next Recommended Steps
 
-1. add artifact-store and retention strategy
-2. add review-packet delivery adapters after packet generation
-3. add HTTP/API surface only after current artifact contracts stabilize
+1. build a minimal Symphony-style operator console on top of the FastAPI run/event views
+2. add background execution and polling/streaming events after the synchronous control plane stabilizes
+3. add artifact-store and retention strategy
 4. expand benchmark coverage beyond the current sample-driven path
 5. harden replay/repeatability into CI-grade regression workflows
 
