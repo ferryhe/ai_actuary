@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from reserving_workflow import operator_entrypoint
@@ -77,6 +78,16 @@ def create_app(
     @app.get("/health")
     def health() -> dict[str, Any]:
         return {"ok": True, "service": "ai-actuary-control-plane"}
+
+    @app.get("/console", response_class=HTMLResponse)
+    def operator_console() -> str:
+        return _operator_console_html()
+
+    @app.get("/console/state")
+    def operator_console_state(run_id: str | None = None) -> dict[str, Any]:
+        runs = run_registry.list_runs(resolved_settings.registry_path)
+        selected_entry = _select_console_run(runs, run_id)
+        return _console_state_payload(selected_entry, runs)
 
     @app.post("/runs")
     def create_run(request: RunCreateRequest) -> dict[str, Any]:
@@ -213,6 +224,113 @@ def _run_summary(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _select_console_run(runs: list[dict[str, Any]], run_id: str | None) -> dict[str, Any] | None:
+    if run_id is None:
+        return runs[0] if runs else None
+    for entry in runs:
+        if entry.get("run_id") == run_id:
+            return entry
+    raise HTTPException(status_code=404, detail=f"Run id not found in registry: {run_id}")
+
+
+def _console_state_payload(selected_entry: dict[str, Any] | None, runs: list[dict[str, Any]]) -> dict[str, Any]:
+    selected_run_id = str(selected_entry.get("run_id")) if selected_entry else None
+    return {
+        "console": {
+            "title": "AI Actuary Operator Console",
+            "description": "Symphony-style shell over the existing governed run control plane.",
+            "version": "pr5-shell",
+        },
+        "selected_run_id": selected_run_id,
+        "selected_run": _console_selected_run(selected_entry),
+        "run_cards": [_console_run_card(entry, selected_run_id=selected_run_id) for entry in runs],
+        "timeline": _console_timeline(selected_entry),
+        "artifact_panel": _console_artifact_panel(selected_entry),
+        "review_panel": _console_review_panel(selected_entry),
+        "action_panel": _console_action_panel(selected_entry),
+    }
+
+
+def _console_selected_run(entry: dict[str, Any] | None) -> dict[str, Any] | None:
+    if entry is None:
+        return None
+    return {
+        "run_id": entry.get("run_id"),
+        "case_id": entry.get("case_id"),
+        "status": entry.get("status"),
+        "summary": entry.get("summary"),
+        "created_at": entry.get("created_at"),
+        "updated_at": entry.get("updated_at"),
+        "artifact_root": entry.get("artifact_root"),
+        "review_required": bool(entry.get("review_required")) or entry.get("status") == "needs_review",
+    }
+
+
+def _console_run_card(entry: dict[str, Any], *, selected_run_id: str | None) -> dict[str, Any]:
+    status = entry.get("status")
+    return {
+        "run_id": entry.get("run_id"),
+        "case_id": entry.get("case_id"),
+        "status": status,
+        "summary": entry.get("summary"),
+        "updated_at": entry.get("updated_at"),
+        "needs_review": bool(entry.get("review_required")) or status == "needs_review",
+        "selected": entry.get("run_id") == selected_run_id,
+    }
+
+
+def _console_timeline(entry: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if entry is None:
+        return []
+    run_id = str(entry.get("run_id"))
+    return [_event_from_history(run_id, item) for item in entry.get("status_history", [])]
+
+
+def _console_artifact_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
+    if entry is None:
+        return {"present": False, "artifact_root": None, "artifact_manifest": None, "artifact_paths": {}}
+    manifest = _load_manifest_for_entry(entry)
+    return {
+        "present": manifest is not None,
+        "artifact_root": entry.get("artifact_root"),
+        "artifact_manifest": manifest,
+        "artifact_paths": manifest.get("artifact_paths", {}) if manifest else {},
+    }
+
+
+def _console_review_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
+    if entry is None:
+        return {"present": False, "status": "not_available", "review_required": False, "packet": None}
+    packet = _load_review_packet_for_entry(entry)
+    packet_payload = packet.get("packet") if packet.get("present") else None
+    return {
+        "present": bool(packet.get("present")),
+        "status": (packet_payload or {}).get("status", "not_required"),
+        "review_required": bool(entry.get("review_required")) or entry.get("status") == "needs_review",
+        "packet": packet_payload,
+        "json_path": packet.get("json_path"),
+        "markdown_path": packet.get("markdown_path"),
+        "review_delivery": entry.get("review_delivery"),
+    }
+
+
+def _console_action_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
+    if entry is None:
+        return {"actions": []}
+    run_id = entry.get("run_id")
+    return {
+        "actions": [
+            {
+                "action_id": "rerun",
+                "label": "Rerun",
+                "method": "POST",
+                "path": f"/runs/{run_id}/rerun",
+                "enabled": bool(run_id),
+            }
+        ]
+    }
+
+
 def _event_from_history(run_id: str, history_item: dict[str, Any]) -> dict[str, Any]:
     status = history_item.get("status")
     return {
@@ -288,3 +406,103 @@ def _load_batch_runner_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _operator_console_html() -> str:
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Actuary Operator Console</title>
+  <style>
+    :root { color-scheme: light; --border: #d9e2ec; --muted: #52606d; --accent: #2457c5; }
+    body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f7fb; color: #102a43; }
+    header { padding: 24px 32px; background: #102a43; color: white; }
+    header p { margin: 8px 0 0; color: #bcccdc; }
+    main { display: grid; grid-template-columns: 300px 1fr; gap: 16px; padding: 16px; }
+    section { background: white; border: 1px solid var(--border); border-radius: 12px; padding: 16px; box-shadow: 0 1px 2px rgba(16, 42, 67, 0.08); }
+    .workspace { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    h1, h2 { margin: 0 0 12px; }
+    h2 { font-size: 16px; }
+    button, .pill { border: 1px solid var(--border); border-radius: 999px; padding: 6px 10px; background: #f8fafc; }
+    .run-card { display: block; width: 100%; margin: 0 0 8px; text-align: left; border-radius: 10px; }
+    .run-card[selected] { border-color: var(--accent); color: var(--accent); }
+    pre { white-space: pre-wrap; word-break: break-word; background: #f8fafc; border-radius: 8px; padding: 12px; max-height: 360px; overflow: auto; }
+    .empty { color: var(--muted); }
+    @media (max-width: 900px) { main, .workspace { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>AI Actuary Operator Console</h1>
+    <p>Symphony-style shell over runs, timeline events, artifacts, review packets, and actions. Data source: <code>/console/state</code>.</p>
+  </header>
+  <main>
+    <section aria-label="Run Queue">
+      <h2>Run Queue</h2>
+      <div id="run-queue" class="empty">Loading runs…</div>
+    </section>
+    <div class="workspace">
+      <section aria-label="Timeline"><h2>Timeline</h2><pre id="timeline">Loading…</pre></section>
+      <section aria-label="Artifact Panel"><h2>Artifact Panel</h2><pre id="artifact-panel">Loading…</pre></section>
+      <section aria-label="Review Panel"><h2>Review Panel</h2><pre id="review-panel">Loading…</pre></section>
+      <section aria-label="Action Panel"><h2>Action Panel</h2><pre id="action-panel">Loading…</pre></section>
+    </div>
+  </main>
+  <script>
+    function renderConsoleError(message) {
+      const queue = document.getElementById("run-queue");
+      queue.textContent = message;
+      queue.className = "empty";
+      document.getElementById("timeline").textContent = message;
+      document.getElementById("artifact-panel").textContent = message;
+      document.getElementById("review-panel").textContent = message;
+      document.getElementById("action-panel").textContent = message;
+    }
+
+    async function loadConsole(runId) {
+      const suffix = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+      try {
+        const response = await fetch(`/console/state${suffix}`);
+        const body = await response.text();
+        let state;
+        try {
+          state = JSON.parse(body);
+        } catch (error) {
+          throw new Error("Console state response was not valid JSON.");
+        }
+
+        if (!response.ok) {
+          throw new Error(`Failed to load console state (${response.status} ${response.statusText}).`);
+        }
+
+        const queue = document.getElementById("run-queue");
+        queue.innerHTML = "";
+        if (!state.run_cards.length) {
+          queue.textContent = "No runs recorded yet.";
+          queue.className = "empty";
+        } else {
+          queue.className = "";
+          for (const card of state.run_cards) {
+            const button = document.createElement("button");
+            button.className = "run-card";
+            if (card.selected) button.setAttribute("selected", "selected");
+            button.textContent = `${card.case_id || "unknown case"} · ${card.status || "unknown"}`;
+            button.onclick = () => loadConsole(card.run_id);
+            queue.appendChild(button);
+          }
+        }
+        document.getElementById("timeline").textContent = JSON.stringify(state.timeline, null, 2);
+        document.getElementById("artifact-panel").textContent = JSON.stringify(state.artifact_panel, null, 2);
+        document.getElementById("review-panel").textContent = JSON.stringify(state.review_panel, null, 2);
+        document.getElementById("action-panel").textContent = JSON.stringify(state.action_panel, null, 2);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to load console state.";
+        renderConsoleError(message);
+      }
+    }
+    loadConsole();
+  </script>
+</body>
+</html>"""
