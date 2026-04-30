@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 
@@ -55,14 +56,15 @@ def record_run_event(
             "review_required": bool(review_required) if review_required is not None else status == "needs_review",
             "error_category": error_category,
             "errors": list(errors or []),
-            "review_delivery": review_delivery,
+            "review_delivery": _to_serializable(review_delivery),
             "operator_params": _to_serializable(operator_params or {}),
             "status_history": [history_item],
         }
         runs.append(entry)
     else:
         entry["task_id"] = task_id
-        entry["case_id"] = case_id
+        if case_id is not None:
+            entry["case_id"] = case_id
         entry["status"] = status
         entry["updated_at"] = now
         if artifact_root is not None:
@@ -108,7 +110,11 @@ def _read_registry_payload(path: Path) -> dict[str, Any]:
 
 
 def _write_registry_payload(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+        handle.write(serialized)
+        temp_path = Path(handle.name)
+    temp_path.replace(path)
 
 
 def _utc_now() -> str:

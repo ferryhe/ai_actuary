@@ -32,7 +32,7 @@ class FakeRunnerModule:
             "worker_result": {
                 "status": "completed",
                 "case_id": task.case_ref,
-                "run_id": f"{task.task_id}-local",
+                "run_id": task.run_id,
                 "summary": "worker complete",
                 "artifact_paths": {"run_manifest": str(Path(task.inputs["artifact_dir"]) / "run_manifest.json")},
                 "metrics": {},
@@ -117,6 +117,54 @@ def test_run_registry_records_status_history(tmp_path):
     assert entry["operator_params"]["case_id"] == "case-a"
 
 
+def test_run_registry_serializes_review_delivery_on_creation(tmp_path):
+    registry = _load_module("run_registry_serialization", REGISTRY_PATH)
+    registry_path = tmp_path / "run-registry.json"
+    delivery_path = tmp_path / "outbox" / "packet.json"
+
+    entry = registry.record_run_event(
+        registry_path=registry_path,
+        task_id="operator-case-serializable",
+        case_id="case-serializable",
+        run_id="operator-case-serializable-local",
+        status="completed",
+        artifact_root=str(tmp_path / "case-serializable"),
+        summary="done",
+        review_delivery={"json": delivery_path},
+    )
+
+    assert entry["review_delivery"]["json"] == str(delivery_path)
+    persisted = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert persisted["runs"][0]["review_delivery"]["json"] == str(delivery_path)
+
+
+def test_run_registry_preserves_case_id_when_update_event_omits_it(tmp_path):
+    registry = _load_module("run_registry_case_id", REGISTRY_PATH)
+    registry_path = tmp_path / "run-registry.json"
+
+    registry.record_run_event(
+        registry_path=registry_path,
+        task_id="operator-case-preserve",
+        case_id="case-preserve",
+        run_id="operator-case-preserve-local",
+        status="queued",
+        artifact_root=str(tmp_path / "case-preserve"),
+        summary="queued",
+    )
+    registry.record_run_event(
+        registry_path=registry_path,
+        task_id="operator-case-preserve",
+        case_id=None,
+        run_id="operator-case-preserve-local",
+        status="running",
+        artifact_root=str(tmp_path / "case-preserve"),
+        summary="running",
+    )
+
+    entry = registry.get_run(registry_path, "operator-case-preserve-local")
+    assert entry["case_id"] == "case-preserve"
+
+
 def test_run_operator_flow_writes_completed_entry_to_registry(tmp_path):
     operator = _load_module("operator_registry", OPERATOR_PATH)
     registry_path = tmp_path / "run-registry.json"
@@ -166,6 +214,35 @@ def test_run_operator_flow_writes_failed_entry_to_registry(tmp_path):
     assert entry["status"] == "failed"
     assert entry["error_category"] == "planner_runtime"
     assert [item["status"] for item in entry["status_history"]] == ["queued", "running", "failed"]
+
+
+def test_repeated_case_runs_get_distinct_registry_entries(tmp_path):
+    operator = _load_module("operator_registry_distinct_runs", OPERATOR_PATH)
+    registry_path = tmp_path / "run-registry.json"
+
+    first = operator.run_operator_flow(
+        case_id="same-case",
+        artifact_dir=tmp_path / "artifacts-1",
+        objective="first run",
+        runner_module=FakeRunnerModule,
+        task_contracts_module=FakeTaskContractsModule,
+        registry_path=registry_path,
+    )
+    second = operator.run_operator_flow(
+        case_id="same-case",
+        artifact_dir=tmp_path / "artifacts-2",
+        objective="second run",
+        runner_module=FakeRunnerModule,
+        task_contracts_module=FakeTaskContractsModule,
+        registry_path=registry_path,
+    )
+
+    registry = _load_module("run_registry_distinct_runs_lookup", REGISTRY_PATH)
+    runs = registry.list_runs(registry_path)
+
+    assert first["run_id"] != second["run_id"]
+    assert len(runs) == 2
+    assert {item["run_id"] for item in runs} == {first["run_id"], second["run_id"]}
 
 
 def test_list_and_show_run_scripts_emit_json(tmp_path):

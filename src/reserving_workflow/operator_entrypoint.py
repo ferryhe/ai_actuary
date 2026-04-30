@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,7 @@ def run_operator_flow(
     user_prompt: str | None = None,
     review_delivery_dir: str | Path | None = None,
     registry_path: str | Path | None = None,
+    run_id: str | None = None,
     runner_module=None,
     task_contracts_module=None,
 ):
@@ -74,12 +76,12 @@ def run_operator_flow(
         review_threshold_origin_count=review_threshold_origin_count,
         task_contracts_module=task_contracts_module,
     )
-    run_id = getattr(task, "run_id", None) or f"{getattr(task, 'task_id', 'task')}-local"
+    run_id = run_id or getattr(task, "run_id", None) or _generate_operator_run_id(getattr(task, "task_id", "task"))
     if getattr(task, "run_id", None) is None:
         setattr(task, "run_id", run_id)
     runner = runner_module or _load_runner_module()
     if registry_path is not None:
-        _record_registry_event(
+        queued_registry_error = _record_registry_event_best_effort(
             registry_path=registry_path,
             task=task,
             run_id=run_id,
@@ -93,7 +95,7 @@ def run_operator_flow(
             review_delivery_dir=review_delivery_dir,
             summary=f"Queued operator run for {case_id}",
         )
-        _record_registry_event(
+        running_registry_error = _record_registry_event_best_effort(
             registry_path=registry_path,
             task=task,
             run_id=run_id,
@@ -107,12 +109,16 @@ def run_operator_flow(
             review_delivery_dir=review_delivery_dir,
             summary=f"Running operator run for {case_id}",
         )
+    else:
+        queued_registry_error = None
+        running_registry_error = None
     try:
         raw_result = runner.run_openai_governed_workflow(task, user_prompt=user_prompt)
     except Exception as exc:
         failure_result = _build_operator_failure_result(task, exc)
+        _append_registry_errors(failure_result, queued_registry_error, running_registry_error)
         if registry_path is not None:
-            _record_registry_final_result(registry_path, task, artifact_dir, failure_result)
+            _record_registry_final_result_best_effort(registry_path, task, artifact_dir, failure_result)
         return failure_result
     normalized = _normalize_operator_result(task, raw_result)
     if review_delivery_dir is not None and normalized.get("status") == "needs_review" and normalized.get("review_packet"):
@@ -134,8 +140,9 @@ def run_operator_flow(
             normalized.setdefault("errors", []).append(
                 f"review_delivery_failed: {type(exc).__name__}: {exc}"
             )
+    _append_registry_errors(normalized, queued_registry_error, running_registry_error)
     if registry_path is not None:
-        _record_registry_final_result(registry_path, task, artifact_dir, normalized)
+        _record_registry_final_result_best_effort(registry_path, task, artifact_dir, normalized)
     return normalized
 
 
@@ -188,6 +195,7 @@ def rerun_from_registry(
     if review_delivery_dir is not None:
         operator_params["review_delivery_dir"] = str(review_delivery_dir)
     operator_params["registry_path"] = str(registry_path)
+    operator_params["run_id"] = _generate_operator_run_id(entry.get("task_id") or f"operator-{entry.get('case_id') or 'case'}")
     if runner_module is not None:
         operator_params["runner_module"] = runner_module
     if task_contracts_module is not None:
@@ -201,7 +209,10 @@ def _normalize_operator_result(task: Any, raw_result: dict[str, Any]) -> dict[st
     status = worker_result.get("status") or final_output.get("worker_status") or "failed"
     review_packet = raw_result.get("review_packet") if status == "needs_review" else None
     summary = worker_result.get("summary") or final_output.get("narrative_summary") or f"Operator run for {task.case_ref} finished with status {status}."
-    run_id = worker_result.get("run_id") or getattr(task, "run_id", None) or f"{getattr(task, 'task_id', 'task')}-local"
+    task_run_id = getattr(task, "run_id", None)
+    if task_run_id is not None:
+        worker_result["run_id"] = task_run_id
+    run_id = worker_result.get("run_id") or task_run_id or _generate_operator_run_id(getattr(task, "task_id", "task"))
     response = {
         "ok": status != "failed",
         "status": status,
@@ -330,7 +341,7 @@ def _record_registry_final_result(registry_path: str | Path, task: Any, artifact
         registry_path=registry_path,
         task_id=getattr(task, "task_id", "unknown-task"),
         case_id=result.get("case_id") or getattr(task, "case_ref", None),
-        run_id=result.get("run_id") or f"{getattr(task, 'task_id', 'task')}-local",
+        run_id=result.get("run_id") or getattr(task, "run_id", None) or _generate_operator_run_id(getattr(task, "task_id", "task")),
         status=result.get("status", "failed"),
         artifact_root=str(Path(artifact_dir).expanduser().resolve()),
         summary=result.get("summary"),
@@ -339,6 +350,37 @@ def _record_registry_final_result(registry_path: str | Path, task: Any, artifact
         errors=list(result.get("errors", []) or []),
         review_delivery=result.get("review_delivery"),
     )
+
+
+def _record_registry_event_best_effort(**kwargs) -> str | None:
+    try:
+        _record_registry_event(**kwargs)
+    except Exception as exc:
+        return f"registry_write_failed: {type(exc).__name__}: {exc}"
+    return None
+
+
+def _record_registry_final_result_best_effort(
+    registry_path: str | Path,
+    task: Any,
+    artifact_dir: str | Path,
+    result: dict[str, Any],
+) -> None:
+    try:
+        _record_registry_final_result(registry_path, task, artifact_dir, result)
+    except Exception as exc:
+        result.setdefault("errors", []).append(f"registry_write_failed: {type(exc).__name__}: {exc}")
+
+
+def _append_registry_errors(result: dict[str, Any], *registry_errors: str | None) -> None:
+    for registry_error in registry_errors:
+        if registry_error is not None:
+            result.setdefault("errors", []).append(registry_error)
+
+
+def _generate_operator_run_id(task_id: str) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"{task_id}-{timestamp}"
 
 
 def _workflow_source_path(*relative_parts: str) -> Path:
