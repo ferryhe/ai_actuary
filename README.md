@@ -82,6 +82,9 @@ All current operator-facing entry points are machine-readable JSON CLIs.
 2. `scripts/run_batch_benchmark.py`
 3. `scripts/replay_case.py`
 4. `scripts/compare_repeatability.py`
+5. `scripts/list_runs.py`
+6. `scripts/show_run.py`
+7. `scripts/rerun_case.py`
 
 ---
 
@@ -102,7 +105,8 @@ set -a && . ./.env && set +a
 ```bash
 python scripts/run_governed_case.py \
   --case-id demo-case \
-  --artifact-dir ./tmp/demo-case
+  --artifact-dir ./tmp/demo-case \
+  --registry-path ./tmp/run-registry.json
 ```
 
 **Step 3 — Agent system:** the OpenAI planner routes the governed run and Hermes worker executes the case.
@@ -204,6 +208,40 @@ python scripts/compare_repeatability.py \
 **Step 2 — Agent system:** repeatability loads each run and evaluates status plus IBNR stability.
 
 **Step 3 — Human:** inspect `stable_ibnr`, `ibnr_values`, and `all_statuses`.
+
+### F. Inspect the local run registry
+
+**Step 1 — Human:** run one or more governed cases with a registry path.
+
+```bash
+python scripts/run_governed_case.py \
+  --case-id registry-case \
+  --artifact-dir ./tmp/registry-case \
+  --registry-path ./tmp/run-registry.json
+```
+
+**Step 2 — Human:** list recorded runs.
+
+```bash
+python scripts/list_runs.py --registry-path ./tmp/run-registry.json
+```
+
+**Step 3 — Human:** inspect one run.
+
+```bash
+python scripts/show_run.py \
+  --registry-path ./tmp/run-registry.json \
+  --run-id operator-registry-case-local
+```
+
+**Step 4 — Human:** rerun a recorded case with optional overrides.
+
+```bash
+python scripts/rerun_case.py \
+  --registry-path ./tmp/run-registry.json \
+  --run-id operator-registry-case-local \
+  --artifact-dir ./tmp/registry-case-rerun
+```
 
 ---
 

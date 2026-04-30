@@ -30,7 +30,7 @@ class FakeRunnerModule:
             "worker_result": {
                 "status": "completed",
                 "case_id": task.case_ref,
-                "run_id": f"operator-{task.case_ref}-local",
+                "run_id": task.run_id,
                 "summary": "worker complete",
                 "artifact_paths": {"run_manifest": str(Path(task.inputs["artifact_dir"]) / "run_manifest.json")},
                 "metrics": {},
@@ -103,7 +103,7 @@ def test_run_operator_flow_returns_governed_result(tmp_path):
     assert result["case_id"] == "operator-case"
     assert result["route"]["mode"] == "governed"
     assert result["worker_result"]["status"] == "completed"
-    assert result["run_id"] == "operator-operator-case-local"
+    assert result["run_id"].startswith("operator-operator-case-")
     assert result["final_output"]["case_id"] == "operator-case"
     assert result["final_output"]["deterministic_method"] == "chainladder"
     assert "review_packet" not in result
@@ -144,7 +144,7 @@ class SpuriousReviewPacketRunnerModule:
             "worker_result": {
                 "status": "completed",
                 "case_id": task.case_ref,
-                "run_id": f"operator-{task.case_ref}-local",
+                "run_id": task.run_id,
                 "summary": "worker complete",
                 "artifact_paths": {},
                 "metrics": {},
@@ -177,7 +177,7 @@ def test_run_operator_flow_falls_back_to_deterministic_run_id_when_runner_omits_
     )
 
     assert result["status"] == "completed"
-    assert result["run_id"] == "operator-missing-run-id-local"
+    assert result["run_id"].startswith("operator-missing-run-id-")
 
 
 def test_run_operator_flow_drops_review_packet_when_status_is_not_review(tmp_path):
@@ -215,7 +215,7 @@ class ReviewDeliveryRunnerModule:
             "worker_result": {
                 "status": "needs_review",
                 "case_id": task.case_ref,
-                "run_id": f"operator-{task.case_ref}-local",
+                "run_id": task.run_id,
                 "summary": "review required",
                 "artifact_paths": {"run_manifest": str(Path(task.inputs["artifact_dir"]) / "run_manifest.json")},
                 "metrics": {},
@@ -234,7 +234,7 @@ class ReviewDeliveryRunnerModule:
             },
             "review_packet": {
                 "case_id": task.case_ref,
-                "run_id": f"operator-{task.case_ref}-local",
+                "run_id": task.run_id,
                 "status": "review_required",
                 "case_summary": "review required",
                 "deterministic_outputs": {},
@@ -272,7 +272,7 @@ class BrokenReviewDeliveryRunnerModule:
             "worker_result": {
                 "status": "needs_review",
                 "case_id": task.case_ref,
-                "run_id": f"operator-{task.case_ref}-local",
+                "run_id": task.run_id,
                 "summary": "review required",
                 "artifact_paths": {},
                 "metrics": {},
@@ -289,7 +289,7 @@ class BrokenReviewDeliveryRunnerModule:
                 "artifact_manifest_path": None,
                 "narrative_summary": "needs review",
             },
-            "review_packet": {"case_id": task.case_ref, "run_id": f"operator-{task.case_ref}-local", "packet_paths": {}},
+            "review_packet": {"case_id": task.case_ref, "run_id": task.run_id, "packet_paths": {}},
         }
 
 
@@ -330,6 +330,79 @@ def test_run_operator_flow_returns_structured_failure_payload_when_runner_crashe
     assert result["errors"] == ["runner unavailable"]
     assert result["worker_result"]["status"] == "failed"
     assert result["worker_result"]["worker_metadata"]["failure_stage"] == "planner_runtime"
+
+
+class BrokenRegistryModule:
+    @staticmethod
+    def record_run_event(**kwargs):
+        raise OSError("registry unavailable")
+
+
+def test_run_operator_flow_returns_result_when_initial_registry_write_fails(tmp_path):
+    module = _load_module()
+    module._load_run_registry_module = lambda: BrokenRegistryModule
+
+    result = module.run_operator_flow(
+        case_id="registry-warning-case",
+        artifact_dir=tmp_path,
+        objective="Operator flow",
+        runner_module=FakeRunnerModule,
+        task_contracts_module=FakeTaskContractsModule,
+        registry_path=tmp_path / "run-registry.json",
+    )
+
+    assert result["status"] == "completed"
+    assert len([item for item in result["errors"] if item.startswith("registry_write_failed:")]) == 3
+
+
+def test_rerun_from_registry_assigns_a_new_run_id(tmp_path):
+    module = _load_module()
+    registry_spec = importlib.util.spec_from_file_location(
+        "run_registry_rerun",
+        ROOT / "src" / "reserving_workflow" / "runtime" / "run_registry.py",
+    )
+    assert registry_spec is not None and registry_spec.loader is not None
+    registry_module = importlib.util.module_from_spec(registry_spec)
+    registry_spec.loader.exec_module(registry_module)
+
+    registry_path = tmp_path / "run-registry.json"
+    registry_module.record_run_event(
+        registry_path=registry_path,
+        task_id="operator-registry-case",
+        case_id="registry-case",
+        run_id="operator-registry-case-original",
+        status="completed",
+        artifact_root=str(tmp_path / "artifacts-original"),
+        summary="done",
+        operator_params={
+            "case_id": "registry-case",
+            "artifact_dir": str(tmp_path / "artifacts-original"),
+            "objective": "registry rerun",
+            "sample_name": "RAA",
+            "method": "chainladder",
+            "review_threshold_origin_count": None,
+            "user_prompt": None,
+            "review_delivery_dir": None,
+        },
+    )
+
+    result = module.rerun_from_registry(
+        "operator-registry-case-original",
+        registry_path=registry_path,
+        artifact_dir=tmp_path / "artifacts-rerun",
+        runner_module=FakeRunnerModule,
+        task_contracts_module=FakeTaskContractsModule,
+    )
+    rerun_entry = registry_module.get_run(registry_path, result["run_id"])
+    original_entry = registry_module.get_run(registry_path, "operator-registry-case-original")
+
+    assert result["status"] == "completed"
+    assert result["run_id"] != "operator-registry-case-original"
+    assert result["run_id"].startswith("operator-registry-case-")
+    assert rerun_entry["run_id"] == result["run_id"]
+    assert original_entry["run_id"] == "operator-registry-case-original"
+    assert len(registry_module.list_runs(registry_path)) == 2
+
 
 
 def test_workflow_source_path_raises_clear_error_when_workflow_file_is_missing(monkeypatch):

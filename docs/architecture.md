@@ -85,6 +85,8 @@ Responsibilities:
 5. **Hermes Worker:** writes artifacts to disk.
 6. **Human:** inspects outputs and decides whether review or follow-up is needed.
 
+When `--registry-path` is configured, the operator path also records a minimal local task lifecycle (`queued -> running -> completed|needs_review|failed`) in a JSON run registry. This registry is intentionally separate from the artifact contract: it indexes runs and their current state, while `run_manifest.json` and related artifacts remain the audit evidence.
+
 The current operator CLI is intentionally contract-first. For single-case governed runs, the top-level JSON response now exposes a stable envelope:
 
 - `ok`
@@ -154,6 +156,21 @@ The current concrete delivery target is:
 ### Batch file
 
 - `comparison_report.json`
+
+### Runtime state files
+
+When local task-state tracking is enabled, the operator runtime also writes a JSON run registry chosen by `--registry-path`. It stores lightweight run indexing metadata such as:
+- `task_id`
+- `case_id`
+- `run_id`
+- `status`
+- `created_at` / `updated_at`
+- `artifact_root`
+- `summary`
+- `operator_params`
+- `status_history`
+
+The registry is not a replacement for manifests; it is a lightweight operational index layered on top of the artifact contract.
 
 The system currently treats the local filesystem as the artifact store. That is a deliberate prototype constraint, not the final intended deployment architecture.
 
