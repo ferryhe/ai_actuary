@@ -598,6 +598,7 @@ def _operator_console_html() -> str:
   <script>
     let selectedRunId = null;
     let pollTimer = null;
+    let pollGeneration = 0;
     const activeEventTypes = ["run.accepted", "run.queued", "run.running"];
     const terminalEventTypes = ["run.completed", "run.failed", "run.needs_review"];
 
@@ -617,6 +618,16 @@ def _operator_console_html() -> str:
       document.getElementById("action-panel").textContent = message;
     }
 
+    function formatResponseDetail(detail) {
+      if (!detail) return "";
+      if (typeof detail === "string") return detail;
+      try {
+        return JSON.stringify(detail);
+      } catch (error) {
+        return String(detail);
+      }
+    }
+
     async function parseJsonOrThrow(response, context) {
       const body = await response.text();
       let payload;
@@ -626,7 +637,8 @@ def _operator_console_html() -> str:
         throw new Error(`${context} response was not valid JSON.`);
       }
       if (!response.ok) {
-        const detail = payload.detail ? `: ${payload.detail}` : "";
+        const detailMessage = formatResponseDetail(payload.detail);
+        const detail = detailMessage ? `: ${detailMessage}` : "";
         throw new Error(`${context} failed (${response.status} ${response.statusText})${detail}`);
       }
       return payload;
@@ -666,6 +678,7 @@ def _operator_console_html() -> str:
     }
 
     function stopPolling() {
+      pollGeneration += 1;
       if (pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;
@@ -676,20 +689,24 @@ def _operator_console_html() -> str:
       stopPolling();
       if (!runId) return;
       selectedRunId = runId;
-      pollRunEvents(runId);
-      pollTimer = setInterval(() => pollRunEvents(runId), 2000);
+      const generation = pollGeneration;
+      pollRunEvents(runId, generation);
+      pollTimer = setInterval(() => pollRunEvents(runId, generation), 2000);
     }
 
-    async function pollRunEvents(runId) {
+    async function pollRunEvents(runId, generation = pollGeneration) {
+      const isCurrentPoll = () => generation === pollGeneration && runId === selectedRunId;
       try {
         const response = await fetch(`/runs/${encodeURIComponent(runId)}/events`);
         const payload = await parseJsonOrThrow(response, "Run events");
+        if (!isCurrentPoll()) return;
         renderTimeline(payload.events || []);
         if (!shouldPollEvents(payload.events || [])) {
           stopPolling();
           await loadConsole(runId, { preservePolling: true });
         }
       } catch (error) {
+        if (!isCurrentPoll()) return;
         stopPolling();
         const message = error instanceof Error ? error.message : "Failed to poll run events.";
         setOperationStatus(message, "error");
@@ -735,6 +752,7 @@ def _operator_console_html() -> str:
     }
 
     async function loadConsole(runId, options = {}) {
+      if (!options.preservePolling) stopPolling();
       const suffix = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
       try {
         const response = await fetch(`/console/state${suffix}`);
@@ -767,7 +785,12 @@ def _operator_console_html() -> str:
         background: formData.get("background") === "on",
       };
       if (thresholdValue !== null && String(thresholdValue).trim() !== "") {
-        payload.review_threshold_origin_count = Number(thresholdValue);
+        const thresholdNumber = Number(thresholdValue);
+        if (!Number.isInteger(thresholdNumber) || thresholdNumber < 0) {
+          setOperationStatus("review_threshold_origin_count must be a non-negative integer.", "error");
+          return;
+        }
+        payload.review_threshold_origin_count = thresholdNumber;
       }
       setOperationStatus("Creating governed run…");
       try {

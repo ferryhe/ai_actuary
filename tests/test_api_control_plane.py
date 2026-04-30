@@ -288,6 +288,13 @@ def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path)
     assert "run.completed" in html
     assert "run.needs_review" in html
     assert "run.failed" in html
+    assert "formatResponseDetail(payload.detail)" in html
+    assert "JSON.stringify(detail)" in html
+    assert "Number.isInteger(thresholdNumber)" in html
+    assert "review_threshold_origin_count must be a non-negative integer" in html
+    assert "pollGeneration += 1" in html
+    assert "runId === selectedRunId" in html
+    assert "if (!isCurrentPoll()) return" in html
 
 
 def test_console_state_exposes_symphony_style_panels(tmp_path):
