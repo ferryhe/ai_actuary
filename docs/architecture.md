@@ -131,7 +131,7 @@ This keeps operator-facing automation on a stable response surface even when pla
 
 The API layer in `reserving_workflow.api.app` is a transport/control-plane wrapper over the existing CLI-grade contracts. It does not replace the planner, worker, artifact, or registry layers.
 
-Current PR4 routes are intentionally aligned to the future Symphony-style operator console shape:
+PR4 routes are intentionally aligned to the future Symphony-style operator console shape:
 
 - `POST /runs` — start a governed single-case run through the existing operator entrypoint
 - `GET /runs` — list registry-backed run summaries

@@ -248,6 +248,7 @@ python scripts/rerun_case.py \
 PR4 adds a service/control-plane wrapper that reuses the same operator, registry, artifact, replay, repeatability, and batch helpers used by the CLI. It is designed as the backend shape for a future Symphony-style operator console.
 
 ```bash
+pip install -e '.[api]'
 uvicorn 'reserving_workflow.api.app:create_app' --factory --host 0.0.0.0 --port 8000
 ```
 
@@ -334,7 +335,7 @@ Minimum runtime requirements:
 - Python environment with project dependencies installed
 - `OPENAI_API_KEY` for governed planner runs
 - repository checkout or editable install, because operator entrypoints load modules from `workflows/`
-- FastAPI runtime dependencies for the local control plane
+- FastAPI runtime dependencies installed with `pip install -e '.[api]'` for the local control plane
 
 ---
 

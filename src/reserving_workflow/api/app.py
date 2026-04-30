@@ -10,11 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from reserving_workflow import operator_entrypoint
 from reserving_workflow.artifacts import replay as replay_helpers
-from reserving_workflow.artifacts.storage import read_json_artifact
+from reserving_workflow.artifacts.storage import read_json_artifact, resolve_artifact_path
 from reserving_workflow.runtime import run_registry
 
 
@@ -80,7 +80,10 @@ def create_app(
 
     @app.post("/runs")
     def create_run(request: RunCreateRequest) -> dict[str, Any]:
-        artifact_dir = request.artifact_dir or _default_artifact_dir(resolved_settings, request.case_id)
+        try:
+            artifact_dir = request.artifact_dir or _default_artifact_dir(resolved_settings, request.case_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         review_delivery_dir = request.review_delivery_dir
         if review_delivery_dir is None:
             review_delivery_dir = resolved_settings.review_delivery_dir
@@ -155,27 +158,41 @@ def create_app(
     def replay_case(request: ReplayRequest) -> dict[str, Any]:
         try:
             return resolved_replay_module.replay_case_from_manifest(request.manifest_path)
-        except (FileNotFoundError, ValueError, KeyError) as exc:
+        except (FileNotFoundError, ValueError, KeyError, ValidationError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/repeatability")
     def compare_repeatability(request: RepeatabilityRequest) -> dict[str, Any]:
         try:
             return resolved_replay_module.compare_repeatability(request.manifest_paths)
-        except (FileNotFoundError, ValueError, KeyError) as exc:
+        except (FileNotFoundError, ValueError, KeyError, ValidationError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/benchmarks/batch")
     def run_batch_benchmark(request: BatchBenchmarkRequest) -> dict[str, Any]:
-        batch_runner = resolved_batch_runner_module or _load_batch_runner_module()
+        nonlocal resolved_batch_runner_module
+        if resolved_batch_runner_module is None:
+            resolved_batch_runner_module = _load_batch_runner_module()
         artifact_root = request.artifact_root or (Path(resolved_settings.artifact_root).expanduser().resolve() / "batch")
-        return batch_runner.run_batch_benchmark(cases=request.cases, artifact_root=artifact_root)
+        return resolved_batch_runner_module.run_batch_benchmark(cases=request.cases, artifact_root=artifact_root)
 
     return app
 
 
 def _default_artifact_dir(settings: ApiSettings, case_id: str) -> Path:
-    return Path(settings.artifact_root).expanduser().resolve() / case_id
+    return resolve_artifact_path(settings.artifact_root, _safe_artifact_component(case_id, field_name="case_id"))
+
+
+def _safe_artifact_component(value: Any, *, field_name: str) -> str:
+    component = str(value)
+    candidate = Path(component)
+    if component in {"", ".", ".."}:
+        raise ValueError(f"Invalid {field_name}: {component!r}")
+    if "/" in component or "\\" in component:
+        raise ValueError(f"Invalid {field_name}: {component!r}")
+    if candidate.is_absolute() or len(candidate.parts) != 1:
+        raise ValueError(f"Invalid {field_name}: {component!r}")
+    return component
 
 
 def _get_registry_entry(registry_path: str | Path, run_id: str) -> dict[str, Any]:

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from reserving_workflow.api.app import ApiSettings, create_app
+from reserving_workflow.api.app import ApiSettings, _load_batch_runner_module, create_app
+from reserving_workflow.schemas import RunArtifactManifest
 
 
 class FakeWorkerTask:
@@ -23,8 +25,14 @@ class FakeRunnerModule:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         run_manifest = artifact_dir / "run_manifest.json"
         run_manifest.write_text(
-            '{"case_id":"%s","run_id":"%s","artifact_root":"%s","artifact_paths":{"run_manifest":"%s"}}'
-            % (task.case_ref, task.run_id, artifact_dir, run_manifest),
+            json.dumps(
+                {
+                    "case_id": task.case_ref,
+                    "run_id": task.run_id,
+                    "artifact_root": str(artifact_dir),
+                    "artifact_paths": {"run_manifest": str(run_manifest)},
+                }
+            ),
             encoding="utf-8",
         )
         return {
@@ -105,13 +113,29 @@ class FakeReplayModule:
         return {"case_id": "repeat-case", "run_count": len(manifest_paths), "stable_ibnr": True}
 
 
+class ValidationErrorReplayModule:
+    @staticmethod
+    def replay_case_from_manifest(manifest_path):
+        return RunArtifactManifest.model_validate({})
+
+    @staticmethod
+    def compare_repeatability(manifest_paths):
+        return RunArtifactManifest.model_validate({})
+
+
 class FakeBatchRunnerModule:
+
     @staticmethod
     def run_batch_benchmark(*, cases, artifact_root):
         return {"case_count": len(cases), "artifact_root": str(artifact_root), "comparison_report_path": str(Path(artifact_root) / "comparison_report.json")}
 
 
-def _client(tmp_path, runner_module=FakeRunnerModule):
+def _client(
+    tmp_path,
+    runner_module=FakeRunnerModule,
+    replay_module=FakeReplayModule,
+    batch_runner_module=FakeBatchRunnerModule,
+):
     settings = ApiSettings(
         registry_path=tmp_path / "run-registry.json",
         artifact_root=tmp_path / "artifacts",
@@ -120,8 +144,8 @@ def _client(tmp_path, runner_module=FakeRunnerModule):
         settings=settings,
         runner_module=runner_module,
         task_contracts_module=FakeTaskContractsModule,
-        replay_module=FakeReplayModule,
-        batch_runner_module=FakeBatchRunnerModule,
+        replay_module=replay_module,
+        batch_runner_module=batch_runner_module,
     )
     return TestClient(app)
 
@@ -140,6 +164,16 @@ def test_post_run_records_registry_and_returns_operator_contract(tmp_path):
     list_payload = client.get("/runs").json()
     assert list_payload["run_count"] == 1
     assert list_payload["runs"][0]["run_id"] == payload["run_id"]
+
+
+def test_post_run_rejects_unsafe_default_artifact_case_id(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.post("/runs", json={"case_id": "../escape"})
+
+    assert response.status_code == 400
+    assert "Invalid case_id" in response.json()["detail"]
+    assert not (tmp_path / "escape").exists()
 
 
 def test_run_detail_exposes_symphony_style_events_and_artifacts(tmp_path):
@@ -197,6 +231,22 @@ def test_replay_and_repeatability_endpoints_wrap_existing_helpers(tmp_path):
     assert replay["manifest_path"] == "./tmp/run_manifest.json"
     assert repeatability["run_count"] == 2
     assert repeatability["stable_ibnr"] is True
+
+
+def test_replay_and_repeatability_validation_errors_return_400(tmp_path):
+    client = _client(tmp_path, replay_module=ValidationErrorReplayModule)
+
+    replay = client.post("/replay", json={"manifest_path": "./tmp/bad_manifest.json"})
+    repeatability = client.post("/repeatability", json={"manifest_paths": ["./tmp/bad_manifest.json"]})
+
+    assert replay.status_code == 400
+    assert repeatability.status_code == 400
+
+
+def test_default_batch_runner_loader_finds_repo_runner():
+    module = _load_batch_runner_module()
+
+    assert hasattr(module, "run_batch_benchmark")
 
 
 def test_batch_benchmark_endpoint_wraps_existing_runner(tmp_path):
