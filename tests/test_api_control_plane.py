@@ -208,6 +208,9 @@ def test_console_shell_serves_operator_console_html(tmp_path):
     assert "Review Panel" in html
     assert "Action Panel" in html
     assert "/console/state" in html
+    assert "renderConsoleError" in html
+    assert "response.ok" in html
+    assert "JSON.parse" in html
 
 
 def test_console_state_exposes_symphony_style_panels(tmp_path):
@@ -220,6 +223,18 @@ def test_console_state_exposes_symphony_style_panels(tmp_path):
     state = response.json()
     assert state["console"]["title"] == "AI Actuary Operator Console"
     assert state["selected_run_id"] == run["run_id"]
+    assert state["selected_run"] == {
+        "run_id": run["run_id"],
+        "case_id": "console-case",
+        "status": "needs_review",
+        "summary": "needs review",
+        "created_at": state["selected_run"]["created_at"],
+        "updated_at": state["selected_run"]["updated_at"],
+        "artifact_root": state["selected_run"]["artifact_root"],
+        "review_required": True,
+    }
+    assert "operator_params" not in state["selected_run"]
+    assert "errors" not in state["selected_run"]
     assert state["run_cards"][0]["run_id"] == run["run_id"]
     assert state["run_cards"][0]["needs_review"] is True
     assert [event["event_type"] for event in state["timeline"]] == [

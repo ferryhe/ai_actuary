@@ -234,7 +234,7 @@ def _select_console_run(runs: list[dict[str, Any]], run_id: str | None) -> dict[
 
 
 def _console_state_payload(selected_entry: dict[str, Any] | None, runs: list[dict[str, Any]]) -> dict[str, Any]:
-    selected_run_id = selected_entry.get("run_id") if selected_entry else None
+    selected_run_id = str(selected_entry.get("run_id")) if selected_entry else None
     return {
         "console": {
             "title": "AI Actuary Operator Console",
@@ -242,7 +242,7 @@ def _console_state_payload(selected_entry: dict[str, Any] | None, runs: list[dic
             "version": "pr5-shell",
         },
         "selected_run_id": selected_run_id,
-        "selected_run": selected_entry,
+        "selected_run": _console_selected_run(selected_entry),
         "run_cards": [_console_run_card(entry, selected_run_id=selected_run_id) for entry in runs],
         "timeline": _console_timeline(selected_entry),
         "artifact_panel": _console_artifact_panel(selected_entry),
@@ -251,7 +251,22 @@ def _console_state_payload(selected_entry: dict[str, Any] | None, runs: list[dic
     }
 
 
-def _console_run_card(entry: dict[str, Any], *, selected_run_id: Any) -> dict[str, Any]:
+def _console_selected_run(entry: dict[str, Any] | None) -> dict[str, Any] | None:
+    if entry is None:
+        return None
+    return {
+        "run_id": entry.get("run_id"),
+        "case_id": entry.get("case_id"),
+        "status": entry.get("status"),
+        "summary": entry.get("summary"),
+        "created_at": entry.get("created_at"),
+        "updated_at": entry.get("updated_at"),
+        "artifact_root": entry.get("artifact_root"),
+        "review_required": bool(entry.get("review_required")) or entry.get("status") == "needs_review",
+    }
+
+
+def _console_run_card(entry: dict[str, Any], *, selected_run_id: str | None) -> dict[str, Any]:
     status = entry.get("status")
     return {
         "run_id": entry.get("run_id"),
@@ -436,29 +451,56 @@ def _operator_console_html() -> str:
     </div>
   </main>
   <script>
+    function renderConsoleError(message) {
+      const queue = document.getElementById("run-queue");
+      queue.textContent = message;
+      queue.className = "empty";
+      document.getElementById("timeline").textContent = message;
+      document.getElementById("artifact-panel").textContent = message;
+      document.getElementById("review-panel").textContent = message;
+      document.getElementById("action-panel").textContent = message;
+    }
+
     async function loadConsole(runId) {
       const suffix = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
-      const state = await fetch(`/console/state${suffix}`).then((response) => response.json());
-      const queue = document.getElementById("run-queue");
-      queue.innerHTML = "";
-      if (!state.run_cards.length) {
-        queue.textContent = "No runs recorded yet.";
-        queue.className = "empty";
-      } else {
-        queue.className = "";
-        for (const card of state.run_cards) {
-          const button = document.createElement("button");
-          button.className = "run-card";
-          if (card.selected) button.setAttribute("selected", "selected");
-          button.textContent = `${card.case_id || "unknown case"} · ${card.status || "unknown"}`;
-          button.onclick = () => loadConsole(card.run_id);
-          queue.appendChild(button);
+      try {
+        const response = await fetch(`/console/state${suffix}`);
+        const body = await response.text();
+        let state;
+        try {
+          state = JSON.parse(body);
+        } catch (error) {
+          throw new Error("Console state response was not valid JSON.");
         }
+
+        if (!response.ok) {
+          throw new Error(`Failed to load console state (${response.status} ${response.statusText}).`);
+        }
+
+        const queue = document.getElementById("run-queue");
+        queue.innerHTML = "";
+        if (!state.run_cards.length) {
+          queue.textContent = "No runs recorded yet.";
+          queue.className = "empty";
+        } else {
+          queue.className = "";
+          for (const card of state.run_cards) {
+            const button = document.createElement("button");
+            button.className = "run-card";
+            if (card.selected) button.setAttribute("selected", "selected");
+            button.textContent = `${card.case_id || "unknown case"} · ${card.status || "unknown"}`;
+            button.onclick = () => loadConsole(card.run_id);
+            queue.appendChild(button);
+          }
+        }
+        document.getElementById("timeline").textContent = JSON.stringify(state.timeline, null, 2);
+        document.getElementById("artifact-panel").textContent = JSON.stringify(state.artifact_panel, null, 2);
+        document.getElementById("review-panel").textContent = JSON.stringify(state.review_panel, null, 2);
+        document.getElementById("action-panel").textContent = JSON.stringify(state.action_panel, null, 2);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to load console state.";
+        renderConsoleError(message);
       }
-      document.getElementById("timeline").textContent = JSON.stringify(state.timeline, null, 2);
-      document.getElementById("artifact-panel").textContent = JSON.stringify(state.artifact_panel, null, 2);
-      document.getElementById("review-panel").textContent = JSON.stringify(state.review_panel, null, 2);
-      document.getElementById("action-panel").textContent = JSON.stringify(state.action_panel, null, 2);
     }
     loadConsole();
   </script>
