@@ -256,9 +256,10 @@ Key routes:
 
 - `GET /console` — serve a lightweight operator console shell
 - `GET /console/state` — return the console-ready run queue, timeline, artifact, review, and action panels
-- `POST /runs`
+- `POST /runs` — start a governed single-case run through the existing operator entrypoint; pass `"background": true` to accept the run immediately and execute it through FastAPI background tasks
 - `GET /runs`
 - `GET /runs/{run_id}`
+- `GET /runs/{run_id}/events`
 - `POST /runs/{run_id}/rerun`
 - `GET /runs/{run_id}/artifacts`
 - `GET /runs/{run_id}/review-packet`
@@ -266,7 +267,7 @@ Key routes:
 - `POST /repeatability`
 - `POST /benchmarks/batch`
 
-The `/runs/{run_id}` detail payload includes derived `events` such as `run.queued`, `run.running`, and `run.completed`. PR5 adds `/console` and `/console/state` on top of the same data, giving operators a simple run queue, timeline, artifact panel, review panel, and rerun action panel without introducing a second runtime contract or a frontend build system.
+The `/runs/{run_id}` detail payload includes derived `events` such as `run.queued`, `run.running`, and `run.completed`. PR5 adds `/console` and `/console/state` on top of the same data, giving operators a simple run queue, timeline, artifact panel, review panel, and rerun action panel without introducing a second runtime contract or a frontend build system. PR6 adds a bounded background execution mode: `POST /runs` can return `202 accepted` with a `run.accepted` event, then the existing operator flow appends `run.queued`, `run.running`, and the final lifecycle event for polling through `/runs/{run_id}/events`.
 
 ---
 
@@ -351,6 +352,8 @@ Minimum runtime requirements:
 - Prompt 10: developer handoff documentation closeout
 - PR1-PR3: stable operator contract, artifact/review delivery boundary, and local run registry/rerun tooling
 - PR4: FastAPI control plane skeleton aligned to the OpenAI Agents runtime contract and Symphony-style run/event views
+- PR5: lightweight Symphony-style operator console shell over the run/event/artifact/review payloads
+- PR6: bounded background execution mode and `/runs/{run_id}/events` lifecycle polling
 
 ### Not Yet Implemented
 
@@ -358,15 +361,13 @@ Minimum runtime requirements:
 - outbound messaging/delivery of review packets
 - production Hermes runtime orchestration instead of local callable worker modules
 - richer actuarial methods, multi-dataset benchmark catalogs, and formal sign-off workflows
-- full operator web console, background queue, streaming event bus, and multi-user access control
+- full operator web console, production queue worker, streaming event bus, and multi-user access control
 
 ### Next Recommended Steps
 
-1. build a minimal Symphony-style operator console on top of the FastAPI run/event views
-2. add background execution and polling/streaming events after the synchronous control plane stabilizes
-3. add artifact-store and retention strategy
-4. expand benchmark coverage beyond the current sample-driven path
-5. harden replay/repeatability into CI-grade regression workflows
+1. add artifact-store and retention strategy
+2. expand benchmark coverage beyond the current sample-driven path
+3. harden replay/repeatability into CI-grade regression workflows
 
 ---
 

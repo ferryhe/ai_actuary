@@ -135,6 +135,7 @@ def _client(
     runner_module=FakeRunnerModule,
     replay_module=FakeReplayModule,
     batch_runner_module=FakeBatchRunnerModule,
+    background_task_runner=None,
 ):
     settings = ApiSettings(
         registry_path=tmp_path / "run-registry.json",
@@ -146,6 +147,7 @@ def _client(
         task_contracts_module=FakeTaskContractsModule,
         replay_module=replay_module,
         batch_runner_module=batch_runner_module,
+        background_task_runner=background_task_runner,
     )
     return TestClient(app)
 
@@ -166,6 +168,38 @@ def test_post_run_records_registry_and_returns_operator_contract(tmp_path):
     assert list_payload["runs"][0]["run_id"] == payload["run_id"]
 
 
+def test_post_run_can_accept_background_execution_and_poll_events(tmp_path):
+    scheduled = []
+
+    def capture_background_task(fn, *args, **kwargs):
+        scheduled.append((fn, args, kwargs))
+
+    client = _client(tmp_path, background_task_runner=capture_background_task)
+
+    response = client.post("/runs", json={"case_id": "background-case", "background": True})
+
+    assert response.status_code == 202
+    accepted = response.json()
+    assert accepted["status"] == "accepted"
+    assert accepted["case_id"] == "background-case"
+    assert accepted["run_id"].startswith("operator-background-case-")
+    assert len(scheduled) == 1
+
+    initial_events = client.get(f"/runs/{accepted['run_id']}/events").json()["events"]
+    assert [event["event_type"] for event in initial_events] == ["run.accepted"]
+
+    fn, args, kwargs = scheduled.pop()
+    fn(*args, **kwargs)
+
+    events = client.get(f"/runs/{accepted['run_id']}/events").json()["events"]
+    assert [event["event_type"] for event in events] == [
+        "run.accepted",
+        "run.queued",
+        "run.running",
+        "run.completed",
+    ]
+
+
 def test_post_run_rejects_unsafe_default_artifact_case_id(tmp_path):
     client = _client(tmp_path)
 
@@ -174,6 +208,19 @@ def test_post_run_rejects_unsafe_default_artifact_case_id(tmp_path):
     assert response.status_code == 400
     assert "Invalid case_id" in response.json()["detail"]
     assert not (tmp_path / "escape").exists()
+
+
+def test_post_run_rejects_unsafe_case_id_even_with_explicit_artifact_dir(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/runs",
+        json={"case_id": "bad/case", "artifact_dir": str(tmp_path / "explicit-artifacts"), "background": True},
+    )
+
+    assert response.status_code == 400
+    assert "Invalid case_id" in response.json()["detail"]
+    assert not (tmp_path / "run-registry.json").exists()
 
 
 def test_run_detail_exposes_symphony_style_events_and_artifacts(tmp_path):
