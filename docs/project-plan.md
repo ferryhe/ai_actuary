@@ -363,10 +363,6 @@ They must not write deterministic results, review decisions, artifact files, or 
 python -m pytest tests -q
 ```
 
-Current verified local state after PR15:
-
-```text
-135 passed
-```
+Current verified local state after PR15: all tests pass.
 
 After that, choose the next change as a single-scope PR rather than reopening multiple architectural fronts at once.

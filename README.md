@@ -319,6 +319,10 @@ Key routes:
 - `POST /runs/{run_id}/rerun`
 - `GET /runs/{run_id}/artifacts`
 - `GET /runs/{run_id}/review-packet`
+- `GET /reviews`
+- `GET /runs/{run_id}/review`
+- `POST /reviews/{review_id}/decision`
+- `POST /runs/{run_id}/report-export`
 - `POST /replay`
 - `POST /repeatability`
 - `POST /benchmarks/batch`
