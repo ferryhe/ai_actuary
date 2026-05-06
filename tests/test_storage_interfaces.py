@@ -19,6 +19,9 @@ def test_local_run_store_tracks_history_and_lists_latest_first(tmp_path):
         artifact_root=str(tmp_path / "artifacts-a"),
         summary="queued",
         operator_params={"case_id": "case-a"},
+        created_by="actuary-a",
+        operator_id="actuary-a",
+        workspace_id="workspace-a",
     )
     store.append_event(run_id="run-a", status="running", summary="running")
     updated = store.update_run_status(
@@ -44,6 +47,9 @@ def test_local_run_store_tracks_history_and_lists_latest_first(tmp_path):
     assert created["status"] == "queued"
     assert updated["status"] == "completed"
     assert entry["case_id"] == "case-a"
+    assert entry["created_by"] == "actuary-a"
+    assert entry["operator_id"] == "actuary-a"
+    assert entry["workspace_id"] == "workspace-a"
     assert [item["status"] for item in entry["status_history"]] == ["queued", "running", "completed"]
     assert [item["run_id"] for item in runs] == ["run-b", "run-a"]
 
@@ -124,6 +130,8 @@ def test_local_review_store_creates_and_updates_artifact_backed_reviews(tmp_path
         case_id="case-001",
         status="review_required",
         reason_codes=["origin_count_below_threshold"],
+        assigned_to="actuary-001",
+        workspace_id="workspace-001",
         packet={"status": "review_required"},
     )
     decided = store.submit_decision(
@@ -141,12 +149,16 @@ def test_local_review_store_creates_and_updates_artifact_backed_reviews(tmp_path
 
     assert isinstance(store, ReviewStore)
     assert created["status"] == "review_required"
+    assert created["assigned_to"] == "actuary-001"
+    assert created["workspace_id"] == "workspace-001"
     assert created["created_at"] == created["updated_at"]
     assert decided["decision"] == "approved"
     assert decided["decided_at"] == loaded["updated_at"]
     assert loaded["decision"]["decision"] == "approved"
     assert loaded["status"] == "review_decided"
     assert review_record["run_id"] == "run-001"
+    assert review_record["assigned_to"] == "actuary-001"
+    assert review_record["workspace_id"] == "workspace-001"
     assert review_record["packet"] == {"status": "review_required"}
     assert review_decision["comment"] == "Looks good."
     assert review_decision["decided_by"] == "actuary-001"

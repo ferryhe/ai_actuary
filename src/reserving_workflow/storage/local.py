@@ -38,6 +38,9 @@ class LocalRunStore:
         artifact_root: str | None = None,
         summary: str | None = None,
         operator_params: dict[str, Any] | None = None,
+        created_by: str | None = None,
+        operator_id: str | None = None,
+        workspace_id: str | None = None,
         review_required: bool | None = None,
         error_category: str | None = None,
         errors: list[str] | None = None,
@@ -54,6 +57,9 @@ class LocalRunStore:
             artifact_root=artifact_root,
             summary=summary,
             operator_params=operator_params,
+            created_by=created_by,
+            operator_id=operator_id,
+            workspace_id=workspace_id,
             review_required=review_required,
             error_category=error_category,
             errors=errors,
@@ -75,6 +81,9 @@ class LocalRunStore:
         artifact_root: str | None = None,
         summary: str | None = None,
         operator_params: dict[str, Any] | None = None,
+        created_by: str | None = None,
+        operator_id: str | None = None,
+        workspace_id: str | None = None,
         review_required: bool | None = None,
         error_category: str | None = None,
         errors: list[str] | None = None,
@@ -91,6 +100,9 @@ class LocalRunStore:
             artifact_root=artifact_root,
             summary=summary,
             operator_params=operator_params,
+            created_by=created_by,
+            operator_id=operator_id,
+            workspace_id=workspace_id,
             review_required=review_required,
             error_category=error_category,
             errors=errors,
@@ -112,6 +124,9 @@ class LocalRunStore:
             artifact_root=entry.get("artifact_root"),
             summary=summary,
             operator_params=dict(entry.get("operator_params", {}) or {}),
+            created_by=entry.get("created_by"),
+            operator_id=entry.get("operator_id"),
+            workspace_id=entry.get("workspace_id"),
             review_required=entry.get("review_required"),
             error_category=entry.get("error_category"),
             errors=list(entry.get("errors", []) or []),
@@ -140,6 +155,9 @@ class LocalRunStore:
         artifact_root: str | None,
         summary: str | None,
         operator_params: dict[str, Any] | None,
+        created_by: str | None,
+        operator_id: str | None,
+        workspace_id: str | None,
         review_required: bool | None,
         error_category: str | None,
         errors: list[str] | None,
@@ -168,6 +186,16 @@ class LocalRunStore:
             candidate_workflow_id = operator_params.get("workflow_id")
             if candidate_workflow_id is not None:
                 resolved_workflow_id = str(candidate_workflow_id)
+        resolved_created_by = created_by
+        resolved_operator_id = operator_id
+        resolved_workspace_id = workspace_id
+        if operator_params is not None:
+            if resolved_created_by is None and operator_params.get("created_by") is not None:
+                resolved_created_by = str(operator_params["created_by"])
+            if resolved_operator_id is None and operator_params.get("operator_id") is not None:
+                resolved_operator_id = str(operator_params["operator_id"])
+            if resolved_workspace_id is None and operator_params.get("workspace_id") is not None:
+                resolved_workspace_id = str(operator_params["workspace_id"])
 
         if entry is not None and reject_existing:
             raise ValueError(f"Run id already exists in registry: {run_id}")
@@ -184,6 +212,9 @@ class LocalRunStore:
                 "updated_at": now,
                 "artifact_root": artifact_root,
                 "summary": summary,
+                "created_by": resolved_created_by,
+                "operator_id": resolved_operator_id,
+                "workspace_id": resolved_workspace_id,
                 "review_required": bool(review_required) if review_required is not None else status == "needs_review",
                 "error_category": error_category,
                 "errors": list(errors or []),
@@ -203,6 +234,12 @@ class LocalRunStore:
                 entry["artifact_root"] = artifact_root
             if summary is not None:
                 entry["summary"] = summary
+            if resolved_created_by is not None:
+                entry["created_by"] = resolved_created_by
+            if resolved_operator_id is not None:
+                entry["operator_id"] = resolved_operator_id
+            if resolved_workspace_id is not None:
+                entry["workspace_id"] = resolved_workspace_id
             if review_required is not None:
                 entry["review_required"] = bool(review_required)
             else:
@@ -280,6 +317,7 @@ class LocalReviewStore:
         status: str,
         reason_codes: list[str] | None = None,
         assigned_to: str | None = None,
+        workspace_id: str | None = None,
         packet: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         review_path = self._review_path(review_id, create_parent=True)
@@ -293,6 +331,7 @@ class LocalReviewStore:
             "status": status,
             "reason_codes": list(reason_codes or []),
             "assigned_to": assigned_to,
+            "workspace_id": workspace_id,
             "packet": _to_serializable(packet),
             "created_at": now,
             "updated_at": now,

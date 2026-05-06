@@ -25,6 +25,24 @@ These contracts apply to the local FastAPI control plane and the lightweight ope
 
 The local JSON registry records only these status values.
 
+## Prototype Ownership
+
+PR13 adds bounded prototype ownership fields for per-actuary workspaces.
+
+`Run` may now expose:
+
+- `operator_id`
+- `workspace_id`
+- `created_by`
+
+`POST /runs` may accept the same fields. When omitted, the control plane applies the single-user fallback:
+
+- `operator_id = "local-actuary"`
+- `workspace_id = "default-workspace"`
+- `created_by = operator_id`
+
+These fields are local control-plane metadata only. They do not add auth, RBAC, SSO, enterprise multitenancy, or external identity providers.
+
 ## Run Event Type
 
 `RunEvent.type` is frozen to:
@@ -72,6 +90,12 @@ Artifact lists are derived from `run_manifest.json`. The manifest remains the so
 - `changes_requested`
 
 `Review` is an independent governance object. Review decisions do not mutate `Run.status`.
+
+PR13 also keeps review ownership lightweight:
+
+- `assigned_to` remains a prototype field only
+- local review records may also expose `workspace_id`
+- default review assignment may derive from `created_by` when a review record is materialized for an owned run
 
 The local control plane now exposes:
 
@@ -144,3 +168,13 @@ PR10 keeps the current local storage behavior but moves it behind explicit inter
 - the console may lazily materialize a review record from an existing `needs_review` run plus review packet
 
 This boundary still does not add DB, object storage, queues, or auth.
+
+## Filtered List Surfaces
+
+The bounded local API may filter list-style ownership views through static request metadata:
+
+- `GET /runs?operator_id=...&workspace_id=...`
+- `GET /reviews?operator_id=...&workspace_id=...`
+- `GET /console/state?operator_id=...&workspace_id=...`
+
+The console may also use prototype `x-operator-id` and `x-workspace-id` headers as offline/mock identity inputs.

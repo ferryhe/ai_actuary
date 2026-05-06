@@ -8,6 +8,8 @@ import httpx
 
 from reserving_workflow.api.app import (
     ApiSettings,
+    DEFAULT_OPERATOR_ID,
+    DEFAULT_WORKSPACE_ID,
     _load_batch_runner_module,
     create_app,
 )
@@ -253,6 +255,124 @@ def test_post_run_records_registry_and_returns_operator_contract(tmp_path):
     list_payload = client.get("/runs").json()
     assert list_payload["run_count"] == 1
     assert list_payload["runs"][0]["run_id"] == payload["run_id"]
+
+
+def test_post_run_uses_single_user_identity_defaults_and_exposes_them_in_console_state(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path)
+
+    run = client.post("/runs", json={"case_id": "default-identity-case"}).json()
+    detail = client.get(f"/runs/{run['run_id']}").json()
+    console_state = client.get(f"/console/state?run_id={run['run_id']}").json()
+
+    assert detail["run"]["created_by"] == DEFAULT_OPERATOR_ID
+    assert detail["run"]["operator_id"] == DEFAULT_OPERATOR_ID
+    assert detail["run"]["workspace_id"] == DEFAULT_WORKSPACE_ID
+    assert console_state["selected_run"]["created_by"] == DEFAULT_OPERATOR_ID
+    assert console_state["selected_run"]["operator_id"] == DEFAULT_OPERATOR_ID
+    assert console_state["selected_run"]["workspace_id"] == DEFAULT_WORKSPACE_ID
+    assert console_state["filters"]["operator_id"] == DEFAULT_OPERATOR_ID
+    assert console_state["filters"]["workspace_id"] == DEFAULT_WORKSPACE_ID
+
+
+def test_post_run_propagates_explicit_identity_fields_through_run_contracts(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path)
+
+    run = client.post(
+        "/runs",
+        json={
+            "case_id": "owned-case",
+            "operator_id": "actuary-007",
+            "workspace_id": "workspace-casualty",
+            "created_by": "planner-007",
+        },
+    ).json()
+
+    detail = client.get(f"/runs/{run['run_id']}").json()
+    listed_run = client.get("/runs").json()["runs"][0]
+
+    assert detail["run"]["operator_id"] == "actuary-007"
+    assert detail["run"]["workspace_id"] == "workspace-casualty"
+    assert detail["run"]["created_by"] == "planner-007"
+    assert listed_run["operator_id"] == "actuary-007"
+    assert listed_run["workspace_id"] == "workspace-casualty"
+    assert listed_run["created_by"] == "planner-007"
+
+
+def test_run_and_console_filters_can_scope_by_operator_and_workspace(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path)
+    casualty_run = client.post(
+        "/runs",
+        json={"case_id": "casualty-case", "operator_id": "actuary-a", "workspace_id": "workspace-casualty"},
+    ).json()
+    client.post(
+        "/runs",
+        json={"case_id": "pricing-case", "operator_id": "actuary-b", "workspace_id": "workspace-pricing"},
+    ).json()
+
+    registry_path = tmp_path / "run-registry.json"
+    registry_payload = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry_payload["runs"].append(
+        {
+            "task_id": "legacy-task",
+            "case_id": "legacy-case",
+            "run_id": "legacy-run",
+            "status": "completed",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "artifact_root": str(tmp_path / "legacy-artifacts"),
+            "summary": "legacy run without ownership metadata",
+            "status_history": [],
+        }
+    )
+    registry_path.write_text(json.dumps(registry_payload), encoding="utf-8")
+
+    filtered_runs = client.get("/runs?operator_id=actuary-a&workspace_id=workspace-casualty").json()
+    default_console = client.get("/console/state").json()
+    filtered_console = client.get("/console/state?operator_id=actuary-a&workspace_id=workspace-casualty").json()
+
+    assert filtered_runs["run_count"] == 1
+    assert filtered_runs["runs"][0]["run_id"] == casualty_run["run_id"]
+    assert filtered_console["selected_run_id"] == casualty_run["run_id"]
+    assert default_console["selected_run_id"] == "legacy-run"
+    assert default_console["filters"]["operator_id"] == DEFAULT_OPERATOR_ID
+    assert default_console["filters"]["workspace_id"] == DEFAULT_WORKSPACE_ID
+    assert [card["run_id"] for card in filtered_console["run_cards"]] == [casualty_run["run_id"]]
+    assert filtered_console["filters"]["available_operator_ids"] == ["actuary-a", "actuary-b", DEFAULT_OPERATOR_ID]
+    assert filtered_console["filters"]["available_workspace_ids"] == [DEFAULT_WORKSPACE_ID, "workspace-casualty", "workspace-pricing"]
+
+
+def test_review_assignment_defaults_to_created_by_and_review_filters_follow_workspace_ownership(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path, runner_module=ReviewRunnerModule)
+    owned_run = client.post(
+        "/runs",
+        json={
+            "case_id": "review-owned-case",
+            "operator_id": "actuary-owner",
+            "workspace_id": "workspace-owner",
+            "created_by": "planner-owner",
+        },
+    ).json()
+    client.post(
+        "/runs",
+        json={
+            "case_id": "review-other-case",
+            "operator_id": "actuary-other",
+            "workspace_id": "workspace-other",
+        },
+    ).json()
+
+    review_payload = client.get(f"/runs/{owned_run['run_id']}/review").json()["review"]
+    filtered_reviews = client.get("/reviews?operator_id=actuary-owner&workspace_id=workspace-owner").json()
+
+    assert review_payload["assigned_to"] == "planner-owner"
+    assert review_payload["workspace_id"] == "workspace-owner"
+    assert filtered_reviews["review_count"] == 1
+    assert filtered_reviews["reviews"][0]["run_id"] == owned_run["run_id"]
+    assert filtered_reviews["reviews"][0]["assigned_to"] == "planner-owner"
 
 
 def test_post_run_normalizes_tool_backed_request_and_writes_validated_input_artifact(tmp_path):
@@ -518,7 +638,12 @@ def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path)
     assert "review_threshold_origin_count must be a non-negative integer" in html
     assert "pollGeneration += 1" in html
     assert "runId === selectedRunId" in html
-    assert "if (!isCurrentPoll()) return" in html
+    assert "operator_id:" in html
+    assert "workspace_id:" in html
+    assert "const runFilters = { operator_id: payload.operator_id, workspace_id: payload.workspace_id }" in html
+    assert "startPolling(result.run_id, runFilters)" in html
+    assert "pollRunEvents(runId, generation, filterOptions)" in html
+    assert "await loadConsole(runId, { preservePolling: true, ...filterOptions })" in html
     assert "No review selected for decision submission." in html
 
 
@@ -538,6 +663,9 @@ def test_console_state_exposes_symphony_style_panels(tmp_path):
         "run_id": run["run_id"],
         "case_id": "console-case",
         "status": "needs_review",
+        "created_by": DEFAULT_OPERATOR_ID,
+        "operator_id": DEFAULT_OPERATOR_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
         "summary": "needs review",
         "created_at": state["selected_run"]["created_at"],
         "updated_at": state["selected_run"]["updated_at"],
