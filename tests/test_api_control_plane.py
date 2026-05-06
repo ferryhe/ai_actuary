@@ -601,6 +601,7 @@ def test_console_shell_serves_operator_console_html(tmp_path):
     assert "loadToolCatalog()" in html
     assert "fetch(\"/tools\")" in html
     assert "fetch(`/reviews/${encodeURIComponent(reviewId)}/decision`" in html
+    assert "/report-export" in html
     assert "Tool catalog unavailable; using default tool." in html
     assert "fallback.selected = true" in html
 
@@ -645,6 +646,7 @@ def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path)
     assert "pollRunEvents(runId, generation, filterOptions)" in html
     assert "await loadConsole(runId, { preservePolling: true, ...filterOptions })" in html
     assert "No review selected for decision submission." in html
+    assert "Export handoff report" in html
 
 
 def test_console_state_exposes_symphony_style_panels(tmp_path):
@@ -687,7 +689,7 @@ def test_console_state_exposes_symphony_style_panels(tmp_path):
     assert state["review_panel"]["present"] is True
     assert state["review_panel"]["review_id"].startswith("review-")
     assert state["review_panel"]["status"] == "review_required"
-    assert [action["action_id"] for action in state["action_panel"]["actions"]] == ["rerun"]
+    assert [action["action_id"] for action in state["action_panel"]["actions"]] == ["rerun", "report_export"]
     assert state["action_panel"]["actions"][0]["semantics"]["creates_distinct_run"] is True
 
 
@@ -797,6 +799,33 @@ def test_review_decision_submission_writes_independent_artifacts_without_mutatin
     assert "updated assumptions" in decision_md_path.read_text(encoding="utf-8")
     assert run_detail["run"]["status"] == "needs_review"
     assert run_detail["artifact_manifest"]["artifact_paths"]["review_decision"] == str(decision_json_path)
+
+
+def test_report_export_endpoint_writes_operator_handoff_and_reserve_summary_artifacts(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path, runner_module=ReviewRunnerModule)
+    run = client.post("/runs", json={"case_id": "report-export-case"}).json()
+    review = client.get(f"/runs/{run['run_id']}/review").json()["review"]
+    client.post(
+        f"/reviews/{review['review_id']}/decision",
+        json={"decision": "approved", "comment": "Approved for handoff.", "decided_by": "actuary-001"},
+    )
+
+    response = client.post(f"/runs/{run['run_id']}/report-export")
+
+    assert response.status_code == 200
+    report = response.json()["report"]
+    assert report["run"]["run_id"] == run["run_id"]
+    assert report["run"]["status"] == "needs_review"
+    assert report["review"]["status"] == "review_decided"
+    assert report["review"]["decision"]["decision"] == "approved"
+    assert Path(report["exports"]["operator_handoff_markdown"]).exists()
+    assert Path(report["exports"]["reserve_summary_json"]).exists()
+    assert Path(report["exports"]["reserve_summary_markdown"]).exists()
+    assert "Approved for handoff." in Path(report["exports"]["operator_handoff_markdown"]).read_text(encoding="utf-8")
+    run_detail = client.get(f"/runs/{run['run_id']}").json()
+    assert run_detail["artifact_manifest"]["artifact_paths"]["operator_handoff"] == report["exports"]["operator_handoff_markdown"]
+    assert run_detail["artifact_manifest"]["artifact_paths"]["reserve_summary_json"] == report["exports"]["reserve_summary_json"]
 
 
 def test_review_decision_endpoint_rejects_invalid_decision_values(tmp_path):

@@ -7,6 +7,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 README_PATH = REPO_ROOT / "README.md"
 ARCHITECTURE_PATH = REPO_ROOT / "docs" / "architecture.md"
 PROJECT_PLAN_PATH = REPO_ROOT / "docs" / "project-plan.md"
+OPERATOR_HANDOFF_PATH = REPO_ROOT / "docs" / "operator_handoff.md"
 CAS_REFERENCE_README_PATH = REPO_ROOT / "references" / "upstream" / "cas" / "README.md"
 CAS_PROPOSAL_DIR = REPO_ROOT / "references" / "upstream" / "cas" / "Proposal"
 CAS_UPSTREAM_PROJECT_PLAN = REPO_ROOT / "references" / "upstream" / "cas" / "docs" / "project-plan.md"
@@ -23,6 +24,7 @@ def test_prompt10_handoff_docs_exist() -> None:
     assert README_PATH.exists()
     assert ARCHITECTURE_PATH.exists()
     assert PROJECT_PLAN_PATH.exists()
+    assert OPERATOR_HANDOFF_PATH.exists()
 
 
 
@@ -37,8 +39,10 @@ def test_readme_covers_operator_entrypoints_review_flow_and_role_split() -> None
         "scripts/run_batch_benchmark.py",
         "scripts/replay_case.py",
         "scripts/compare_repeatability.py",
+        "scripts/export_run_report.py",
         "review_packet.md",
         "run_manifest.json",
+        "operator_handoff.md",
         "Step-by-Step Operating Guide",
         "Human Responsibilities vs Agent Responsibilities",
     ]:
@@ -54,6 +58,7 @@ def test_architecture_doc_covers_three_layers_artifacts_and_role_split() -> None
         "OpenAI Planner",
         "Hermes Workers",
         "Artifact Contract",
+        "operator handoff",
         "review flow",
         "Replay path",
         "Repeatability path",
@@ -61,6 +66,22 @@ def test_architecture_doc_covers_three_layers_artifacts_and_role_split() -> None
         "Agent responsibilities",
     ]:
         assert expected in architecture
+
+
+def test_operator_handoff_doc_covers_export_artifacts_and_boundaries() -> None:
+    handoff = _read(OPERATOR_HANDOFF_PATH)
+
+    for expected in [
+        "operator_handoff.md",
+        "reserve_summary.json",
+        "reserve_summary.md",
+        "review decisions",
+        "deterministic artifacts",
+        "do not fabricate",
+        "/runs/{run_id}/report-export",
+        "scripts/export_run_report.py",
+    ]:
+        assert expected in handoff
 
 
 

@@ -104,6 +104,7 @@ The local control plane now exposes:
 - `GET /reviews/{review_id}`
 - `GET /runs/{run_id}/review`
 - `POST /reviews/{review_id}/decision`
+- `POST /runs/{run_id}/report-export`
 
 Decision submission persists an independent review record under the local review store and, when a run artifact root exists, writes deterministic `review_decision.json` and `review_decision.md` artifacts under that run root. These decision artifacts may be added to `run_manifest.json` as artifact refs, but the run terminal status remains execution-only.
 
@@ -218,6 +219,15 @@ PR10 keeps the current local storage behavior but moves it behind explicit inter
 - the console may lazily materialize a review record from an existing `needs_review` run plus review packet
 
 This boundary still does not add DB, object storage, queues, or auth.
+
+## Report Export
+
+PR15 adds a bounded operator handoff export surface.
+
+- `POST /runs/{run_id}/report-export` builds report artifacts from recorded evidence only
+- export inputs are limited to run registry data, `run_manifest.json`, deterministic artifacts, review packets, and independent review decisions
+- export outputs are bounded to `operator_handoff.md`, `reserve_summary.json`, and `reserve_summary.md`
+- missing reserve facts must remain explicit missing values rather than fabricated content
 
 ## Filtered List Surfaces
 
