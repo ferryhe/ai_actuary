@@ -1,6 +1,6 @@
 # Control-Plane Contracts
 
-This document freezes the bounded operator-facing control-plane contract as of PR12.
+This document freezes the bounded operator-facing control-plane contract through PR15.
 
 ## Scope
 
@@ -56,10 +56,12 @@ These fields are local control-plane metadata only. They do not add auth, RBAC, 
 - `run.failed`
 - `workflow.started`
 - `workflow.completed`
+- `workflow.needs_review`
 - `workflow.failed`
 - `workflow.step.started`
 - `workflow.step.running`
 - `workflow.step.completed`
+- `workflow.step.needs_review`
 - `workflow.step.failed`
 
 Current API payloads also keep the legacy `event_type` field for compatibility. It mirrors `type`.
