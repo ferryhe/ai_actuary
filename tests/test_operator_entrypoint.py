@@ -399,6 +399,7 @@ def test_rerun_from_registry_assigns_a_new_run_id(tmp_path):
     assert result["status"] == "completed"
     assert result["run_id"] != "operator-registry-case-original"
     assert result["run_id"].startswith("operator-registry-case-")
+    assert result["rerun"]["source_run_id"] == "operator-registry-case-original"
     assert rerun_entry["run_id"] == result["run_id"]
     assert original_entry["run_id"] == "operator-registry-case-original"
     assert len(registry_module.list_runs(registry_path)) == 2

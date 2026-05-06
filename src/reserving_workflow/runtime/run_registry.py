@@ -8,6 +8,8 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
+from reserving_workflow.contracts.control_plane import validate_run_status
+
 
 DEFAULT_REGISTRY_PAYLOAD = {"runs": []}
 
@@ -33,6 +35,7 @@ def record_run_event(
     errors: list[str] | None = None,
     review_delivery: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    status = validate_run_status(status)
     target = resolve_registry_path(registry_path)
     payload = _read_registry_payload(target)
     now = _utc_now()

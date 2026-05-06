@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+import pytest
+from fastapi import BackgroundTasks, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
 
-from reserving_workflow.api.app import ApiSettings, _load_batch_runner_module, create_app
+from reserving_workflow.api.app import (
+    ApiSettings,
+    BatchBenchmarkRequest,
+    ReplayRequest,
+    RepeatabilityRequest,
+    RerunRequest,
+    RunCreateRequest,
+    _load_batch_runner_module,
+    create_app,
+)
 from reserving_workflow.schemas import RunArtifactManifest
 
 
@@ -130,6 +142,92 @@ class FakeBatchRunnerModule:
         return {"case_count": len(cases), "artifact_root": str(artifact_root), "comparison_report_path": str(Path(artifact_root) / "comparison_report.json")}
 
 
+class _DirectResponse:
+    def __init__(self, raw):
+        self._raw = raw
+        if isinstance(raw, (JSONResponse, HTMLResponse)):
+            self.status_code = raw.status_code
+            self.headers = dict(raw.headers)
+            self.text = raw.body.decode("utf-8")
+        else:
+            self.status_code = 200
+            self.headers = {"content-type": "application/json"}
+            self.text = json.dumps(raw)
+
+    def json(self):
+        return json.loads(self.text)
+
+
+class _DirectClient:
+    def __init__(self, app):
+        self._app = app
+
+    def get(self, path: str):
+        return self._call("GET", path)
+
+    def post(self, path: str, json: dict | None = None):
+        return self._call("POST", path, payload=json or {})
+
+    def _call(self, method: str, path: str, payload: dict | None = None):
+        endpoint = _endpoint(self._app, method, path)
+        try:
+            result = asyncio.run(_invoke_endpoint(endpoint, method, path, payload or {}))
+        except HTTPException as exc:
+            result = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        return _DirectResponse(result)
+
+
+def _endpoint(app, method: str, path: str):
+    route_path = path.split("?", 1)[0]
+    for route in app.routes:
+        if method not in getattr(route, "methods", set()):
+            continue
+        if route.path == route_path:
+            return route.endpoint
+        if route.path == "/runs/{run_id}" and route_path.startswith("/runs/") and route_path.count("/") == 2:
+            return route.endpoint
+        if route.path == "/runs/{run_id}/events" and route_path.endswith("/events"):
+            return route.endpoint
+        if route.path == "/runs/{run_id}/rerun" and route_path.endswith("/rerun"):
+            return route.endpoint
+        if route.path == "/runs/{run_id}/review-packet" and route_path.endswith("/review-packet"):
+            return route.endpoint
+        if route.path == "/tools/{tool_id}" and route_path.startswith("/tools/") and route_path.count("/") == 2:
+            return route.endpoint
+    raise AssertionError(f"Route not found: {method} {path}")
+
+
+async def _invoke_endpoint(endpoint, method: str, path: str, payload: dict):
+    if method == "GET" and path == "/runs":
+        return await endpoint()
+    if method == "GET" and path == "/console":
+        return HTMLResponse(await endpoint())
+    if method == "GET" and path == "/tools":
+        return await endpoint()
+    if method == "GET" and path.startswith("/tools/"):
+        return await endpoint(path.split("/")[-1])
+    if method == "GET" and path.startswith("/console/state"):
+        run_id = path.split("run_id=", 1)[1] if "run_id=" in path else None
+        return await endpoint(run_id=run_id)
+    if method == "GET" and path.startswith("/runs/") and path.endswith("/events"):
+        return await endpoint(path.split("/")[2])
+    if method == "GET" and path.startswith("/runs/") and path.endswith("/review-packet"):
+        return await endpoint(path.split("/")[2])
+    if method == "GET" and path.startswith("/runs/") and path.count("/") == 2:
+        return await endpoint(path.split("/")[2])
+    if method == "POST" and path == "/runs":
+        return await endpoint(RunCreateRequest(**payload), BackgroundTasks())
+    if method == "POST" and path.startswith("/runs/") and path.endswith("/rerun"):
+        return await endpoint(path.split("/")[2], RerunRequest(**payload))
+    if method == "POST" and path == "/replay":
+        return await endpoint(ReplayRequest(**payload))
+    if method == "POST" and path == "/repeatability":
+        return await endpoint(RepeatabilityRequest(**payload))
+    if method == "POST" and path == "/benchmarks/batch":
+        return await endpoint(BatchBenchmarkRequest(**payload))
+    raise AssertionError(f"Unhandled direct API invocation: {method} {path}")
+
+
 def _client(
     tmp_path,
     runner_module=FakeRunnerModule,
@@ -149,7 +247,7 @@ def _client(
         batch_runner_module=batch_runner_module,
         background_task_runner=background_task_runner,
     )
-    return TestClient(app)
+    return _DirectClient(app)
 
 
 def test_post_run_records_registry_and_returns_operator_contract(tmp_path):
@@ -166,6 +264,20 @@ def test_post_run_records_registry_and_returns_operator_contract(tmp_path):
     list_payload = client.get("/runs").json()
     assert list_payload["run_count"] == 1
     assert list_payload["runs"][0]["run_id"] == payload["run_id"]
+
+
+def test_tool_catalog_endpoints_expose_builtin_chainladder(tmp_path):
+    client = _client(tmp_path)
+
+    tools = client.get("/tools")
+    tool = client.get("/tools/chainladder")
+
+    assert tools.status_code == 200
+    assert tools.json()["tool_count"] == 1
+    assert tools.json()["tools"][0]["tool_id"] == "chainladder"
+    assert tool.status_code == 200
+    assert tool.json()["method"] == "chainladder"
+    assert tool.json()["input_schema"]["properties"]["sample_name"]["default"] == "RAA"
 
 
 def test_post_run_can_accept_background_execution_and_poll_events(tmp_path):
@@ -237,7 +349,13 @@ def test_run_detail_exposes_symphony_style_events_and_artifacts(tmp_path):
         "run.running",
         "run.completed",
     ]
+    assert [event["type"] for event in detail["events"]] == [
+        "run.queued",
+        "run.running",
+        "run.completed",
+    ]
     assert detail["artifact_manifest"]["case_id"] == "detail-case"
+    assert detail["artifacts"][0]["artifact_id"] == "run_manifest"
 
 
 def test_console_shell_serves_operator_console_html(tmp_path):
@@ -261,12 +379,14 @@ def test_console_shell_serves_operator_console_html(tmp_path):
     assert "Create Governed Run" in html
     assert "case_id" in html
     assert "sample_name" in html
-    assert "method" in html
+    assert "tool-selector" in html
     assert "review_threshold_origin_count" in html
     assert "background" in html
     assert "createRun(" in html
     assert "pollRunEvents(" in html
     assert "runConsoleAction(" in html
+    assert "loadToolCatalog()" in html
+    assert "fetch(\"/tools\")" in html
 
 
 def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path):
@@ -277,10 +397,11 @@ def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path)
     assert "name=\"sample_name\"" in html
     assert "value=\"RAA\"" in html
     assert "name=\"method\"" in html
-    assert "value=\"chainladder\"" in html
+    assert "data-default-tool-id=\"chainladder\"" in html
     assert "name=\"background\"" in html
     assert "checked" in html
     assert "fetch(\"/runs\"" in html
+    assert "Tool catalog" in html
     assert "fetch(`/runs/${encodeURIComponent(runId)}/events`)" in html
     assert "run.accepted" in html
     assert "run.queued" in html
@@ -306,6 +427,7 @@ def test_console_state_exposes_symphony_style_panels(tmp_path):
     assert response.status_code == 200
     state = response.json()
     assert state["console"]["title"] == "AI Actuary Operator Console"
+    assert state["tool_catalog"]["tools"][0]["tool_id"] == "chainladder"
     assert state["selected_run_id"] == run["run_id"]
     assert state["selected_run"] == {
         "run_id": run["run_id"],
@@ -330,6 +452,7 @@ def test_console_state_exposes_symphony_style_panels(tmp_path):
     assert state["review_panel"]["present"] is True
     assert state["review_panel"]["status"] == "review_required"
     assert [action["action_id"] for action in state["action_panel"]["actions"]] == ["rerun"]
+    assert state["action_panel"]["actions"][0]["semantics"]["creates_distinct_run"] is True
 
 
 def test_console_state_defaults_to_latest_run(tmp_path):
@@ -354,6 +477,7 @@ def test_rerun_endpoint_creates_distinct_run_id(tmp_path):
 
     assert rerun["status"] == "completed"
     assert rerun["run_id"] != original["run_id"]
+    assert rerun["rerun"]["source_run_id"] == original["run_id"]
     runs = client.get("/runs").json()["runs"]
     assert {item["run_id"] for item in runs} == {original["run_id"], rerun["run_id"]}
 

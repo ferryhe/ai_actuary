@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from reserving_workflow.contracts.control_plane import RerunSemantics
+
 DEFAULT_REQUIRED_ARTIFACTS = [
     "case_input",
     "deterministic_result",
@@ -200,7 +202,9 @@ def rerun_from_registry(
         operator_params["runner_module"] = runner_module
     if task_contracts_module is not None:
         operator_params["task_contracts_module"] = task_contracts_module
-    return run_operator_flow(**operator_params)
+    rerun_result = run_operator_flow(**operator_params)
+    rerun_result["rerun"] = RerunSemantics(source_run_id=run_id).model_dump()
+    return rerun_result
 
 
 def _normalize_operator_result(task: Any, raw_result: dict[str, Any]) -> dict[str, Any]:

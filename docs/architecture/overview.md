@@ -12,7 +12,7 @@ This repository currently operates as a three-layer governed workflow prototype:
 - batch benchmark CLI: `scripts/run_batch_benchmark.py`
 - replay CLI: `scripts/replay_case.py`
 - repeatability CLI: `scripts/compare_repeatability.py`
-- local FastAPI control plane and lightweight console: `GET /console`, `POST /runs`, `GET /runs/{run_id}/events`, and `POST /runs/{run_id}/rerun`
+- local FastAPI control plane and lightweight console: `GET /console`, `GET /tools`, `POST /runs`, `GET /runs/{run_id}/events`, and `POST /runs/{run_id}/rerun`
 
 ## Local Control Plane / Console Boundary
 
@@ -24,6 +24,12 @@ PR7 makes that shell minimally operational without changing the runtime boundary
 - Poll background lifecycle events through `GET /runs/{run_id}/events` instead of adding websocket/SSE or a production queue.
 - Trigger reruns through the existing `POST /runs/{run_id}/rerun` API instead of duplicating rerun logic in the page.
 - Keep the console text-contract first: `case_id`, `sample_name`, `method`, `background`, and optional `review_threshold_origin_count` are explicit API-facing fields.
+
+PR8 adds a bounded tool catalog and frozen control-plane contracts:
+
+- `GET /tools` and `GET /tools/{tool_id}` expose the current builtin catalog entry for `chainladder`
+- the create-run form uses the catalog to populate its selector while still posting the existing `method` field
+- status literals, event literals, review status, artifact refs, and rerun semantics are documented under `docs/contracts/control-plane.md`
 
 The current actuarial calculation method remains `chainladder`. Future actuarial tools should attach to the same composable `method`/case-input contract so an agent can operate them through JSON/YAML/text instructions, not through UI-only special cases.
 
