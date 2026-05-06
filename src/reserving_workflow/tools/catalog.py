@@ -29,9 +29,12 @@ class ToolRegistry:
     """Local in-memory registry for operator-visible tools."""
 
     def __init__(self, entries: list[ToolCatalogEntry] | None = None):
-        self._entries = {
-            entry.tool_id: entry for entry in sorted(entries or [], key=lambda item: item.tool_id)
-        }
+        sorted_entries = sorted(entries or [], key=lambda item: item.tool_id)
+        self._entries: dict[str, ToolCatalogEntry] = {}
+        for entry in sorted_entries:
+            if entry.tool_id in self._entries:
+                raise ValueError(f"Duplicate tool id in registry: {entry.tool_id}")
+            self._entries[entry.tool_id] = entry
 
     def list_tools(self) -> list[ToolCatalogEntry]:
         return list(self._entries.values())

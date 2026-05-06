@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from reserving_workflow.tools import build_builtin_tool_registry
+import pytest
+
+from reserving_workflow.tools import ToolCatalogEntry, ToolRegistry, build_builtin_tool_registry
 
 
 def test_builtin_tool_registry_lists_chainladder_summary():
@@ -12,6 +14,24 @@ def test_builtin_tool_registry_lists_chainladder_summary():
     assert tools[0]["tool_id"] == "chainladder"
     assert tools[0]["method"] == "chainladder"
     assert "input_schema" not in tools[0]
+
+
+def test_tool_registry_rejects_duplicate_tool_ids():
+    first = ToolCatalogEntry(
+        tool_id="duplicate",
+        method="chainladder",
+        title="First",
+        description="First duplicate entry.",
+    )
+    second = ToolCatalogEntry(
+        tool_id="duplicate",
+        method="chainladder",
+        title="Second",
+        description="Second duplicate entry.",
+    )
+
+    with pytest.raises(ValueError, match="Duplicate tool id"):
+        ToolRegistry(entries=[first, second])
 
 
 def test_builtin_tool_registry_returns_chainladder_schema():

@@ -538,14 +538,19 @@ def _artifact_refs_from_manifest(manifest: dict[str, Any] | None) -> list[dict[s
     if manifest is None:
         return []
     artifact_paths = manifest.get("artifact_paths", {}) or {}
+    artifact_root = manifest.get("artifact_root")
+    root = Path(artifact_root).expanduser() if artifact_root else None
     artifacts = []
     for artifact_id, path in artifact_paths.items():
+        artifact_path = Path(str(path)).expanduser()
+        if not artifact_path.is_absolute() and root is not None:
+            artifact_path = root / artifact_path
         artifacts.append(
             ArtifactRef(
                 artifact_id=str(artifact_id),
                 label=str(artifact_id).replace("_", " "),
-                path=str(path),
-                present=Path(path).expanduser().exists(),
+                path=str(artifact_path),
+                present=artifact_path.exists(),
             ).model_dump()
         )
     return artifacts
@@ -700,21 +705,33 @@ def _operator_console_html() -> str:
 
     async function loadToolCatalog() {
       const selector = document.getElementById("tool-selector");
-      const response = await fetch("/tools");
-      const payload = await parseJsonOrThrow(response, "Tool catalog");
-      const tools = payload.tools || [];
-      selector.innerHTML = "";
-      for (const tool of tools) {
-        const option = document.createElement("option");
-        option.value = tool.method || tool.tool_id;
-        option.textContent = tool.title ? `${tool.title} (${tool.tool_id})` : (tool.tool_id || tool.method || "tool");
-        if ((tool.tool_id || tool.method) === selector.dataset.defaultToolId) {
-          option.selected = true;
+      try {
+        const response = await fetch("/tools");
+        const payload = await parseJsonOrThrow(response, "Tool catalog");
+        const tools = payload.tools || [];
+        if (!tools.length) return;
+        selector.innerHTML = "";
+        for (const tool of tools) {
+          const option = document.createElement("option");
+          option.value = tool.method || tool.tool_id;
+          option.textContent = tool.title ? `${tool.title} (${tool.tool_id})` : (tool.tool_id || tool.method || "tool");
+          if ((tool.tool_id || tool.method) === selector.dataset.defaultToolId) {
+            option.selected = true;
+          }
+          selector.appendChild(option);
         }
-        selector.appendChild(option);
-      }
-      if (!selector.value && tools.length) {
-        selector.value = tools[0].method || tools[0].tool_id;
+        if (!selector.value && tools.length) {
+          selector.value = tools[0].method || tools[0].tool_id;
+        }
+      } catch (error) {
+        const fallback = selector.querySelector("option[value='chainladder']") || selector.options[0];
+        if (fallback) {
+          fallback.value = fallback.value || "chainladder";
+          fallback.textContent = "Chainladder (chainladder)";
+          fallback.selected = true;
+        }
+        const message = error instanceof Error ? error.message : "Tool catalog unavailable; using default tool.";
+        setOperationStatus(message, "error");
       }
     }
 

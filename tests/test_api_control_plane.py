@@ -1,20 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 
-import pytest
-from fastapi import BackgroundTasks, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.testclient import TestClient
 
 from reserving_workflow.api.app import (
     ApiSettings,
-    BatchBenchmarkRequest,
-    ReplayRequest,
-    RepeatabilityRequest,
-    RerunRequest,
-    RunCreateRequest,
     _load_batch_runner_module,
     create_app,
 )
@@ -43,6 +35,51 @@ class FakeRunnerModule:
                     "run_id": task.run_id,
                     "artifact_root": str(artifact_dir),
                     "artifact_paths": {"run_manifest": str(run_manifest)},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return {
+            "route": {"mode": "governed"},
+            "trace": {"workflow_name": "test-workflow"},
+            "worker_result": {
+                "status": "completed",
+                "case_id": task.case_ref,
+                "run_id": task.run_id,
+                "summary": "worker complete",
+                "artifact_paths": {"run_manifest": str(run_manifest)},
+                "metrics": {},
+                "review_reasons": [],
+                "errors": [],
+                "worker_metadata": {"adapter": "fake"},
+            },
+            "final_output": {
+                "case_id": task.case_ref,
+                "worker_status": "completed",
+                "deterministic_method": "chainladder",
+                "cited_values": {"ibnr": 1.0},
+                "review_reasons": [],
+                "artifact_manifest_path": str(run_manifest),
+                "narrative_summary": "ok",
+            },
+        }
+
+
+class RelativeArtifactPathRunnerModule:
+    @staticmethod
+    def run_openai_governed_workflow(task, *, user_prompt=None):
+        artifact_dir = Path(task.inputs["artifact_dir"])
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        deterministic_result = artifact_dir / "deterministic_result.json"
+        deterministic_result.write_text('{"ibnr": 1.0}', encoding="utf-8")
+        run_manifest = artifact_dir / "run_manifest.json"
+        run_manifest.write_text(
+            json.dumps(
+                {
+                    "case_id": task.case_ref,
+                    "run_id": task.run_id,
+                    "artifact_root": str(artifact_dir),
+                    "artifact_paths": {"deterministic_result": "deterministic_result.json"},
                 }
             ),
             encoding="utf-8",
@@ -142,92 +179,6 @@ class FakeBatchRunnerModule:
         return {"case_count": len(cases), "artifact_root": str(artifact_root), "comparison_report_path": str(Path(artifact_root) / "comparison_report.json")}
 
 
-class _DirectResponse:
-    def __init__(self, raw):
-        self._raw = raw
-        if isinstance(raw, (JSONResponse, HTMLResponse)):
-            self.status_code = raw.status_code
-            self.headers = dict(raw.headers)
-            self.text = raw.body.decode("utf-8")
-        else:
-            self.status_code = 200
-            self.headers = {"content-type": "application/json"}
-            self.text = json.dumps(raw)
-
-    def json(self):
-        return json.loads(self.text)
-
-
-class _DirectClient:
-    def __init__(self, app):
-        self._app = app
-
-    def get(self, path: str):
-        return self._call("GET", path)
-
-    def post(self, path: str, json: dict | None = None):
-        return self._call("POST", path, payload=json or {})
-
-    def _call(self, method: str, path: str, payload: dict | None = None):
-        endpoint = _endpoint(self._app, method, path)
-        try:
-            result = asyncio.run(_invoke_endpoint(endpoint, method, path, payload or {}))
-        except HTTPException as exc:
-            result = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-        return _DirectResponse(result)
-
-
-def _endpoint(app, method: str, path: str):
-    route_path = path.split("?", 1)[0]
-    for route in app.routes:
-        if method not in getattr(route, "methods", set()):
-            continue
-        if route.path == route_path:
-            return route.endpoint
-        if route.path == "/runs/{run_id}" and route_path.startswith("/runs/") and route_path.count("/") == 2:
-            return route.endpoint
-        if route.path == "/runs/{run_id}/events" and route_path.endswith("/events"):
-            return route.endpoint
-        if route.path == "/runs/{run_id}/rerun" and route_path.endswith("/rerun"):
-            return route.endpoint
-        if route.path == "/runs/{run_id}/review-packet" and route_path.endswith("/review-packet"):
-            return route.endpoint
-        if route.path == "/tools/{tool_id}" and route_path.startswith("/tools/") and route_path.count("/") == 2:
-            return route.endpoint
-    raise AssertionError(f"Route not found: {method} {path}")
-
-
-async def _invoke_endpoint(endpoint, method: str, path: str, payload: dict):
-    if method == "GET" and path == "/runs":
-        return await endpoint()
-    if method == "GET" and path == "/console":
-        return HTMLResponse(await endpoint())
-    if method == "GET" and path == "/tools":
-        return await endpoint()
-    if method == "GET" and path.startswith("/tools/"):
-        return await endpoint(path.split("/")[-1])
-    if method == "GET" and path.startswith("/console/state"):
-        run_id = path.split("run_id=", 1)[1] if "run_id=" in path else None
-        return await endpoint(run_id=run_id)
-    if method == "GET" and path.startswith("/runs/") and path.endswith("/events"):
-        return await endpoint(path.split("/")[2])
-    if method == "GET" and path.startswith("/runs/") and path.endswith("/review-packet"):
-        return await endpoint(path.split("/")[2])
-    if method == "GET" and path.startswith("/runs/") and path.count("/") == 2:
-        return await endpoint(path.split("/")[2])
-    if method == "POST" and path == "/runs":
-        return await endpoint(RunCreateRequest(**payload), BackgroundTasks())
-    if method == "POST" and path.startswith("/runs/") and path.endswith("/rerun"):
-        return await endpoint(path.split("/")[2], RerunRequest(**payload))
-    if method == "POST" and path == "/replay":
-        return await endpoint(ReplayRequest(**payload))
-    if method == "POST" and path == "/repeatability":
-        return await endpoint(RepeatabilityRequest(**payload))
-    if method == "POST" and path == "/benchmarks/batch":
-        return await endpoint(BatchBenchmarkRequest(**payload))
-    raise AssertionError(f"Unhandled direct API invocation: {method} {path}")
-
-
 def _client(
     tmp_path,
     runner_module=FakeRunnerModule,
@@ -247,7 +198,7 @@ def _client(
         batch_runner_module=batch_runner_module,
         background_task_runner=background_task_runner,
     )
-    return _DirectClient(app)
+    return TestClient(app)
 
 
 def test_post_run_records_registry_and_returns_operator_contract(tmp_path):
@@ -358,6 +309,20 @@ def test_run_detail_exposes_symphony_style_events_and_artifacts(tmp_path):
     assert detail["artifacts"][0]["artifact_id"] == "run_manifest"
 
 
+def test_run_detail_resolves_relative_manifest_artifact_paths(tmp_path):
+    client = _client(tmp_path, runner_module=RelativeArtifactPathRunnerModule)
+    run = client.post("/runs", json={"case_id": "relative-artifact-case"}).json()
+
+    response = client.get(f"/runs/{run['run_id']}")
+
+    assert response.status_code == 200
+    artifact = response.json()["artifacts"][0]
+    assert artifact["artifact_id"] == "deterministic_result"
+    assert artifact["present"] is True
+    assert artifact["path"].endswith("deterministic_result.json")
+    assert Path(artifact["path"]).is_absolute()
+
+
 def test_console_shell_serves_operator_console_html(tmp_path):
     client = _client(tmp_path)
 
@@ -387,6 +352,8 @@ def test_console_shell_serves_operator_console_html(tmp_path):
     assert "runConsoleAction(" in html
     assert "loadToolCatalog()" in html
     assert "fetch(\"/tools\")" in html
+    assert "Tool catalog unavailable; using default tool." in html
+    assert "fallback.selected = true" in html
 
 
 def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path):
