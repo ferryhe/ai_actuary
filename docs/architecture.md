@@ -149,6 +149,7 @@ The FastAPI routes are intentionally aligned to the future Symphony-style operat
 - `GET /runs/{run_id}` — return registry detail, derived run events, artifact manifest, and review metadata
 - `GET /runs/{run_id}/events` — return the polling-friendly lifecycle event stream for one run
 - `POST /runs/{run_id}/rerun` — rerun a recorded run through the existing registry/operator path
+- `POST /runs/{run_id}/report-export` — generate auditable operator handoff markdown/json from recorded evidence
 - `GET /runs/{run_id}/artifacts` — expose artifact manifest and artifact paths for an artifact panel
 - `GET /runs/{run_id}/review-packet` — expose review packet metadata for a review panel
 - `POST /replay` — wrap the existing replay helper
@@ -203,6 +204,11 @@ The artifact contract is the shared boundary between layers.
 
 - `review_packet.json`
 - `review_packet.md`
+- `review_decision.json`
+- `review_decision.md`
+- `operator_handoff.md`
+- `reserve_summary.json`
+- `reserve_summary.md`
 
 ### Review delivery path
 
@@ -239,6 +245,12 @@ The system currently implements storage through one local adapter set:
 - `LocalReviewStore` writes artifact-backed review records and decisions under a local review root
 
 The registry remains an operational index. Artifacts and review decision files remain the evidence source. The current filesystem-backed stores are a deliberate prototype constraint, not the final intended deployment architecture.
+
+PR15 adds a bounded operator handoff export on top of that same evidence model:
+
+- the export reads deterministic artifacts, manifest refs, run registry data, and independent review decisions
+- the export writes `operator_handoff.md`, `reserve_summary.json`, and `reserve_summary.md`
+- missing reserve values remain explicit missing values rather than fabricated output
 
 ---
 

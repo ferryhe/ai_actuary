@@ -42,6 +42,7 @@ One-line model:
 
 - `docs/architecture.md` — current three-layer architecture and runtime boundaries
 - `docs/contracts/control-plane.md` — frozen operator-facing status, event, artifact, review, tool, and rerun contracts
+- `docs/operator_handoff.md` — bounded report export and operator handoff workflow
 - `docs/project-plan.md` — completed scope, remaining gaps, and next recommended steps
 - `docs/architecture/overview.md` — short architecture summary for quick orientation
 - `docs/plans/openai-hermes-composition-design.md` — full original design and phased roadmap
@@ -96,6 +97,7 @@ All current operator-facing entry points are machine-readable JSON CLIs.
 5. `scripts/list_runs.py`
 6. `scripts/show_run.py`
 7. `scripts/rerun_case.py`
+8. `scripts/export_run_report.py`
 
 The local FastAPI wrapper also exposes:
 
@@ -105,6 +107,7 @@ The local FastAPI wrapper also exposes:
 - `GET /workflows/{workflow_id}`
 - `POST /runs`
 - `POST /runs/{run_id}/rerun`
+- `POST /runs/{run_id}/report-export`
 - `GET /reviews`
 - `GET /reviews/{review_id}`
 - `GET /runs/{run_id}/review`
@@ -159,6 +162,7 @@ python scripts/run_governed_case.py \
 - `approved`, `rejected`, and `changes_requested` are review decisions, not run statuses
 - worker-side invalid input failures expose structured metadata under `worker_result.worker_metadata`, including `failure_category`, `failure_stage`, and `error_type`
 - PR9 keeps the legacy `method` alias but normalizes `POST /runs` into stable `tool_id` plus `inputs.method_variant`, and writes `validated_input.json` into the run artifact set
+- PR15 exports handoff artifacts from recorded evidence only; missing reserve values stay marked as missing
 
 ### B. Trigger review flow
 
@@ -193,6 +197,21 @@ curl -X POST http://127.0.0.1:8000/reviews/<review_id>/decision \
   -H 'content-type: application/json' \
   -d '{"decision":"changes_requested","comment":"Re-run with updated assumptions.","decided_by":"actuary-001"}'
 ```
+
+### B2. Export operator handoff
+
+**Step 1 — Human:** export a report from an existing recorded run.
+
+```bash
+python scripts/export_run_report.py \
+  --registry-path ./tmp/run-registry.json \
+  --run-id <run_id> \
+  --review-store-dir ./tmp/reviews
+```
+
+**Step 2 — System:** the export reads deterministic artifacts, manifest refs, run registry metadata, and review decisions.
+
+**Step 3 — Human:** inspect `operator_handoff.md`, `reserve_summary.json`, and `reserve_summary.md` under the run artifact root.
 
 ### C. Run a batch benchmark comparison
 

@@ -30,6 +30,7 @@ from reserving_workflow.contracts.control_plane import (
     run_event_type_for_status,
 )
 from reserving_workflow.review import build_review_contract, ensure_review_record, write_run_review_decision_artifacts
+from reserving_workflow.reports import export_run_report
 from reserving_workflow.storage.local import LocalReviewStore
 from reserving_workflow.runtime import run_registry
 from reserving_workflow.tools import build_builtin_tool_registry
@@ -350,6 +351,18 @@ def create_app(
                 review_store_root=resolved_settings.review_store_dir,
             )
         }
+
+    @app.post("/runs/{run_id}/report-export")
+    async def create_run_report_export(run_id: str) -> dict[str, Any]:
+        try:
+            report = export_run_report(
+                registry_path=resolved_settings.registry_path,
+                run_id=run_id,
+                review_store_root=resolved_settings.review_store_dir,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"report": report}
 
     @app.get("/reviews")
     async def list_reviews(request: Request, operator_id: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
@@ -1240,7 +1253,14 @@ def _console_action_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
                 "path": f"/runs/{run_id}/rerun",
                 "enabled": bool(run_id),
                 "semantics": RerunSemantics(source_run_id=str(run_id)).model_dump(),
-            }
+            },
+            {
+                "action_id": "report_export",
+                "label": "Export handoff report",
+                "method": "POST",
+                "path": f"/runs/{run_id}/report-export",
+                "enabled": bool(run_id),
+            },
         ]
     }
 
@@ -1479,7 +1499,7 @@ def _operator_console_html() -> str:
 <body>
   <header>
     <h1>AI Actuary Operator Console</h1>
-    <p>Symphony-style shell over runs, timeline events, artifacts, review packets, and actions. Data source: <code>/console/state</code>.</p>
+    <p>Symphony-style shell over runs, timeline events, artifacts, review packets, actions, and operator handoff export. Data source: <code>/console/state</code>.</p>
   </header>
   <main>
     <section aria-label="Run Queue">
@@ -1539,7 +1559,7 @@ def _operator_console_html() -> str:
           <button id="submit-review-decision" type="submit">Submit review decision</button>
         </form>
       </section>
-      <section aria-label="Action Panel"><h2>Action Panel</h2><div id="action-panel" class="panel-body">Loading…</div></section>
+      <section aria-label="Action Panel"><h2>Action Panel</h2><div class="status">Actions include rerun and Export handoff report through <code>/runs/{run_id}/report-export</code> when a run is selected.</div><div id="action-panel" class="panel-body">Loading…</div></section>
     </div>
   </main>
   <script>
@@ -1870,11 +1890,13 @@ def _operator_console_html() -> str:
           body: "{}",
         });
         const result = await parseJsonOrThrow(response, action.label || "Console action");
-        setOperationStatus(`${result.status || "completed"}: ${result.run_id || "action complete"}`, "ok");
-        if (result.run_id) {
-          await loadConsole(result.run_id);
-          if (activeEventTypes.includes(`run.${result.status}`)) {
-            startPolling(result.run_id);
+        const runId = result.run_id || (result.report && result.report.run && result.report.run.run_id) || selectedRunId;
+        const status = result.status || (result.report && result.report.run && result.report.run.status) || "completed";
+        setOperationStatus(`${status}: ${runId || "action complete"}`, "ok");
+        if (runId) {
+          await loadConsole(runId);
+          if (activeEventTypes.includes(`run.${status}`)) {
+            startPolling(runId);
           }
         } else {
           await loadConsole(selectedRunId);
