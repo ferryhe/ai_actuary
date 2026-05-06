@@ -63,6 +63,8 @@ Primary files:
 - `workflows/agent-runtimes/hermes-worker/review_worker.py`
 - `workflows/agent-runtimes/hermes-worker/batch_worker.py`
 - `workflows/agent-runtimes/hermes-worker/artifact_packager.py`
+- `src/reserving_workflow/storage/interfaces.py`
+- `src/reserving_workflow/storage/local.py`
 
 Responsibilities:
 
@@ -71,6 +73,7 @@ Responsibilities:
 - emit `run_manifest.json` for audit and replay
 - generate review flow outputs when a case needs escalation
 - support batch execution through a worker-style boundary
+- keep local store adapters behind explicit run/artifact/review interfaces
 
 ---
 
@@ -157,6 +160,14 @@ PR8 adds a bounded tool catalog and control-plane contract layer:
 - `POST /runs` still preserves the existing `method` request contract and does not introduce tool-backed execution dispatch
 - run status values, run event types, artifact refs, review status, and rerun semantics are frozen in `docs/contracts/control-plane.md`
 
+PR10 adds a store boundary under the existing control plane:
+
+- `RunStore` is the operational index boundary for run lookup and status history
+- `ArtifactStore` is the evidence boundary for manifest-backed files
+- `ReviewStore` is the local placeholder boundary for persistent review records and decisions
+- the current implementation remains local-only through `LocalRunStore`, `LocalArtifactStore`, and `LocalReviewStore`
+- API routes, CLI scripts, planner behavior, and worker behavior are unchanged; existing helper modules now act as compatibility wrappers over the local adapters
+
 ---
 
 ## Artifact Contract
@@ -204,7 +215,13 @@ The registry is not a replacement for manifests; it is a lightweight operational
 
 The operator-facing API also derives stable artifact refs from `run_manifest.json` for console/detail views. Those refs are a presentation contract over the manifest, not a second artifact source of truth.
 
-The system currently treats the local filesystem as the artifact store. That is a deliberate prototype constraint, not the final intended deployment architecture.
+The system currently implements storage through one local adapter set:
+
+- `LocalRunStore` writes the JSON run registry
+- `LocalArtifactStore` writes and reads filesystem artifacts under the run artifact root
+- `LocalReviewStore` writes artifact-backed review records and decisions under a local review root
+
+The registry remains an operational index. Artifacts and review decision files remain the evidence source. The current filesystem-backed stores are a deliberate prototype constraint, not the final intended deployment architecture.
 
 ---
 

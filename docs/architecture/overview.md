@@ -31,6 +31,13 @@ PR8 adds a bounded tool catalog and frozen control-plane contracts:
 - the create-run form uses the catalog to populate its selector while still posting the existing `method` field
 - status literals, event literals, review status, artifact refs, and rerun semantics are documented under `docs/contracts/control-plane.md`
 
+PR10 adds a local store boundary without changing the external behavior:
+
+- `RunStore` wraps the JSON registry as an operational index
+- `ArtifactStore` wraps filesystem artifacts as audit evidence
+- `ReviewStore` provides local artifact-backed review records and decisions for later review workflow work
+- the old registry/artifact helper modules remain in place as compatibility wrappers over the local adapters
+
 The current actuarial calculation method remains `chainladder`. Future actuarial tools should attach to the same composable `method`/case-input contract so an agent can operate them through JSON/YAML/text instructions, not through UI-only special cases.
 
 ## Responsibility Split

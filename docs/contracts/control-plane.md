@@ -102,3 +102,13 @@ Each created run also writes `validated_input.json`, and `run_manifest.json` mus
 - only `artifact_dir` and `review_delivery_dir` are overrideable through the current rerun request contract
 
 The control-plane contract exposes these semantics through `RerunSemantics`.
+
+## Store Boundary
+
+PR10 keeps the current local storage behavior but moves it behind explicit interfaces:
+
+- `RunStore` backs the JSON registry and remains an operational index only
+- `ArtifactStore` backs filesystem artifacts and remains the evidence source for manifests and derived artifact refs
+- `ReviewStore` is a local artifact-backed placeholder for persistent review records and decisions
+
+This boundary does not add DB, object storage, queues, auth, or review inbox behavior.
