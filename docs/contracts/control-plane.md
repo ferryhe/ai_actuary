@@ -1,6 +1,6 @@
 # Control-Plane Contracts
 
-This document freezes the bounded operator-facing control-plane contract as of PR9.
+This document freezes the bounded operator-facing control-plane contract as of PR11.
 
 ## Scope
 
@@ -8,6 +8,7 @@ These contracts apply to the local FastAPI control plane and the lightweight ope
 
 - They define stable status and event literals for run tracking.
 - They define the operator-visible tool catalog shape.
+- They define the operator-visible builtin workflow catalog shape.
 - They do not change planner routing, worker execution, or deterministic dispatch behavior.
 - They do not add upload flows, workflow builders, human review systems, auth, websocket/SSE, DB, or object storage.
 
@@ -34,6 +35,13 @@ The local JSON registry records only these status values.
 - `run.completed`
 - `run.needs_review`
 - `run.failed`
+- `workflow.started`
+- `workflow.completed`
+- `workflow.failed`
+- `workflow.step.started`
+- `workflow.step.running`
+- `workflow.step.completed`
+- `workflow.step.failed`
 
 Current API payloads also keep the legacy `event_type` field for compatibility. It mirrors `type`.
 
@@ -91,6 +99,20 @@ Unknown `tool_id` values are rejected with HTTP 400.
 The console now posts the tool-backed request shape while preserving the legacy `method` alias in the payload for compatibility.
 
 Each created run also writes `validated_input.json`, and `run_manifest.json` must carry a `validated_input` artifact reference.
+
+## Workflow Catalog
+
+PR11 adds a bounded builtin workflow catalog.
+
+- `GET /workflows` returns workflow summaries.
+- `GET /workflows/{workflow_id}` returns one workflow definition with ordered steps.
+- `POST /runs` now also accepts `workflow_id`.
+
+The initial builtin workflow catalog contains:
+
+- `chainladder-basic`
+
+Workflow-backed runs keep the existing run lifecycle and execution modes (`inline` and local FastAPI background tasks only). They add workflow-level and step-level events into the same run timeline and write a top-level `run_manifest.json` that references workflow summary artifacts and per-step manifests.
 
 ## Rerun Semantics
 

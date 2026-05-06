@@ -12,6 +12,7 @@ from reserving_workflow.api.app import (
     create_app,
 )
 from reserving_workflow.schemas import RunArtifactManifest
+from reserving_workflow.workflows import WorkflowCatalog, WorkflowCatalogEntry, WorkflowStepEntry
 
 
 class FakeWorkerTask:
@@ -24,8 +25,19 @@ class FakeTaskContractsModule:
 
 
 class FakeRunnerModule:
+    calls = []
+
     @staticmethod
     def run_openai_governed_workflow(task, *, user_prompt=None):
+        FakeRunnerModule.calls.append(
+            {
+                "run_id": task.run_id,
+                "case_id": task.case_ref,
+                "artifact_dir": task.inputs["artifact_dir"],
+                "required_artifacts": list(getattr(task, "required_artifacts", [])),
+                "user_prompt": user_prompt,
+            }
+        )
         artifact_dir = Path(task.inputs["artifact_dir"])
         artifact_dir.mkdir(parents=True, exist_ok=True)
         run_manifest = artifact_dir / "run_manifest.json"
@@ -204,6 +216,7 @@ def _client(
     replay_module=FakeReplayModule,
     batch_runner_module=FakeBatchRunnerModule,
     background_task_runner=None,
+    workflow_catalog=None,
 ):
     settings = ApiSettings(
         registry_path=tmp_path / "run-registry.json",
@@ -216,11 +229,17 @@ def _client(
         replay_module=replay_module,
         batch_runner_module=batch_runner_module,
         background_task_runner=background_task_runner,
+        workflow_catalog=workflow_catalog,
     )
     return LocalApiClient(app)
 
 
+def _reset_fake_runner_calls():
+    FakeRunnerModule.calls.clear()
+
+
 def test_post_run_records_registry_and_returns_operator_contract(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path)
 
     response = client.post("/runs", json={"case_id": "api-case"})
@@ -237,6 +256,7 @@ def test_post_run_records_registry_and_returns_operator_contract(tmp_path):
 
 
 def test_post_run_normalizes_tool_backed_request_and_writes_validated_input_artifact(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path)
 
     response = client.post(
@@ -269,6 +289,7 @@ def test_post_run_normalizes_tool_backed_request_and_writes_validated_input_arti
 
 
 def test_post_run_normalizes_legacy_method_alias_into_tool_backed_validated_input(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path)
 
     response = client.post(
@@ -292,6 +313,7 @@ def test_post_run_normalizes_legacy_method_alias_into_tool_backed_validated_inpu
 
 
 def test_post_run_rejects_unknown_tool_id_with_http_400(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path)
 
     response = client.post("/runs", json={"case_id": "bad-tool-case", "tool_id": "unknown-tool"})
@@ -301,6 +323,7 @@ def test_post_run_rejects_unknown_tool_id_with_http_400(tmp_path):
 
 
 def test_post_run_rejects_invalid_chainladder_method_variant_with_http_400(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path)
 
     response = client.post(
@@ -313,6 +336,7 @@ def test_post_run_rejects_invalid_chainladder_method_variant_with_http_400(tmp_p
 
 
 def test_tool_catalog_endpoints_expose_builtin_chainladder(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path)
 
     tools = client.get("/tools")
@@ -328,6 +352,7 @@ def test_tool_catalog_endpoints_expose_builtin_chainladder(tmp_path):
 
 
 def test_post_run_can_accept_background_execution_and_poll_events(tmp_path):
+    _reset_fake_runner_calls()
     scheduled = []
 
     def capture_background_task(fn, *args, **kwargs):
@@ -360,6 +385,7 @@ def test_post_run_can_accept_background_execution_and_poll_events(tmp_path):
 
 
 def test_post_run_rejects_unsafe_default_artifact_case_id(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path)
 
     response = client.post("/runs", json={"case_id": "../escape"})
@@ -370,6 +396,7 @@ def test_post_run_rejects_unsafe_default_artifact_case_id(tmp_path):
 
 
 def test_post_run_rejects_unsafe_case_id_even_with_explicit_artifact_dir(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path)
 
     response = client.post(
@@ -383,6 +410,7 @@ def test_post_run_rejects_unsafe_case_id_even_with_explicit_artifact_dir(tmp_pat
 
 
 def test_run_detail_exposes_symphony_style_events_and_artifacts(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path)
     run = client.post("/runs", json={"case_id": "detail-case"}).json()
 
@@ -406,6 +434,7 @@ def test_run_detail_exposes_symphony_style_events_and_artifacts(tmp_path):
 
 
 def test_run_detail_resolves_relative_manifest_artifact_paths(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path, runner_module=RelativeArtifactPathRunnerModule)
     run = client.post("/runs", json={"case_id": "relative-artifact-case"}).json()
 
@@ -420,6 +449,7 @@ def test_run_detail_resolves_relative_manifest_artifact_paths(tmp_path):
 
 
 def test_console_shell_serves_operator_console_html(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path)
 
     response = client.get("/console")
@@ -453,6 +483,7 @@ def test_console_shell_serves_operator_console_html(tmp_path):
 
 
 def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path)
 
     html = client.get("/console").text
@@ -485,6 +516,7 @@ def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path)
 
 
 def test_console_state_exposes_symphony_style_panels(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path, runner_module=ReviewRunnerModule)
     run = client.post("/runs", json={"case_id": "console-case"}).json()
 
@@ -522,6 +554,7 @@ def test_console_state_exposes_symphony_style_panels(tmp_path):
 
 
 def test_console_state_defaults_to_latest_run(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path)
     older = client.post("/runs", json={"case_id": "older-console-case"}).json()
     newer = client.post("/runs", json={"case_id": "newer-console-case"}).json()
@@ -536,6 +569,7 @@ def test_console_state_defaults_to_latest_run(tmp_path):
 
 
 def test_rerun_endpoint_creates_distinct_run_id(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path)
     original = client.post(
         "/runs",
@@ -570,6 +604,7 @@ def test_rerun_endpoint_creates_distinct_run_id(tmp_path):
 
 
 def test_review_packet_endpoint_returns_packet_metadata(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path, runner_module=ReviewRunnerModule)
     run = client.post("/runs", json={"case_id": "review-case"}).json()
 
@@ -583,6 +618,7 @@ def test_review_packet_endpoint_returns_packet_metadata(tmp_path):
 
 
 def test_replay_and_repeatability_endpoints_wrap_existing_helpers(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path)
 
     replay = client.post("/replay", json={"manifest_path": "./tmp/run_manifest.json"}).json()
@@ -598,6 +634,7 @@ def test_replay_and_repeatability_endpoints_wrap_existing_helpers(tmp_path):
 
 
 def test_replay_and_repeatability_validation_errors_return_400(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path, replay_module=ValidationErrorReplayModule)
 
     replay = client.post("/replay", json={"manifest_path": "./tmp/bad_manifest.json"})
@@ -614,6 +651,7 @@ def test_default_batch_runner_loader_finds_repo_runner():
 
 
 def test_batch_benchmark_endpoint_wraps_existing_runner(tmp_path):
+    _reset_fake_runner_calls()
     client = _client(tmp_path)
 
     result = client.post(
@@ -623,3 +661,147 @@ def test_batch_benchmark_endpoint_wraps_existing_runner(tmp_path):
 
     assert result["case_count"] == 1
     assert result["artifact_root"] == str(tmp_path / "batch")
+
+
+def test_workflow_catalog_endpoints_expose_builtin_workflow(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path)
+
+    workflows = client.get("/workflows")
+    workflow = client.get("/workflows/chainladder-basic")
+
+    assert workflows.status_code == 200
+    assert workflows.json()["workflow_count"] == 1
+    assert workflows.json()["workflows"][0]["workflow_id"] == "chainladder-basic"
+    assert workflows.json()["workflows"][0]["step_count"] == 1
+    assert workflow.status_code == 200
+    assert workflow.json()["workflow_id"] == "chainladder-basic"
+    assert workflow.json()["steps"][0]["tool_id"] == "chainladder"
+
+
+def test_post_run_with_workflow_id_executes_steps_sequentially_and_records_workflow_events(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/runs",
+        json={"case_id": "workflow-case", "workflow_id": "chainladder-basic", "background": False},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "completed"
+    assert payload["workflow"]["workflow_id"] == "chainladder-basic"
+    assert payload["workflow"]["step_count"] == 1
+    assert payload["workflow"]["steps"][0]["status"] == "completed"
+    assert len(FakeRunnerModule.calls) == 1
+    assert Path(FakeRunnerModule.calls[0]["artifact_dir"]).name == "chainladder"
+
+    run_id = payload["run_id"]
+    events = client.get(f"/runs/{run_id}/events").json()["events"]
+    assert [event["event_type"] for event in events] == [
+        "run.queued",
+        "run.running",
+        "workflow.started",
+        "workflow.step.started",
+        "workflow.step.completed",
+        "workflow.completed",
+        "run.completed",
+    ]
+    assert events[2]["payload"]["workflow_id"] == "chainladder-basic"
+    assert events[3]["payload"]["step_id"] == "chainladder"
+
+    detail = client.get(f"/runs/{run_id}").json()
+    assert detail["run"]["workflow_id"] == "chainladder-basic"
+    assert detail["artifact_manifest"]["workflow_id"] == "chainladder-basic"
+    assert detail["artifact_manifest"]["artifact_paths"]["workflow_summary"].endswith("workflow_summary.json")
+    assert any(artifact["artifact_id"] == "step_chainladder_run_manifest" for artifact in detail["artifacts"])
+
+
+def test_post_run_with_workflow_id_accepts_background_mode_without_changing_legacy_background_contract(tmp_path):
+    _reset_fake_runner_calls()
+    scheduled = []
+
+    def capture_background_task(fn, *args, **kwargs):
+        scheduled.append((fn, args, kwargs))
+
+    client = _client(tmp_path, background_task_runner=capture_background_task)
+
+    response = client.post("/runs", json={"case_id": "workflow-background", "workflow_id": "chainladder-basic", "background": True})
+
+    assert response.status_code == 202
+    accepted = response.json()
+    assert accepted["status"] == "accepted"
+    assert accepted["execution_mode"] == "background"
+    assert len(scheduled) == 1
+
+    fn, args, kwargs = scheduled.pop()
+    fn(*args, **kwargs)
+
+    events = client.get(f"/runs/{accepted['run_id']}/events").json()["events"]
+    assert events[-1]["event_type"] == "run.completed"
+    assert "workflow.completed" in [event["event_type"] for event in events]
+
+
+def test_rerun_endpoint_supports_workflow_backed_parent_runs(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path)
+    original = client.post("/runs", json={"case_id": "workflow-rerun", "workflow_id": "chainladder-basic"}).json()
+
+    rerun = client.post(f"/runs/{original['run_id']}/rerun", json={}).json()
+
+    assert rerun["status"] == "completed"
+    assert rerun["run_id"] != original["run_id"]
+    assert rerun["workflow"]["workflow_id"] == "chainladder-basic"
+    assert rerun["rerun"]["source_run_id"] == original["run_id"]
+    runs = client.get("/runs").json()["runs"]
+    assert {item["run_id"] for item in runs} == {original["run_id"], rerun["run_id"]}
+
+
+def test_post_run_with_injected_workflow_catalog_uses_selected_workflow_detail(tmp_path):
+    _reset_fake_runner_calls()
+    custom_catalog = WorkflowCatalog(
+        entries=[
+            WorkflowCatalogEntry(
+                workflow_id="custom-chainladder",
+                title="Custom Chainladder",
+                description="Injected workflow used by API tests.",
+                steps=[
+                    WorkflowStepEntry(
+                        step_id="custom-step",
+                        tool_id="chainladder",
+                        title="Custom step",
+                        inputs={"sample_name": "RAA"},
+                    )
+                ],
+            )
+        ]
+    )
+    client = _client(tmp_path, workflow_catalog=custom_catalog)
+
+    response = client.post(
+        "/runs",
+        json={"case_id": "workflow-custom", "workflow_id": "custom-chainladder", "background": False},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["workflow"]["workflow_id"] == "custom-chainladder"
+    assert payload["workflow"]["steps"][0]["step_id"] == "custom-step"
+    assert Path(FakeRunnerModule.calls[0]["artifact_dir"]).name == "custom-step"
+
+
+def test_workflow_needs_review_status_uses_review_event_types(tmp_path):
+    client = _client(tmp_path, runner_module=ReviewRunnerModule)
+
+    response = client.post("/runs", json={"case_id": "workflow-review", "workflow_id": "chainladder-basic"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "needs_review"
+    events = client.get(f"/runs/{payload['run_id']}/events").json()["events"]
+    event_types = [event["event_type"] for event in events]
+    assert "workflow.step.needs_review" in event_types
+    assert "workflow.needs_review" in event_types
+    assert "workflow.step.failed" not in event_types
+    assert "workflow.failed" not in event_types

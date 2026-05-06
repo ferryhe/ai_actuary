@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from reserving_workflow.storage.local import DEFAULT_REGISTRY_PAYLOAD, LocalRunStore, RunNotFoundError, resolve_registry_path
+from reserving_workflow.storage.local import LocalRunStore, RunNotFoundError
 
 
 def record_run_event(
@@ -22,6 +22,9 @@ def record_run_event(
     error_category: str | None = None,
     errors: list[str] | None = None,
     review_delivery: dict[str, Any] | None = None,
+    event_type: str | None = None,
+    event_payload: dict[str, Any] | None = None,
+    workflow_id: str | None = None,
 ) -> dict[str, Any]:
     store = LocalRunStore(registry_path)
     try:
@@ -37,6 +40,9 @@ def record_run_event(
             error_category=error_category,
             errors=errors,
             review_delivery=review_delivery,
+            event_type=event_type,
+            event_payload=event_payload,
+            workflow_id=workflow_id,
         )
     except RunNotFoundError:
         return store.create_run(
@@ -51,6 +57,9 @@ def record_run_event(
             error_category=error_category,
             errors=errors,
             review_delivery=review_delivery,
+            event_type=event_type,
+            event_payload=event_payload,
+            workflow_id=workflow_id,
         )
 
 

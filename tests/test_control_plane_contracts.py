@@ -12,6 +12,8 @@ from reserving_workflow.contracts.control_plane import (
     RunEvent,
     ToolInvocation,
     ValidatedToolInput,
+    Workflow,
+    WorkflowStep,
     run_event_type_for_status,
     validate_run_status,
 )
@@ -54,3 +56,18 @@ def test_tool_invocation_contract_normalizes_chainladder_legacy_method_alias():
 
     assert invocation.tool_id == "chainladder"
     assert validated.inputs == {"sample_name": "RAA", "method_variant": "chainladder", "review_threshold_origin_count": None}
+
+
+def test_workflow_contracts_freeze_builtin_schema_shape():
+    workflow = Workflow(
+        workflow_id="chainladder-basic",
+        title="Chainladder Basic",
+        description="Sequential deterministic workflow.",
+        builtin=True,
+        step_count=1,
+        steps=[WorkflowStep(step_id="chainladder", tool_id="chainladder", title="Run chainladder")],
+    )
+
+    assert workflow.workflow_id == "chainladder-basic"
+    assert workflow.step_count == 1
+    assert workflow.steps[0].tool_id == "chainladder"

@@ -61,6 +61,38 @@ def test_local_run_store_rejects_duplicate_create(tmp_path):
     assert [item["status"] for item in entry["status_history"]] == ["queued"]
 
 
+def test_local_run_store_persists_custom_workflow_history_payloads(tmp_path):
+    store = LocalRunStore(tmp_path / "run-registry.json")
+
+    store.create_run(
+        task_id="operator-workflow-case",
+        case_id="workflow-case",
+        run_id="workflow-run",
+        status="queued",
+        summary="queued",
+        operator_params={"case_id": "workflow-case", "workflow_id": "chainladder-basic"},
+    )
+    store.update_run_status(
+        run_id="workflow-run",
+        task_id="operator-workflow-case",
+        case_id="workflow-case",
+        status="running",
+        summary="running workflow step",
+        operator_params={"case_id": "workflow-case", "workflow_id": "chainladder-basic"},
+        event_type="workflow.step.running",
+        event_payload={"workflow_id": "chainladder-basic", "step_id": "chainladder"},
+    )
+
+    entry = store.get_run("workflow-run")
+
+    assert entry["operator_params"]["workflow_id"] == "chainladder-basic"
+    assert entry["status_history"][1]["event_type"] == "workflow.step.running"
+    assert entry["status_history"][1]["payload"] == {
+        "workflow_id": "chainladder-basic",
+        "step_id": "chainladder",
+    }
+
+
 def test_local_artifact_store_writes_reads_and_lists_artifacts(tmp_path):
     store = LocalArtifactStore()
     root = tmp_path / "artifacts"

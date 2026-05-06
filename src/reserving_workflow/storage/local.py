@@ -42,6 +42,9 @@ class LocalRunStore:
         error_category: str | None = None,
         errors: list[str] | None = None,
         review_delivery: dict[str, Any] | None = None,
+        event_type: str | None = None,
+        event_payload: dict[str, Any] | None = None,
+        workflow_id: str | None = None,
     ) -> dict[str, Any]:
         return self._upsert_run(
             task_id=task_id,
@@ -55,6 +58,9 @@ class LocalRunStore:
             error_category=error_category,
             errors=errors,
             review_delivery=review_delivery,
+            event_type=event_type,
+            event_payload=event_payload,
+            workflow_id=workflow_id,
             create_if_missing=True,
             reject_existing=True,
         )
@@ -73,6 +79,9 @@ class LocalRunStore:
         error_category: str | None = None,
         errors: list[str] | None = None,
         review_delivery: dict[str, Any] | None = None,
+        event_type: str | None = None,
+        event_payload: dict[str, Any] | None = None,
+        workflow_id: str | None = None,
     ) -> dict[str, Any]:
         return self._upsert_run(
             task_id=task_id,
@@ -86,6 +95,9 @@ class LocalRunStore:
             error_category=error_category,
             errors=errors,
             review_delivery=review_delivery,
+            event_type=event_type,
+            event_payload=event_payload,
+            workflow_id=workflow_id,
             create_if_missing=False,
             reject_existing=False,
         )
@@ -104,6 +116,7 @@ class LocalRunStore:
             error_category=entry.get("error_category"),
             errors=list(entry.get("errors", []) or []),
             review_delivery=entry.get("review_delivery"),
+            workflow_id=entry.get("workflow_id"),
         )
 
     def get_run(self, run_id: str) -> dict[str, Any]:
@@ -131,6 +144,9 @@ class LocalRunStore:
         error_category: str | None,
         errors: list[str] | None,
         review_delivery: dict[str, Any] | None,
+        event_type: str | None,
+        event_payload: dict[str, Any] | None,
+        workflow_id: str | None,
         create_if_missing: bool,
         reject_existing: bool,
     ) -> dict[str, Any]:
@@ -142,6 +158,16 @@ class LocalRunStore:
         history_item = {"status": status, "timestamp": now}
         if summary is not None:
             history_item["summary"] = summary
+        if event_type is not None:
+            history_item["event_type"] = event_type
+        if event_payload is not None:
+            history_item["payload"] = _to_serializable(event_payload)
+
+        resolved_workflow_id = workflow_id
+        if resolved_workflow_id is None and operator_params is not None:
+            candidate_workflow_id = operator_params.get("workflow_id")
+            if candidate_workflow_id is not None:
+                resolved_workflow_id = str(candidate_workflow_id)
 
         if entry is not None and reject_existing:
             raise ValueError(f"Run id already exists in registry: {run_id}")
@@ -163,6 +189,7 @@ class LocalRunStore:
                 "errors": list(errors or []),
                 "review_delivery": _to_serializable(review_delivery),
                 "operator_params": _to_serializable(operator_params or {}),
+                "workflow_id": resolved_workflow_id,
                 "status_history": [history_item],
             }
             runs.append(entry)
@@ -186,6 +213,8 @@ class LocalRunStore:
                 entry["review_delivery"] = _to_serializable(review_delivery)
             if operator_params is not None:
                 entry["operator_params"] = _to_serializable(operator_params)
+            if resolved_workflow_id is not None:
+                entry["workflow_id"] = resolved_workflow_id
             entry.setdefault("status_history", []).append(history_item)
 
         _write_registry_payload(self.registry_path, payload)

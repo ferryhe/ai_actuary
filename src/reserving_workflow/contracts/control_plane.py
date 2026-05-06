@@ -15,6 +15,15 @@ RunEventType = Literal[
     "run.completed",
     "run.needs_review",
     "run.failed",
+    "workflow.started",
+    "workflow.completed",
+    "workflow.needs_review",
+    "workflow.failed",
+    "workflow.step.started",
+    "workflow.step.running",
+    "workflow.step.completed",
+    "workflow.step.needs_review",
+    "workflow.step.failed",
 ]
 ReviewStatus = Literal["not_available", "not_required", "review_required"]
 ReviewDecision = Literal["not_required", "pending", "approved", "rejected"]
@@ -65,6 +74,25 @@ class ValidatedToolInput(BaseModel):
     inputs: dict[str, Any] = Field(default_factory=dict)
 
 
+class WorkflowStep(BaseModel):
+    step_id: str
+    tool_id: str
+    title: str
+    description: str | None = None
+    order: int | None = None
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    status: RunStatus | None = None
+
+
+class Workflow(BaseModel):
+    workflow_id: str
+    title: str
+    description: str
+    builtin: bool = True
+    step_count: int
+    steps: list[WorkflowStep] = Field(default_factory=list)
+
+
 class Run(BaseModel):
     run_id: str
     case_id: str | None = None
@@ -74,6 +102,7 @@ class Run(BaseModel):
     updated_at: str | None = None
     artifact_root: str | None = None
     review_required: bool = False
+    workflow_id: str | None = None
 
 
 class RunEvent(BaseModel):

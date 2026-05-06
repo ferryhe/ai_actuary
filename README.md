@@ -81,6 +81,7 @@ One-line model:
 - `src/reserving_workflow/api/`
 - `src/reserving_workflow/runtime/run_registry.py`
 - `src/reserving_workflow/tools/catalog.py`
+- `src/reserving_workflow/workflows/catalog.py`
 
 ---
 
@@ -100,6 +101,8 @@ The local FastAPI wrapper also exposes:
 
 - `GET /tools`
 - `GET /tools/{tool_id}`
+- `GET /workflows`
+- `GET /workflows/{workflow_id}`
 - `POST /runs`
 - `POST /runs/{run_id}/rerun`
 
@@ -275,6 +278,8 @@ Key routes:
 - `GET /console` — serve a lightweight operator console shell
 - `GET /console/state` — return the console-ready run queue, timeline, artifact, review, and action panels
 - `POST /runs` — start a governed single-case run through the existing operator entrypoint; pass `"background": true` to accept the run immediately and execute it through FastAPI background tasks
+- `GET /workflows` — list builtin workflow templates
+- `GET /workflows/{workflow_id}` — fetch one builtin workflow definition with ordered steps
 - `GET /runs`
 - `GET /runs/{run_id}`
 - `GET /runs/{run_id}/events`
@@ -285,9 +290,9 @@ Key routes:
 - `POST /repeatability`
 - `POST /benchmarks/batch`
 
-The `/runs/{run_id}` detail payload includes derived `events` such as `run.queued`, `run.running`, and `run.completed`. PR5 adds `/console` and `/console/state` on top of the same data, giving operators a simple run queue, timeline, artifact panel, review panel, and rerun action panel without introducing a second runtime contract or a frontend build system. PR6 adds a bounded background execution mode: `POST /runs` can return `202 accepted` with a `run.accepted` event, then the existing operator flow appends `run.queued`, `run.running`, and the final lifecycle event for polling through `/runs/{run_id}/events`. PR7 keeps the same lightweight shell but makes it operational: the console can create governed runs through `POST /runs`, poll background lifecycle events through `GET /runs/{run_id}/events`, and trigger the existing rerun contract through `POST /runs/{run_id}/rerun`.
+The `/runs/{run_id}` detail payload includes derived `events` such as `run.queued`, `run.running`, and `run.completed`. Workflow-backed runs keep that same outer lifecycle and append ordered workflow events like `workflow.started`, `workflow.step.started`, `workflow.step.completed`, and `workflow.completed`, with a top-level `run_manifest.json` pointing at workflow summary and step manifests. PR5 adds `/console` and `/console/state` on top of the same data, giving operators a simple run queue, timeline, artifact panel, review panel, and rerun action panel without introducing a second runtime contract or a frontend build system. PR6 adds a bounded background execution mode: `POST /runs` can return `202 accepted` with a `run.accepted` event, then the existing operator flow appends `run.queued`, `run.running`, and the final lifecycle event for polling through `/runs/{run_id}/events`. PR7 keeps the same lightweight shell but makes it operational: the console can create governed runs through `POST /runs`, poll background lifecycle events through `GET /runs/{run_id}/events`, and trigger the existing rerun contract through `POST /runs/{run_id}/rerun`.
 
-The console intentionally remains text-contract first. PR9 moves the create-run payload to a tool-backed shape: `case_id`, `tool_id`, `inputs`, and `background`, while preserving the legacy top-level `method` alias for compatibility. For the built-in deterministic path the normalized payload is `tool_id="chainladder"` with `inputs.method_variant="chainladder"`, and each run now writes `validated_input.json` alongside `run_manifest.json`.
+The console intentionally remains text-contract first. PR9 moves the create-run payload to a tool-backed shape: `case_id`, `tool_id`, `inputs`, and `background`, while preserving the legacy top-level `method` alias for compatibility. PR11 adds builtin workflow templates discoverable through `GET /workflows`, and `POST /runs` can now also accept `workflow_id` while preserving the legacy single-tool path unchanged. For the built-in deterministic path the normalized payload is `tool_id="chainladder"` with `inputs.method_variant="chainladder"`, and each run now writes `validated_input.json` alongside `run_manifest.json`.
 
 ---
 

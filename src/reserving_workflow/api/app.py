@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from reserving_workflow import operator_entrypoint
 from reserving_workflow.artifacts import replay as replay_helpers
-from reserving_workflow.artifacts.storage import read_json_artifact, resolve_artifact_path
+from reserving_workflow.artifacts.storage import read_json_artifact, resolve_artifact_path, write_json_artifact
 from reserving_workflow.contracts.control_plane import (
     ArtifactRef,
     ChainladderToolInput,
@@ -30,6 +30,7 @@ from reserving_workflow.contracts.control_plane import (
 )
 from reserving_workflow.runtime import run_registry
 from reserving_workflow.tools import build_builtin_tool_registry
+from reserving_workflow.workflows import build_builtin_workflow_catalog
 
 
 class ApiSettings(BaseModel):
@@ -44,6 +45,7 @@ class RunCreateRequest(BaseModel):
     case_id: str
     artifact_dir: str | Path | None = None
     objective: str = "API-triggered governed workflow run"
+    workflow_id: str | None = None
     tool_id: str | None = None
     inputs: dict[str, Any] = Field(default_factory=dict)
     sample_name: str | None = None
@@ -81,6 +83,7 @@ def create_app(
     batch_runner_module=None,
     background_task_runner=None,
     tool_registry=None,
+    workflow_catalog=None,
 ) -> FastAPI:
     """Create the FastAPI control plane app.
 
@@ -92,6 +95,7 @@ def create_app(
     resolved_replay_module = replay_module or replay_helpers
     resolved_batch_runner_module = batch_runner_module
     resolved_tool_registry = tool_registry or build_builtin_tool_registry()
+    resolved_workflow_catalog = workflow_catalog or build_builtin_workflow_catalog()
     app = FastAPI(title="AI Actuary Control Plane", version="0.1.0")
 
     @app.get("/health")
@@ -120,12 +124,29 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.get("/workflows")
+    async def list_workflows() -> dict[str, Any]:
+        workflows = resolved_workflow_catalog.list_workflow_summaries()
+        return {"workflow_count": len(workflows), "workflows": workflows}
+
+    @app.get("/workflows/{workflow_id}")
+    async def get_workflow(workflow_id: str) -> dict[str, Any]:
+        try:
+            return resolved_workflow_catalog.get_workflow(workflow_id).to_contract().model_dump()
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.post("/runs")
     async def create_run(request: RunCreateRequest, background_tasks: BackgroundTasks) -> Any:
         try:
             _safe_artifact_component(request.case_id, field_name="case_id")
             artifact_dir = request.artifact_dir or _default_artifact_dir(resolved_settings, request.case_id)
-            validated_tool_input = _normalize_tool_invocation(request, tool_registry=resolved_tool_registry)
+            workflow_entry = None
+            validated_tool_input = None
+            if request.workflow_id is not None:
+                workflow_entry = resolved_workflow_catalog.get_workflow(request.workflow_id)
+            else:
+                validated_tool_input = _normalize_tool_invocation(request, tool_registry=resolved_tool_registry)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ValidationError as exc:
@@ -133,6 +154,35 @@ def create_app(
         review_delivery_dir = request.review_delivery_dir
         if review_delivery_dir is None:
             review_delivery_dir = resolved_settings.review_delivery_dir
+        if workflow_entry is not None:
+            operator_params = _workflow_operator_params_from_request(
+                request,
+                workflow_entry=workflow_entry,
+                artifact_dir=artifact_dir,
+                review_delivery_dir=review_delivery_dir,
+                registry_path=resolved_settings.registry_path,
+                runner_module=runner_module,
+                task_contracts_module=task_contracts_module,
+                tool_registry=resolved_tool_registry,
+            )
+            if request.background:
+                run_id = _generate_api_run_id(request.case_id)
+                operator_params["run_id"] = run_id
+                accepted_payload = _record_background_acceptance(
+                    request,
+                    validated_tool_input=None,
+                    artifact_dir=artifact_dir,
+                    review_delivery_dir=review_delivery_dir,
+                    registry_path=resolved_settings.registry_path,
+                    run_id=run_id,
+                    workflow_id=request.workflow_id,
+                )
+                scheduler = background_task_runner or background_tasks.add_task
+                scheduler(_run_workflow_background, operator_params)
+                return JSONResponse(status_code=202, content=accepted_payload)
+            return JSONResponse(
+                content=_run_sequential_workflow(**operator_params)
+            )
         operator_params = _operator_params_from_request(
             request,
             validated_tool_input=validated_tool_input,
@@ -152,6 +202,7 @@ def create_app(
                 review_delivery_dir=review_delivery_dir,
                 registry_path=resolved_settings.registry_path,
                 run_id=run_id,
+                workflow_id=None,
             )
             scheduler = background_task_runner or background_tasks.add_task
             scheduler(_run_operator_flow_background, operator_params)
@@ -191,6 +242,21 @@ def create_app(
 
     @app.post("/runs/{run_id}/rerun")
     async def rerun(run_id: str, request: RerunRequest) -> dict[str, Any]:
+        entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+        operator_params = dict(entry.get("operator_params", {}) or {})
+        if operator_params.get("workflow_id"):
+            operator_params["artifact_dir"] = str(request.artifact_dir or entry.get("artifact_root") or _default_artifact_dir(resolved_settings, str(entry.get("case_id") or "case")))
+            operator_params["review_delivery_dir"] = request.review_delivery_dir or resolved_settings.review_delivery_dir
+            operator_params["registry_path"] = resolved_settings.registry_path
+            operator_params["run_id"] = _generate_api_run_id(str(entry.get("case_id") or "case"))
+            if runner_module is not None:
+                operator_params["runner_module"] = runner_module
+            if task_contracts_module is not None:
+                operator_params["task_contracts_module"] = task_contracts_module
+            operator_params["tool_registry"] = resolved_tool_registry
+            result = _run_sequential_workflow(**operator_params)
+            result["rerun"] = RerunSemantics(source_run_id=run_id).model_dump()
+            return JSONResponse(content=result)
         try:
             return JSONResponse(
                 content=operator_entrypoint.rerun_from_registry(
@@ -286,16 +352,47 @@ def _operator_params_from_request(
     return params
 
 
+def _workflow_operator_params_from_request(
+    request: RunCreateRequest,
+    *,
+    workflow_entry,
+    artifact_dir: str | Path,
+    review_delivery_dir: str | Path | None,
+    registry_path: str | Path,
+    runner_module=None,
+    task_contracts_module=None,
+    tool_registry=None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "case_id": request.case_id,
+        "artifact_dir": artifact_dir,
+        "objective": request.objective,
+        "workflow_id": workflow_entry.workflow_id,
+        "workflow_entry": workflow_entry,
+        "review_delivery_dir": review_delivery_dir,
+        "registry_path": registry_path,
+        "user_prompt": request.user_prompt,
+    }
+    if runner_module is not None:
+        params["runner_module"] = runner_module
+    if task_contracts_module is not None:
+        params["task_contracts_module"] = task_contracts_module
+    if tool_registry is not None:
+        params["tool_registry"] = tool_registry
+    return params
+
+
 def _record_background_acceptance(
     request: RunCreateRequest,
     *,
-    validated_tool_input: ValidatedToolInput,
+    validated_tool_input: ValidatedToolInput | None,
     artifact_dir: str | Path,
     review_delivery_dir: str | Path | None,
     registry_path: str | Path,
     run_id: str,
+    workflow_id: str | None,
 ) -> dict[str, Any]:
-    tool_inputs = dict(validated_tool_input.inputs)
+    tool_inputs = dict(validated_tool_input.inputs) if validated_tool_input is not None else {}
     task_id = f"operator-{request.case_id}"
     operator_params = {
         "case_id": request.case_id,
@@ -306,12 +403,15 @@ def _record_background_acceptance(
         "review_threshold_origin_count": tool_inputs.get("review_threshold_origin_count"),
         "user_prompt": request.user_prompt,
         "review_delivery_dir": str(review_delivery_dir) if review_delivery_dir is not None else None,
-        "validated_input": {
+    }
+    if validated_tool_input is not None:
+        operator_params["validated_input"] = {
             "case_id": request.case_id,
             "tool_id": validated_tool_input.tool_id,
             "inputs": tool_inputs,
-        },
-    }
+        }
+    if workflow_id is not None:
+        operator_params["workflow_id"] = workflow_id
     entry = run_registry.record_run_event(
         registry_path=registry_path,
         task_id=task_id,
@@ -322,6 +422,7 @@ def _record_background_acceptance(
         summary=f"Accepted background operator run for {request.case_id}",
         operator_params=operator_params,
         review_required=False,
+        workflow_id=workflow_id,
     )
     events = [_event_from_history(run_id, item) for item in entry.get("status_history", [])]
     return {
@@ -338,6 +439,13 @@ def _record_background_acceptance(
 def _run_operator_flow_background(operator_params: dict[str, Any]) -> None:
     try:
         operator_entrypoint.run_operator_flow(**operator_params)
+    except Exception as exc:
+        _record_background_failure(operator_params, exc)
+
+
+def _run_workflow_background(operator_params: dict[str, Any]) -> None:
+    try:
+        _run_sequential_workflow(**operator_params)
     except Exception as exc:
         _record_background_failure(operator_params, exc)
 
@@ -401,6 +509,291 @@ def _normalize_tool_invocation(request: RunCreateRequest, *, tool_registry) -> V
     raise ValueError(f"Unknown tool_id: {tool_invocation.tool_id}")
 
 
+def _run_sequential_workflow(
+    *,
+    case_id: str,
+    artifact_dir: str | Path,
+    workflow_id: str,
+    registry_path: str | Path,
+    objective: str = "API-triggered governed workflow run",
+    review_delivery_dir: str | Path | None = None,
+    user_prompt: str | None = None,
+    run_id: str | None = None,
+    runner_module=None,
+    task_contracts_module=None,
+    tool_registry=None,
+    workflow_entry=None,
+) -> dict[str, Any]:
+    if workflow_entry is None:
+        workflow_catalog = build_builtin_workflow_catalog()
+        workflow_entry = workflow_catalog.get_workflow(workflow_id)
+    if tool_registry is None:
+        tool_registry = build_builtin_tool_registry()
+    artifact_root = Path(artifact_dir).expanduser().resolve()
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    parent_run_id = run_id or _generate_api_run_id(case_id)
+    task_id = f"operator-{case_id}"
+    workflow_steps: list[dict[str, Any]] = []
+    step_artifact_paths: dict[str, str] = {}
+    last_result: dict[str, Any] | None = None
+    final_status = "completed"
+    final_summary = f"Workflow {workflow_id} completed for {case_id}"
+    workflow_event_payload = {"workflow_id": workflow_id, "step_count": len(workflow_entry.steps)}
+
+    run_registry.record_run_event(
+        registry_path=registry_path,
+        task_id=task_id,
+        case_id=case_id,
+        run_id=parent_run_id,
+        status="queued",
+        artifact_root=str(artifact_root),
+        summary=f"Queued workflow run for {case_id}",
+        workflow_id=workflow_id,
+        operator_params={"case_id": case_id, "workflow_id": workflow_id},
+        review_required=False,
+    )
+    run_registry.record_run_event(
+        registry_path=registry_path,
+        task_id=task_id,
+        case_id=case_id,
+        run_id=parent_run_id,
+        status="running",
+        artifact_root=str(artifact_root),
+        summary=f"Running workflow run for {case_id}",
+        workflow_id=workflow_id,
+        operator_params={"case_id": case_id, "workflow_id": workflow_id},
+        review_required=False,
+    )
+    _record_workflow_event(
+        registry_path=registry_path,
+        task_id=task_id,
+        case_id=case_id,
+        run_id=parent_run_id,
+        artifact_root=artifact_root,
+        status="running",
+        summary=f"Workflow {workflow_id} started for {case_id}",
+        workflow_id=workflow_id,
+        event_type="workflow.started",
+        event_payload=workflow_event_payload,
+    )
+
+    for step_index, step in enumerate(workflow_entry.steps, start=1):
+        step_request = RunCreateRequest(
+            case_id=case_id,
+            objective=objective,
+            tool_id=step.tool_id,
+            inputs=dict(step.inputs),
+            user_prompt=user_prompt,
+        )
+        step_inputs = _normalize_tool_invocation(step_request, tool_registry=tool_registry)
+        step_artifact_dir = artifact_root / step.step_id
+        step_payload = {
+            "workflow_id": workflow_id,
+            "step_id": step.step_id,
+            "tool_id": step.tool_id,
+            "order": step_index,
+        }
+        _record_workflow_event(
+            registry_path=registry_path,
+            task_id=task_id,
+            case_id=case_id,
+            run_id=parent_run_id,
+            artifact_root=artifact_root,
+            status="running",
+            summary=f"Workflow step {step.step_id} started for {case_id}",
+            workflow_id=workflow_id,
+            event_type="workflow.step.started",
+            event_payload=step_payload,
+        )
+        step_result = operator_entrypoint.run_operator_flow(
+            case_id=case_id,
+            artifact_dir=step_artifact_dir,
+            objective=objective,
+            sample_name=step_inputs.inputs.get("sample_name", "RAA"),
+            method=step_inputs.inputs.get("method_variant", "chainladder"),
+            review_threshold_origin_count=step_inputs.inputs.get("review_threshold_origin_count"),
+            user_prompt=user_prompt,
+            review_delivery_dir=review_delivery_dir,
+            validated_input={
+                "case_id": case_id,
+                "tool_id": step_inputs.tool_id,
+                "inputs": dict(step_inputs.inputs),
+            },
+            runner_module=runner_module,
+            task_contracts_module=task_contracts_module,
+        )
+        last_result = step_result
+        step_status = step_result.get("status", "failed")
+        step_manifest_path = Path(step_result.get("final_output", {}).get("artifact_manifest_path") or step_artifact_dir / "run_manifest.json").expanduser().resolve()
+        if step_manifest_path.exists():
+            step_artifact_paths[f"step_{step.step_id}_run_manifest"] = str(step_manifest_path)
+        workflow_steps.append(
+            {
+                "step_id": step.step_id,
+                "tool_id": step.tool_id,
+                "title": step.title,
+                "status": step_status,
+                "artifact_dir": str(step_artifact_dir),
+                "run_id": step_result.get("run_id"),
+            }
+        )
+        step_finished_event_type = _workflow_step_finished_event_type(step_status)
+        _record_workflow_event(
+            registry_path=registry_path,
+            task_id=task_id,
+            case_id=case_id,
+            run_id=parent_run_id,
+            artifact_root=artifact_root,
+            status="running" if step_status == "completed" else step_status,
+            summary=f"Workflow step {step.step_id} finished with status {step_status}",
+            workflow_id=workflow_id,
+            event_type=step_finished_event_type,
+            event_payload={**step_payload, "status": step_status},
+        )
+        if step_status != "completed":
+            final_status = step_status
+            final_summary = f"Workflow {workflow_id} ended with status {step_status} for {case_id}"
+            break
+
+    workflow_summary_path = write_json_artifact(
+        resolve_artifact_path(artifact_root, "workflow_summary.json"),
+        {
+            "workflow_id": workflow_id,
+            "case_id": case_id,
+            "run_id": parent_run_id,
+            "status": final_status,
+            "step_count": len(workflow_steps),
+            "steps": workflow_steps,
+        },
+    )
+    manifest_payload = {
+        "workflow_id": workflow_id,
+        "case_id": case_id,
+        "run_id": parent_run_id,
+        "artifact_root": str(artifact_root),
+        "artifact_paths": {
+            "workflow_summary": str(workflow_summary_path),
+            **step_artifact_paths,
+        },
+    }
+    run_manifest_path = write_json_artifact(resolve_artifact_path(artifact_root, "run_manifest.json"), manifest_payload)
+
+    _record_workflow_event(
+        registry_path=registry_path,
+        task_id=task_id,
+        case_id=case_id,
+        run_id=parent_run_id,
+        artifact_root=artifact_root,
+        status=final_status if final_status != "completed" else "running",
+        summary=final_summary,
+        workflow_id=workflow_id,
+        event_type=_workflow_finished_event_type(final_status),
+        event_payload={"workflow_id": workflow_id, "status": final_status, "step_count": len(workflow_steps)},
+    )
+    run_registry.record_run_event(
+        registry_path=registry_path,
+        task_id=task_id,
+        case_id=case_id,
+        run_id=parent_run_id,
+        status=final_status,
+        artifact_root=str(artifact_root),
+        summary=final_summary,
+        review_required=final_status == "needs_review",
+        workflow_id=workflow_id,
+        operator_params={
+            "case_id": case_id,
+            "artifact_dir": str(artifact_root),
+            "objective": objective,
+            "workflow_id": workflow_id,
+            "user_prompt": user_prompt,
+            "review_delivery_dir": str(review_delivery_dir) if review_delivery_dir is not None else None,
+        },
+    )
+
+    result = {
+        "ok": final_status != "failed",
+        "status": final_status,
+        "case_id": case_id,
+        "run_id": parent_run_id,
+        "summary": final_summary,
+        "workflow": {
+            "workflow_id": workflow_id,
+            "title": workflow_entry.title,
+            "description": workflow_entry.description,
+            "step_count": len(workflow_steps),
+            "steps": workflow_steps,
+        },
+        "final_output": {
+            "artifact_manifest_path": str(run_manifest_path),
+        },
+        "worker_result": {
+            "status": final_status,
+            "case_id": case_id,
+            "run_id": parent_run_id,
+            "summary": final_summary,
+            "artifact_paths": manifest_payload["artifact_paths"],
+        },
+        "errors": list((last_result or {}).get("errors", []) or []),
+        "error_category": (last_result or {}).get("error_category"),
+    }
+    if last_result is not None:
+        result["route"] = last_result.get("route", {})
+        result["trace"] = last_result.get("trace", {})
+        if last_result.get("review_packet") is not None:
+            result["review_packet"] = last_result["review_packet"]
+        if last_result.get("review_delivery") is not None:
+            result["review_delivery"] = last_result["review_delivery"]
+    else:
+        result["route"] = {}
+        result["trace"] = {}
+    return result
+
+
+def _workflow_step_finished_event_type(status: str) -> str:
+    if status == "completed":
+        return "workflow.step.completed"
+    if status == "needs_review":
+        return "workflow.step.needs_review"
+    return "workflow.step.failed"
+
+
+def _workflow_finished_event_type(status: str) -> str:
+    if status == "completed":
+        return "workflow.completed"
+    if status == "needs_review":
+        return "workflow.needs_review"
+    return "workflow.failed"
+
+
+def _record_workflow_event(
+    *,
+    registry_path: str | Path,
+    task_id: str,
+    case_id: str,
+    run_id: str,
+    artifact_root: str | Path,
+    status: str,
+    summary: str,
+    workflow_id: str,
+    event_type: str,
+    event_payload: dict[str, Any],
+) -> dict[str, Any]:
+    return run_registry.record_run_event(
+        registry_path=registry_path,
+        task_id=task_id,
+        case_id=case_id,
+        run_id=run_id,
+        status=status,
+        artifact_root=str(Path(artifact_root).expanduser().resolve()),
+        summary=summary,
+        workflow_id=workflow_id,
+        operator_params={"case_id": case_id, "workflow_id": workflow_id},
+        event_type=event_type,
+        event_payload=event_payload,
+        review_required=False,
+    )
+
+
 def _safe_artifact_component(value: Any, *, field_name: str) -> str:
     component = str(value)
     candidate = Path(component)
@@ -430,7 +823,8 @@ def _run_summary(entry: dict[str, Any]) -> dict[str, Any]:
         updated_at=entry.get("updated_at"),
         artifact_root=entry.get("artifact_root"),
         review_required=bool(entry.get("review_required")) or entry.get("status") == "needs_review",
-    ).model_dump()
+        workflow_id=entry.get("workflow_id") or (entry.get("operator_params", {}) or {}).get("workflow_id"),
+    ).model_dump(exclude_none=True)
 
 
 def _select_console_run(runs: list[dict[str, Any]], run_id: str | None) -> dict[str, Any] | None:
@@ -478,7 +872,8 @@ def _console_selected_run(entry: dict[str, Any] | None) -> dict[str, Any] | None
         updated_at=entry.get("updated_at"),
         artifact_root=entry.get("artifact_root"),
         review_required=bool(entry.get("review_required")) or entry.get("status") == "needs_review",
-    ).model_dump()
+        workflow_id=entry.get("workflow_id") or (entry.get("operator_params", {}) or {}).get("workflow_id"),
+    ).model_dump(exclude_none=True)
 
 
 def _console_run_card(entry: dict[str, Any], *, selected_run_id: str | None) -> dict[str, Any]:
@@ -554,13 +949,14 @@ def _console_action_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
 
 def _event_from_history(run_id: str, history_item: dict[str, Any]) -> dict[str, Any]:
     status = history_item.get("status")
+    event_type = history_item.get("event_type") or run_event_type_for_status(status)
     event = RunEvent(
-        type=run_event_type_for_status(status),
+        type=event_type,
         run_id=run_id,
         timestamp=history_item.get("timestamp"),
         status=status,
         summary=history_item.get("summary"),
-        payload=dict(history_item),
+        payload=dict(history_item.get("payload", history_item)),
     ).model_dump()
     event["event_type"] = event["type"]
     return event
