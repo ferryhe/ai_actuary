@@ -62,40 +62,37 @@ def _builtin_chainladder_tool() -> ToolCatalogEntry:
         tags=["builtin", "deterministic", "reserving"],
         console_defaults={
             "sample_name": "RAA",
-            "method": "chainladder",
+            "method_variant": "chainladder",
             "background": True,
         },
         input_schema={
             "type": "object",
-            "title": "ChainladderRunConfig",
+            "title": "ChainladderToolInput",
             "properties": {
-                "case_id": {
-                    "type": "string",
-                    "description": "Logical case identifier used for the operator run.",
-                },
                 "sample_name": {
                     "type": "string",
                     "default": "RAA",
                     "description": "chainladder sample name passed through to the worker case payload.",
                 },
-                "method": {
+                "method_variant": {
                     "type": "string",
                     "const": "chainladder",
                     "default": "chainladder",
-                    "description": "Existing deterministic method identifier preserved for dispatch.",
+                    "description": "Stable deterministic method variant used after tool-backed input normalization.",
                 },
                 "review_threshold_origin_count": {
                     "type": "integer",
                     "minimum": 0,
                     "description": "Optional review threshold override for intentional escalation tests.",
                 },
-                "background": {
-                    "type": "boolean",
-                    "default": True,
-                    "description": "Whether the API should accept and run the case in background mode.",
+                "method": {
+                    "type": "string",
+                    "const": "chainladder",
+                    "default": "chainladder",
+                    "description": "Legacy input alias accepted for compatibility and normalized into method_variant.",
                 },
             },
-            "required": ["case_id"],
+            "required": [],
             "additionalProperties": False,
         },
     )

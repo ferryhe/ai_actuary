@@ -5,10 +5,13 @@ from pydantic import ValidationError
 
 from reserving_workflow.contracts.control_plane import (
     ArtifactRef,
+    ChainladderToolInput,
     Review,
     RerunSemantics,
     Run,
     RunEvent,
+    ToolInvocation,
+    ValidatedToolInput,
     run_event_type_for_status,
     validate_run_status,
 )
@@ -42,3 +45,12 @@ def test_control_plane_artifact_review_and_rerun_contracts_are_stable():
     assert review.decision == "pending"
     assert rerun.creates_distinct_run is True
     assert rerun.overrideable_fields == ("artifact_dir", "review_delivery_dir")
+
+
+def test_tool_invocation_contract_normalizes_chainladder_legacy_method_alias():
+    invocation = ToolInvocation(tool_id="chainladder", inputs={"sample_name": "RAA"})
+    normalized = ChainladderToolInput.model_validate({"sample_name": "RAA", "method": "chainladder"})
+    validated = ValidatedToolInput(tool_id=invocation.tool_id, inputs=normalized.model_dump(mode="json"))
+
+    assert invocation.tool_id == "chainladder"
+    assert validated.inputs == {"sample_name": "RAA", "method_variant": "chainladder", "review_threshold_origin_count": None}

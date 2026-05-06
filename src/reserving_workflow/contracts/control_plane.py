@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 RunStatus = Literal["accepted", "queued", "running", "completed", "needs_review", "failed"]
@@ -34,6 +34,35 @@ class ArtifactRef(BaseModel):
     path: str | None = None
     label: str | None = None
     present: bool = False
+
+
+class ToolInvocation(BaseModel):
+    tool_id: str = "chainladder"
+    inputs: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChainladderToolInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sample_name: str = "RAA"
+    method_variant: Literal["chainladder"] = "chainladder"
+    review_threshold_origin_count: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_legacy_method_alias(cls, payload: Any) -> Any:
+        if not isinstance(payload, dict):
+            return payload
+        normalized = dict(payload)
+        legacy_method = normalized.pop("method", None)
+        if "method_variant" not in normalized and legacy_method is not None:
+            normalized["method_variant"] = legacy_method
+        return normalized
+
+
+class ValidatedToolInput(BaseModel):
+    tool_id: str
+    inputs: dict[str, Any] = Field(default_factory=dict)
 
 
 class Run(BaseModel):

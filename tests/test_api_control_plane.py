@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+import httpx
 
 from reserving_workflow.api.app import (
     ApiSettings,
@@ -179,6 +180,24 @@ class FakeBatchRunnerModule:
         return {"case_count": len(cases), "artifact_root": str(artifact_root), "comparison_report_path": str(Path(artifact_root) / "comparison_report.json")}
 
 
+class LocalApiClient:
+    def __init__(self, app):
+        self._app = app
+
+    async def _request(self, method: str, path: str, **kwargs):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self._app), base_url="http://testserver") as client:
+            return await client.request(method, path, **kwargs)
+
+    def request(self, method: str, path: str, **kwargs):
+        return asyncio.run(self._request(method, path, **kwargs))
+
+    def get(self, path: str, **kwargs):
+        return self.request("GET", path, **kwargs)
+
+    def post(self, path: str, **kwargs):
+        return self.request("POST", path, **kwargs)
+
+
 def _client(
     tmp_path,
     runner_module=FakeRunnerModule,
@@ -198,7 +217,7 @@ def _client(
         batch_runner_module=batch_runner_module,
         background_task_runner=background_task_runner,
     )
-    return TestClient(app)
+    return LocalApiClient(app)
 
 
 def test_post_run_records_registry_and_returns_operator_contract(tmp_path):
@@ -217,6 +236,82 @@ def test_post_run_records_registry_and_returns_operator_contract(tmp_path):
     assert list_payload["runs"][0]["run_id"] == payload["run_id"]
 
 
+def test_post_run_normalizes_tool_backed_request_and_writes_validated_input_artifact(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/runs",
+        json={
+            "case_id": "tool-backed-case",
+            "tool_id": "chainladder",
+            "inputs": {"sample_name": "RAA", "method": "chainladder", "review_threshold_origin_count": 3},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    validated_input_path = Path(payload["worker_result"]["artifact_paths"]["validated_input"])
+    assert validated_input_path.exists()
+    validated_input = json.loads(validated_input_path.read_text(encoding="utf-8"))
+    assert validated_input == {
+        "case_id": "tool-backed-case",
+        "tool_id": "chainladder",
+        "inputs": {
+            "sample_name": "RAA",
+            "method_variant": "chainladder",
+            "review_threshold_origin_count": 3,
+        },
+    }
+
+    run_manifest = Path(payload["final_output"]["artifact_manifest_path"])
+    manifest_payload = json.loads(run_manifest.read_text(encoding="utf-8"))
+    assert manifest_payload["artifact_paths"]["validated_input"] == str(validated_input_path)
+
+
+def test_post_run_normalizes_legacy_method_alias_into_tool_backed_validated_input(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/runs",
+        json={
+            "case_id": "legacy-method-case",
+            "sample_name": "RAA",
+            "method": "chainladder",
+            "review_threshold_origin_count": 2,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    validated_input_path = Path(payload["worker_result"]["artifact_paths"]["validated_input"])
+    validated_input = json.loads(validated_input_path.read_text(encoding="utf-8"))
+    assert validated_input["tool_id"] == "chainladder"
+    assert validated_input["inputs"]["sample_name"] == "RAA"
+    assert validated_input["inputs"]["method_variant"] == "chainladder"
+    assert validated_input["inputs"]["review_threshold_origin_count"] == 2
+
+
+def test_post_run_rejects_unknown_tool_id_with_http_400(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.post("/runs", json={"case_id": "bad-tool-case", "tool_id": "unknown-tool"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Unknown tool_id: unknown-tool"
+
+
+def test_post_run_rejects_invalid_chainladder_method_variant_with_http_400(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/runs",
+        json={"case_id": "bad-variant-case", "tool_id": "chainladder", "inputs": {"method": "mack"}},
+    )
+
+    assert response.status_code == 400
+    assert "chainladder" in str(response.json()["detail"])
+
+
 def test_tool_catalog_endpoints_expose_builtin_chainladder(tmp_path):
     client = _client(tmp_path)
 
@@ -229,6 +324,7 @@ def test_tool_catalog_endpoints_expose_builtin_chainladder(tmp_path):
     assert tool.status_code == 200
     assert tool.json()["method"] == "chainladder"
     assert tool.json()["input_schema"]["properties"]["sample_name"]["default"] == "RAA"
+    assert tool.json()["input_schema"]["properties"]["method_variant"]["const"] == "chainladder"
 
 
 def test_post_run_can_accept_background_execution_and_poll_events(tmp_path):
@@ -363,11 +459,14 @@ def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path)
 
     assert "name=\"sample_name\"" in html
     assert "value=\"RAA\"" in html
-    assert "name=\"method\"" in html
+    assert "name=\"tool_id\"" in html
     assert "data-default-tool-id=\"chainladder\"" in html
     assert "name=\"background\"" in html
     assert "checked" in html
     assert "fetch(\"/runs\"" in html
+    assert "tool_id:" in html
+    assert "inputs:" in html
+    assert "method: String(formData.get(\"tool_id\") || \"chainladder\")" in html
     assert "Tool catalog" in html
     assert "fetch(`/runs/${encodeURIComponent(runId)}/events`)" in html
     assert "run.accepted" in html
@@ -438,13 +537,34 @@ def test_console_state_defaults_to_latest_run(tmp_path):
 
 def test_rerun_endpoint_creates_distinct_run_id(tmp_path):
     client = _client(tmp_path)
-    original = client.post("/runs", json={"case_id": "rerun-case"}).json()
+    original = client.post(
+        "/runs",
+        json={
+            "case_id": "rerun-case",
+            "tool_id": "chainladder",
+            "inputs": {"sample_name": "RAA", "review_threshold_origin_count": 4},
+        },
+    ).json()
+
+    registry = json.loads((tmp_path / "run-registry.json").read_text(encoding="utf-8"))
+    original_entry = next(item for item in registry["runs"] if item["run_id"] == original["run_id"])
+    assert original_entry["operator_params"]["validated_input"] == {
+        "case_id": "rerun-case",
+        "tool_id": "chainladder",
+        "inputs": {
+            "sample_name": "RAA",
+            "method_variant": "chainladder",
+            "review_threshold_origin_count": 4,
+        },
+    }
 
     rerun = client.post(f"/runs/{original['run_id']}/rerun", json={}).json()
 
     assert rerun["status"] == "completed"
     assert rerun["run_id"] != original["run_id"]
     assert rerun["rerun"]["source_run_id"] == original["run_id"]
+    rerun_validated_input_path = Path(rerun["worker_result"]["artifact_paths"]["validated_input"])
+    assert json.loads(rerun_validated_input_path.read_text(encoding="utf-8")) == original_entry["operator_params"]["validated_input"]
     runs = client.get("/runs").json()["runs"]
     assert {item["run_id"] for item in runs} == {original["run_id"], rerun["run_id"]}
 

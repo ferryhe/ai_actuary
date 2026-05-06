@@ -1,6 +1,6 @@
 # Control-Plane Contracts
 
-This document freezes the bounded operator-facing control-plane contract added in PR8.
+This document freezes the bounded operator-facing control-plane contract as of PR9.
 
 ## Scope
 
@@ -9,7 +9,7 @@ These contracts apply to the local FastAPI control plane and the lightweight ope
 - They define stable status and event literals for run tracking.
 - They define the operator-visible tool catalog shape.
 - They do not change planner routing, worker execution, or deterministic dispatch behavior.
-- They do not add PR9 tool-backed workflow execution, queueing, auth, websocket/SSE, DB, or object storage.
+- They do not add upload flows, workflow builders, human review systems, auth, websocket/SSE, DB, or object storage.
 
 ## Run Status
 
@@ -73,9 +73,24 @@ PR8 adds a bounded tool catalog and local registry.
 - `GET /tools/{tool_id}` returns full metadata and schema.
 - The built-in catalog currently contains `chainladder`.
 
-The console create-run form loads its selector from this catalog, but still posts the existing `method` field to `POST /runs`.
+PR9 keeps `GET /tools` and `GET /tools/{tool_id}` as the discovery surfaces and upgrades `POST /runs` to accept a tool-backed invocation.
 
-That means the catalog is a control-plane discovery surface only in PR8. It is not a new execution router.
+`RunCreateRequest` now accepts:
+
+- `tool_id`
+- `inputs`
+- legacy top-level `method` as an alias
+
+For the built-in `chainladder` tool, the normalized validated shape is:
+
+- `tool_id = "chainladder"`
+- `inputs.method_variant = "chainladder"`
+
+Unknown `tool_id` values are rejected with HTTP 400.
+
+The console now posts the tool-backed request shape while preserving the legacy `method` alias in the payload for compatibility.
+
+Each created run also writes `validated_input.json`, and `run_manifest.json` must carry a `validated_input` artifact reference.
 
 ## Rerun Semantics
 
