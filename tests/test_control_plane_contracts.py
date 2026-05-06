@@ -42,13 +42,33 @@ def test_control_plane_run_event_contract_freezes_event_types():
 
 def test_control_plane_artifact_review_and_rerun_contracts_are_stable():
     artifact = ArtifactRef(artifact_id="run_manifest", path="/tmp/run_manifest.json", present=True)
-    review = Review(status="review_required", review_required=True, review_id="review-run-1", run_id="run-1")
+    review = Review(
+        status="review_required",
+        review_required=True,
+        review_id="review-run-1",
+        run_id="run-1",
+        assigned_to="actuary-002",
+        workspace_id="workspace-1",
+    )
     decision = ReviewDecision(review_id="review-run-1", run_id="run-1", decision="changes_requested")
     rerun = RerunSemantics(source_run_id="run-1")
+    run = Run(
+        run_id="run-1",
+        case_id="case-1",
+        status="completed",
+        created_by="actuary-001",
+        operator_id="actuary-001",
+        workspace_id="workspace-1",
+    )
 
     assert artifact.artifact_id == "run_manifest"
     assert review.status == "review_required"
+    assert review.assigned_to == "actuary-002"
+    assert review.workspace_id == "workspace-1"
     assert decision.decision == "changes_requested"
+    assert run.created_by == "actuary-001"
+    assert run.operator_id == "actuary-001"
+    assert run.workspace_id == "workspace-1"
     assert rerun.creates_distinct_run is True
     assert rerun.overrideable_fields == ("artifact_dir", "review_delivery_dir")
 

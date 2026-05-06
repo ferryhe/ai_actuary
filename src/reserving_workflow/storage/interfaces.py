@@ -21,6 +21,9 @@ class RunStore(Protocol):
         artifact_root: str | None = None,
         summary: str | None = None,
         operator_params: dict[str, Any] | None = None,
+        created_by: str | None = None,
+        operator_id: str | None = None,
+        workspace_id: str | None = None,
         review_required: bool | None = None,
         error_category: str | None = None,
         errors: list[str] | None = None,
@@ -37,6 +40,9 @@ class RunStore(Protocol):
         artifact_root: str | None = None,
         summary: str | None = None,
         operator_params: dict[str, Any] | None = None,
+        created_by: str | None = None,
+        operator_id: str | None = None,
+        workspace_id: str | None = None,
         review_required: bool | None = None,
         error_category: str | None = None,
         errors: list[str] | None = None,
@@ -74,6 +80,7 @@ class ReviewStore(Protocol):
         status: str,
         reason_codes: list[str] | None = None,
         assigned_to: str | None = None,
+        workspace_id: str | None = None,
         packet: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 

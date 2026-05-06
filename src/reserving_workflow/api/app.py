@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
@@ -35,6 +35,9 @@ from reserving_workflow.runtime import run_registry
 from reserving_workflow.tools import build_builtin_tool_registry
 from reserving_workflow.workflows import build_builtin_workflow_catalog
 
+DEFAULT_OPERATOR_ID = "local-actuary"
+DEFAULT_WORKSPACE_ID = "default-workspace"
+
 
 class ApiSettings(BaseModel):
     """Runtime settings for the local FastAPI control plane."""
@@ -49,6 +52,9 @@ class RunCreateRequest(BaseModel):
     case_id: str
     artifact_dir: str | Path | None = None
     objective: str = "API-triggered governed workflow run"
+    operator_id: str | None = None
+    workspace_id: str | None = None
+    created_by: str | None = None
     workflow_id: str | None = None
     tool_id: str | None = None
     inputs: dict[str, Any] = Field(default_factory=dict)
@@ -119,15 +125,33 @@ def create_app(
         return _operator_console_html()
 
     @app.get("/console/state")
-    async def operator_console_state(run_id: str | None = None) -> dict[str, Any]:
-        runs = run_registry.list_runs(resolved_settings.registry_path)
+    async def operator_console_state(
+        request: Request,
+        run_id: str | None = None,
+        operator_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        current_identity = _resolve_current_identity(
+            operator_id=operator_id,
+            workspace_id=workspace_id,
+            request=request,
+            fallback_to_defaults=True,
+        )
+        all_runs = run_registry.list_runs(resolved_settings.registry_path)
+        runs = _filter_run_entries(
+            all_runs,
+            operator_id=current_identity["operator_id"],
+            workspace_id=current_identity["workspace_id"],
+        )
         selected_entry = _select_console_run(runs, run_id)
         return _console_state_payload(
             selected_entry,
             runs,
+            all_runs=all_runs,
             tool_registry=resolved_tool_registry,
             review_store=resolved_review_store,
             review_store_root=resolved_settings.review_store_dir,
+            filters=current_identity,
         )
 
     @app.get("/tools")
@@ -155,12 +179,13 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/runs")
-    async def create_run(request: RunCreateRequest, background_tasks: BackgroundTasks) -> Any:
+    async def create_run(request: RunCreateRequest, background_tasks: BackgroundTasks, http_request: Request) -> Any:
         try:
             _safe_artifact_component(request.case_id, field_name="case_id")
             artifact_dir = request.artifact_dir or _default_artifact_dir(resolved_settings, request.case_id)
             workflow_entry = None
             validated_tool_input = None
+            ownership = _resolve_request_ownership(request, http_request)
             if request.workflow_id is not None:
                 workflow_entry = resolved_workflow_catalog.get_workflow(request.workflow_id)
             else:
@@ -179,6 +204,7 @@ def create_app(
                 artifact_dir=artifact_dir,
                 review_delivery_dir=review_delivery_dir,
                 registry_path=resolved_settings.registry_path,
+                ownership=ownership,
                 runner_module=runner_module,
                 task_contracts_module=task_contracts_module,
                 tool_registry=resolved_tool_registry,
@@ -194,6 +220,7 @@ def create_app(
                     registry_path=resolved_settings.registry_path,
                     run_id=run_id,
                     workflow_id=request.workflow_id,
+                    ownership=ownership,
                 )
                 scheduler = background_task_runner or background_tasks.add_task
                 scheduler(_run_workflow_background, operator_params)
@@ -207,6 +234,7 @@ def create_app(
             artifact_dir=artifact_dir,
             review_delivery_dir=review_delivery_dir,
             registry_path=resolved_settings.registry_path,
+            ownership=ownership,
             runner_module=runner_module,
             task_contracts_module=task_contracts_module,
         )
@@ -221,6 +249,7 @@ def create_app(
                 registry_path=resolved_settings.registry_path,
                 run_id=run_id,
                 workflow_id=None,
+                ownership=ownership,
             )
             scheduler = background_task_runner or background_tasks.add_task
             scheduler(_run_operator_flow_background, operator_params)
@@ -228,8 +257,12 @@ def create_app(
         return JSONResponse(content=operator_entrypoint.run_operator_flow(**operator_params))
 
     @app.get("/runs")
-    async def list_runs() -> dict[str, Any]:
-        runs = run_registry.list_runs(resolved_settings.registry_path)
+    async def list_runs(request: Request, operator_id: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
+        runs = _filter_run_entries(
+            run_registry.list_runs(resolved_settings.registry_path),
+            operator_id=_normalize_identity_filter(operator_id, request=request, header_name="x-operator-id"),
+            workspace_id=_normalize_identity_filter(workspace_id, request=request, header_name="x-workspace-id"),
+        )
         return {
             "registry_path": str(Path(resolved_settings.registry_path)),
             "run_count": len(runs),
@@ -319,11 +352,13 @@ def create_app(
         }
 
     @app.get("/reviews")
-    async def list_reviews() -> dict[str, Any]:
+    async def list_reviews(request: Request, operator_id: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
         reviews = _list_review_payloads(
             registry_path=resolved_settings.registry_path,
             review_store=resolved_review_store,
             review_store_root=resolved_settings.review_store_dir,
+            operator_id=_normalize_identity_filter(operator_id, request=request, header_name="x-operator-id"),
+            workspace_id=_normalize_identity_filter(workspace_id, request=request, header_name="x-workspace-id"),
         )
         return {"review_count": len(reviews), "reviews": reviews}
 
@@ -417,6 +452,7 @@ def _operator_params_from_request(
     artifact_dir: str | Path,
     review_delivery_dir: str | Path | None,
     registry_path: str | Path,
+    ownership: dict[str, str],
     runner_module=None,
     task_contracts_module=None,
 ) -> dict[str, Any]:
@@ -431,6 +467,9 @@ def _operator_params_from_request(
         "user_prompt": request.user_prompt,
         "review_delivery_dir": review_delivery_dir,
         "registry_path": registry_path,
+        "created_by": ownership["created_by"],
+        "operator_id": ownership["operator_id"],
+        "workspace_id": ownership["workspace_id"],
         "validated_input": {
             "case_id": request.case_id,
             "tool_id": validated_tool_input.tool_id,
@@ -451,6 +490,7 @@ def _workflow_operator_params_from_request(
     artifact_dir: str | Path,
     review_delivery_dir: str | Path | None,
     registry_path: str | Path,
+    ownership: dict[str, str],
     runner_module=None,
     task_contracts_module=None,
     tool_registry=None,
@@ -464,6 +504,9 @@ def _workflow_operator_params_from_request(
         "review_delivery_dir": review_delivery_dir,
         "registry_path": registry_path,
         "user_prompt": request.user_prompt,
+        "created_by": ownership["created_by"],
+        "operator_id": ownership["operator_id"],
+        "workspace_id": ownership["workspace_id"],
     }
     if runner_module is not None:
         params["runner_module"] = runner_module
@@ -483,6 +526,7 @@ def _record_background_acceptance(
     registry_path: str | Path,
     run_id: str,
     workflow_id: str | None,
+    ownership: dict[str, str],
 ) -> dict[str, Any]:
     tool_inputs = dict(validated_tool_input.inputs) if validated_tool_input is not None else {}
     task_id = f"operator-{request.case_id}"
@@ -495,6 +539,9 @@ def _record_background_acceptance(
         "review_threshold_origin_count": tool_inputs.get("review_threshold_origin_count"),
         "user_prompt": request.user_prompt,
         "review_delivery_dir": str(review_delivery_dir) if review_delivery_dir is not None else None,
+        "created_by": ownership["created_by"],
+        "operator_id": ownership["operator_id"],
+        "workspace_id": ownership["workspace_id"],
     }
     if validated_tool_input is not None:
         operator_params["validated_input"] = {
@@ -513,6 +560,9 @@ def _record_background_acceptance(
         artifact_root=str(Path(artifact_dir).expanduser().resolve()),
         summary=f"Accepted background operator run for {request.case_id}",
         operator_params=operator_params,
+        created_by=ownership["created_by"],
+        operator_id=ownership["operator_id"],
+        workspace_id=ownership["workspace_id"],
         review_required=False,
         workflow_id=workflow_id,
     )
@@ -557,6 +607,9 @@ def _record_background_failure(operator_params: dict[str, Any], exc: Exception) 
         status="failed",
         artifact_root=str(Path(artifact_dir).expanduser().resolve()),
         summary=f"Background operator run failed for {case_id or 'unknown-case'}",
+        created_by=operator_params.get("created_by"),
+        operator_id=operator_params.get("operator_id"),
+        workspace_id=operator_params.get("workspace_id"),
         review_required=False,
         error_category="background_runtime",
         errors=[str(exc)],
@@ -566,6 +619,93 @@ def _record_background_failure(operator_params: dict[str, Any], exc: Exception) 
 def _generate_api_run_id(case_id: str) -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     return f"operator-{case_id}-{timestamp}"
+
+
+def _normalize_identity_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    candidate = str(value).strip()
+    if not candidate:
+        return None
+    return candidate
+
+
+def _normalize_identity_filter(value: str | None, *, request: Request, header_name: str) -> str | None:
+    direct = _normalize_identity_value(value)
+    if direct is not None:
+        return direct
+    return _normalize_identity_value(request.headers.get(header_name))
+
+
+def _resolve_current_identity(
+    *,
+    operator_id: str | None,
+    workspace_id: str | None,
+    request: Request,
+    fallback_to_defaults: bool,
+) -> dict[str, str]:
+    resolved_operator_id = _normalize_identity_filter(operator_id, request=request, header_name="x-operator-id")
+    resolved_workspace_id = _normalize_identity_filter(workspace_id, request=request, header_name="x-workspace-id")
+    if fallback_to_defaults:
+        resolved_operator_id = resolved_operator_id or DEFAULT_OPERATOR_ID
+        resolved_workspace_id = resolved_workspace_id or DEFAULT_WORKSPACE_ID
+    return {
+        "operator_id": resolved_operator_id or "",
+        "workspace_id": resolved_workspace_id or "",
+    }
+
+
+def _resolve_request_ownership(request: RunCreateRequest, http_request: Request) -> dict[str, str]:
+    operator_id = _normalize_identity_value(request.operator_id) or _normalize_identity_value(
+        http_request.headers.get("x-operator-id")
+    ) or DEFAULT_OPERATOR_ID
+    workspace_id = _normalize_identity_value(request.workspace_id) or _normalize_identity_value(
+        http_request.headers.get("x-workspace-id")
+    ) or DEFAULT_WORKSPACE_ID
+    created_by = _normalize_identity_value(request.created_by) or _normalize_identity_value(
+        http_request.headers.get("x-created-by")
+    ) or operator_id
+    return {
+        "created_by": created_by,
+        "operator_id": operator_id,
+        "workspace_id": workspace_id,
+    }
+
+
+def _entry_identity_value(entry: dict[str, Any], field_name: str) -> str | None:
+    value = _normalize_identity_value(entry.get(field_name))
+    if value is not None:
+        return value
+    if field_name in {"operator_id", "created_by"}:
+        return DEFAULT_OPERATOR_ID
+    if field_name == "workspace_id":
+        return DEFAULT_WORKSPACE_ID
+    return None
+
+
+def _entry_matches_identity_filters(
+    entry: dict[str, Any],
+    *,
+    operator_id: str | None,
+    workspace_id: str | None,
+) -> bool:
+    if operator_id is not None and _entry_identity_value(entry, "operator_id") != operator_id:
+        return False
+    if workspace_id is not None and _entry_identity_value(entry, "workspace_id") != workspace_id:
+        return False
+    return True
+
+
+def _filter_run_entries(
+    runs: list[dict[str, Any]],
+    *,
+    operator_id: str | None,
+    workspace_id: str | None,
+) -> list[dict[str, Any]]:
+    return [
+        entry for entry in runs
+        if _entry_matches_identity_filters(entry, operator_id=operator_id, workspace_id=workspace_id)
+    ]
 
 
 def _normalize_tool_invocation(request: RunCreateRequest, *, tool_registry) -> ValidatedToolInput:
@@ -610,6 +750,9 @@ def _run_sequential_workflow(
     objective: str = "API-triggered governed workflow run",
     review_delivery_dir: str | Path | None = None,
     user_prompt: str | None = None,
+    created_by: str | None = None,
+    operator_id: str | None = None,
+    workspace_id: str | None = None,
     run_id: str | None = None,
     runner_module=None,
     task_contracts_module=None,
@@ -641,7 +784,16 @@ def _run_sequential_workflow(
         artifact_root=str(artifact_root),
         summary=f"Queued workflow run for {case_id}",
         workflow_id=workflow_id,
-        operator_params={"case_id": case_id, "workflow_id": workflow_id},
+        operator_params={
+            "case_id": case_id,
+            "workflow_id": workflow_id,
+            "created_by": created_by,
+            "operator_id": operator_id,
+            "workspace_id": workspace_id,
+        },
+        created_by=created_by,
+        operator_id=operator_id,
+        workspace_id=workspace_id,
         review_required=False,
     )
     run_registry.record_run_event(
@@ -653,7 +805,16 @@ def _run_sequential_workflow(
         artifact_root=str(artifact_root),
         summary=f"Running workflow run for {case_id}",
         workflow_id=workflow_id,
-        operator_params={"case_id": case_id, "workflow_id": workflow_id},
+        operator_params={
+            "case_id": case_id,
+            "workflow_id": workflow_id,
+            "created_by": created_by,
+            "operator_id": operator_id,
+            "workspace_id": workspace_id,
+        },
+        created_by=created_by,
+        operator_id=operator_id,
+        workspace_id=workspace_id,
         review_required=False,
     )
     _record_workflow_event(
@@ -706,6 +867,9 @@ def _run_sequential_workflow(
             review_threshold_origin_count=step_inputs.inputs.get("review_threshold_origin_count"),
             user_prompt=user_prompt,
             review_delivery_dir=review_delivery_dir,
+            created_by=created_by,
+            operator_id=operator_id,
+            workspace_id=workspace_id,
             validated_input={
                 "case_id": case_id,
                 "tool_id": step_inputs.tool_id,
@@ -799,7 +963,13 @@ def _run_sequential_workflow(
             "workflow_id": workflow_id,
             "user_prompt": user_prompt,
             "review_delivery_dir": str(review_delivery_dir) if review_delivery_dir is not None else None,
+            "created_by": created_by,
+            "operator_id": operator_id,
+            "workspace_id": workspace_id,
         },
+        created_by=created_by,
+        operator_id=operator_id,
+        workspace_id=workspace_id,
     )
 
     result = {
@@ -808,6 +978,9 @@ def _run_sequential_workflow(
         "case_id": case_id,
         "run_id": parent_run_id,
         "summary": final_summary,
+        "created_by": created_by,
+        "operator_id": operator_id,
+        "workspace_id": workspace_id,
         "workflow": {
             "workflow_id": workflow_id,
             "title": workflow_entry.title,
@@ -910,6 +1083,9 @@ def _run_summary(entry: dict[str, Any]) -> dict[str, Any]:
         run_id=str(entry.get("run_id")),
         case_id=entry.get("case_id"),
         status=entry.get("status"),
+        created_by=entry.get("created_by"),
+        operator_id=entry.get("operator_id"),
+        workspace_id=entry.get("workspace_id"),
         summary=entry.get("summary"),
         created_at=entry.get("created_at"),
         updated_at=entry.get("updated_at"),
@@ -932,9 +1108,11 @@ def _console_state_payload(
     selected_entry: dict[str, Any] | None,
     runs: list[dict[str, Any]],
     *,
+    all_runs: list[dict[str, Any]] | None = None,
     tool_registry,
     review_store,
     review_store_root: str | Path,
+    filters: dict[str, str],
 ) -> dict[str, Any]:
     selected_run_id = str(selected_entry.get("run_id")) if selected_entry else None
     review_inbox = _review_inbox_payload(
@@ -944,11 +1122,18 @@ def _console_state_payload(
         review_store_root=review_store_root,
         selected_run_id=selected_run_id,
     )
+    filter_option_runs = all_runs if all_runs is not None else runs
     return {
         "console": {
             "title": "AI Actuary Operator Console",
             "description": "Symphony-style shell over the existing governed run control plane.",
-            "version": "pr12-review-inbox",
+            "version": "pr13-workspace-ownership",
+        },
+        "filters": {
+            "operator_id": filters["operator_id"],
+            "workspace_id": filters["workspace_id"],
+            "available_operator_ids": _identity_filter_options(filter_option_runs, field_name="operator_id"),
+            "available_workspace_ids": _identity_filter_options(filter_option_runs, field_name="workspace_id"),
         },
         "tool_catalog": {"tool_count": len(tool_registry.list_tools()), "tools": tool_registry.list_tool_summaries()},
         "selected_run_id": selected_run_id,
@@ -973,6 +1158,9 @@ def _console_selected_run(entry: dict[str, Any] | None) -> dict[str, Any] | None
         run_id=str(entry.get("run_id")),
         case_id=entry.get("case_id"),
         status=entry.get("status"),
+        created_by=entry.get("created_by"),
+        operator_id=entry.get("operator_id"),
+        workspace_id=entry.get("workspace_id"),
         summary=entry.get("summary"),
         created_at=entry.get("created_at"),
         updated_at=entry.get("updated_at"),
@@ -988,6 +1176,9 @@ def _console_run_card(entry: dict[str, Any], *, selected_run_id: str | None) -> 
         "run_id": entry.get("run_id"),
         "case_id": entry.get("case_id"),
         "status": status,
+        "created_by": entry.get("created_by"),
+        "operator_id": entry.get("operator_id"),
+        "workspace_id": entry.get("workspace_id"),
         "summary": entry.get("summary"),
         "updated_at": entry.get("updated_at"),
         "needs_review": bool(entry.get("review_required")) or status == "needs_review",
@@ -1113,6 +1304,7 @@ def _review_payload_for_run(
             review_required=status == "review_required",
             run_id=str(entry.get("run_id")),
             case_id=entry.get("case_id"),
+            workspace_id=entry.get("workspace_id"),
             packet=review_packet.get("packet") if review_packet.get("present") else None,
             json_path=review_packet.get("json_path"),
             markdown_path=review_packet.get("markdown_path"),
@@ -1130,8 +1322,14 @@ def _list_review_payloads(
     registry_path: str | Path,
     review_store,
     review_store_root: str | Path,
+    operator_id: str | None,
+    workspace_id: str | None,
 ) -> list[dict[str, Any]]:
-    runs = run_registry.list_runs(registry_path)
+    runs = _filter_run_entries(
+        run_registry.list_runs(registry_path),
+        operator_id=operator_id,
+        workspace_id=workspace_id,
+    )
     return _review_inbox_payload(
         registry_path=registry_path,
         runs=runs,
@@ -1169,13 +1367,24 @@ def _review_inbox_payload(
                 "review_id": review_id,
                 "run_id": review_payload.get("run_id"),
                 "case_id": review_payload.get("case_id"),
+                "workspace_id": review_payload.get("workspace_id"),
                 "status": review_payload.get("status"),
                 "decision": (review_payload.get("decision") or {}).get("decision"),
+                "assigned_to": review_payload.get("assigned_to"),
                 "updated_at": review_payload.get("updated_at"),
                 "selected": review_payload.get("run_id") == selected_run_id,
             }
         )
     return sorted(reviews, key=lambda item: item.get("updated_at") or "", reverse=True)
+
+
+def _identity_filter_options(runs: list[dict[str, Any]], *, field_name: str) -> list[str]:
+    values = {
+        value
+        for entry in runs
+        if (value := _entry_identity_value(entry, field_name)) is not None
+    }
+    return sorted(values)
 
 
 def _artifact_refs_from_manifest(manifest: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -1283,11 +1492,28 @@ def _operator_console_html() -> str:
             <option value="chainladder">Loading tool catalog…</option>
           </select>
         </label>
+        <label>operator_id<input name="operator_id" value="local-actuary"></label>
+        <label>workspace_id<input name="workspace_id" value="default-workspace"></label>
+        <label>created_by<input name="created_by" placeholder="defaults to operator_id"></label>
         <label>review_threshold_origin_count<input name="review_threshold_origin_count" type="number" min="0" step="1" placeholder="optional"></label>
         <label><input name="background" type="checkbox" checked> background</label>
         <button id="create-run-button" class="primary" type="submit">Create run</button>
       </form>
       <div id="operation-status" class="status" aria-live="polite"></div>
+      <h2>Workspace Filters</h2>
+      <form id="console-filter-form" onsubmit="applyConsoleFilters(event)">
+        <label>operator filter
+          <select id="operator-filter" name="operator_id">
+            <option value="">Loading…</option>
+          </select>
+        </label>
+        <label>workspace filter
+          <select id="workspace-filter" name="workspace_id">
+            <option value="">Loading…</option>
+          </select>
+        </label>
+        <button type="submit">Apply filters</button>
+      </form>
       <h2>Run Queue</h2>
       <div id="run-queue" class="empty">Loading runs…</div>
       <h2>Review Inbox</h2>
@@ -1338,6 +1564,28 @@ def _operator_console_html() -> str:
       document.getElementById("review-panel").textContent = message;
       document.getElementById("review-inbox").textContent = message;
       document.getElementById("action-panel").textContent = message;
+    }
+
+    function getConsoleFilters() {
+      return {
+        operator_id: String(document.getElementById("operator-filter").value || "").trim(),
+        workspace_id: String(document.getElementById("workspace-filter").value || "").trim(),
+      };
+    }
+
+    function setFilterOptions(selectId, values, selectedValue) {
+      const select = document.getElementById(selectId);
+      select.innerHTML = "";
+      for (const value of values || []) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value;
+        if (value === selectedValue) option.selected = true;
+        select.appendChild(option);
+      }
+      if (!select.value && select.options.length) {
+        select.value = selectedValue || select.options[0].value;
+      }
     }
 
     function formatResponseDetail(detail) {
@@ -1439,16 +1687,16 @@ def _operator_console_html() -> str:
       }
     }
 
-    function startPolling(runId) {
+    function startPolling(runId, filterOptions = {}) {
       stopPolling();
       if (!runId) return;
       selectedRunId = runId;
       const generation = pollGeneration;
-      pollRunEvents(runId, generation);
-      pollTimer = setInterval(() => pollRunEvents(runId, generation), 2000);
+      pollRunEvents(runId, generation, filterOptions);
+      pollTimer = setInterval(() => pollRunEvents(runId, generation, filterOptions), 2000);
     }
 
-    async function pollRunEvents(runId, generation = pollGeneration) {
+    async function pollRunEvents(runId, generation = pollGeneration, filterOptions = {}) {
       const isCurrentPoll = () => generation === pollGeneration && runId === selectedRunId;
       try {
         const response = await fetch(`/runs/${encodeURIComponent(runId)}/events`);
@@ -1457,7 +1705,7 @@ def _operator_console_html() -> str:
         renderTimeline(payload.events || []);
         if (!shouldPollEvents(payload.events || [])) {
           stopPolling();
-          await loadConsole(runId, { preservePolling: true });
+          await loadConsole(runId, { preservePolling: true, ...filterOptions });
         }
       } catch (error) {
         if (!isCurrentPoll()) return;
@@ -1526,11 +1774,23 @@ def _operator_console_html() -> str:
 
     async function loadConsole(runId, options = {}) {
       if (!options.preservePolling) stopPolling();
-      const suffix = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+      const params = new URLSearchParams();
+      const currentFilters = getConsoleFilters();
+      const filters = {
+        ...currentFilters,
+        operator_id: Object.prototype.hasOwnProperty.call(options, "operator_id") ? options.operator_id : currentFilters.operator_id,
+        workspace_id: Object.prototype.hasOwnProperty.call(options, "workspace_id") ? options.workspace_id : currentFilters.workspace_id,
+      };
+      if (runId) params.set("run_id", runId);
+      if (filters.operator_id) params.set("operator_id", filters.operator_id);
+      if (filters.workspace_id) params.set("workspace_id", filters.workspace_id);
+      const suffix = params.toString() ? `?${params.toString()}` : "";
       try {
         const response = await fetch(`/console/state${suffix}`);
         const state = await parseJsonOrThrow(response, "Console state");
         selectedRunId = state.selected_run_id;
+        setFilterOptions("operator-filter", state.filters && state.filters.available_operator_ids, state.filters && state.filters.operator_id);
+        setFilterOptions("workspace-filter", state.filters && state.filters.available_workspace_ids, state.filters && state.filters.workspace_id);
         renderRunQueue(state);
         renderReviewInbox(state.review_inbox || []);
         renderTimeline(state.timeline || []);
@@ -1561,6 +1821,9 @@ def _operator_console_html() -> str:
         inputs: {
           sample_name: String(formData.get("sample_name") || "RAA").trim() || "RAA",
         },
+        operator_id: String(formData.get("operator_id") || "").trim() || null,
+        workspace_id: String(formData.get("workspace_id") || "").trim() || null,
+        created_by: String(formData.get("created_by") || "").trim() || null,
         background: formData.get("background") === "on",
       };
       if (thresholdValue !== null && String(thresholdValue).trim() !== "") {
@@ -1580,14 +1843,20 @@ def _operator_console_html() -> str:
         });
         const result = await parseJsonOrThrow(response, "Create run");
         setOperationStatus(`${result.status || "created"}: ${result.run_id || result.case_id || "run"}`, "ok");
-        await loadConsole(result.run_id);
+        const runFilters = { operator_id: payload.operator_id, workspace_id: payload.workspace_id };
+        await loadConsole(result.run_id, runFilters);
         if (result.run_id && (result.execution_mode === "background" || activeEventTypes.includes(`run.${result.status}`))) {
-          startPolling(result.run_id);
+          startPolling(result.run_id, runFilters);
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to create run.";
         setOperationStatus(message, "error");
       }
+    }
+
+    async function applyConsoleFilters(event) {
+      event.preventDefault();
+      await loadConsole(null);
     }
 
     async function runConsoleAction(action) {

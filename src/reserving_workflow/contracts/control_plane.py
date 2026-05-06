@@ -97,6 +97,9 @@ class Run(BaseModel):
     run_id: str
     case_id: str | None = None
     status: RunStatus
+    created_by: str | None = None
+    operator_id: str | None = None
+    workspace_id: str | None = None
     summary: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
@@ -137,6 +140,7 @@ class Review(BaseModel):
     review_id: str | None = None
     run_id: str | None = None
     case_id: str | None = None
+    workspace_id: str | None = None
     review_required: bool = False
     decision: ReviewDecision | None = None
     reason_codes: list[str] = Field(default_factory=list)

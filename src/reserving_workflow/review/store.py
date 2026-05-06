@@ -32,6 +32,8 @@ def ensure_review_record(
         case_id=str(run_entry.get("case_id") or "unknown-case"),
         status="review_required",
         reason_codes=reason_codes,
+        assigned_to=_review_assignee(run_entry, packet_payload),
+        workspace_id=_run_workspace_id(run_entry),
         packet=packet_payload or None,
     )
 
@@ -59,6 +61,7 @@ def build_review_contract(
         review_id=str(record.get("review_id")),
         run_id=str(record.get("run_id")),
         case_id=str(record.get("case_id")),
+        workspace_id=record.get("workspace_id"),
         status=str(record.get("status") or "review_required"),
         review_required=True,
         decision=decision_payload,
@@ -171,6 +174,26 @@ def _run_needs_review(run_entry: dict[str, Any], review_packet: dict[str, Any] |
     if bool(run_entry.get("review_required")) or run_entry.get("status") == "needs_review":
         return True
     return bool(review_packet)
+
+
+def _review_assignee(run_entry: dict[str, Any], review_packet: dict[str, Any]) -> str | None:
+    assigned_to = review_packet.get("assigned_to")
+    if assigned_to is not None:
+        return str(assigned_to)
+    created_by = run_entry.get("created_by")
+    if created_by is not None:
+        return str(created_by)
+    operator_id = run_entry.get("operator_id")
+    if operator_id is not None:
+        return str(operator_id)
+    return None
+
+
+def _run_workspace_id(run_entry: dict[str, Any]) -> str | None:
+    workspace_id = run_entry.get("workspace_id")
+    if workspace_id is None:
+        return None
+    return str(workspace_id)
 
 
 def _review_record_path(review_store_root: str | Path, review_id: Any) -> Path:

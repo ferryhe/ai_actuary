@@ -69,6 +69,9 @@ def run_operator_flow(
     registry_path: str | Path | None = None,
     run_id: str | None = None,
     validated_input: dict[str, Any] | None = None,
+    created_by: str | None = None,
+    operator_id: str | None = None,
+    workspace_id: str | None = None,
     runner_module=None,
     task_contracts_module=None,
 ):
@@ -110,6 +113,9 @@ def run_operator_flow(
             user_prompt=user_prompt,
             review_delivery_dir=review_delivery_dir,
             validated_input=normalized_validated_input,
+            created_by=created_by,
+            operator_id=operator_id,
+            workspace_id=workspace_id,
             summary=f"Queued operator run for {case_id}",
         )
         running_registry_error = _record_registry_event_best_effort(
@@ -125,6 +131,9 @@ def run_operator_flow(
             user_prompt=user_prompt,
             review_delivery_dir=review_delivery_dir,
             validated_input=normalized_validated_input,
+            created_by=created_by,
+            operator_id=operator_id,
+            workspace_id=workspace_id,
             summary=f"Running operator run for {case_id}",
         )
     else:
@@ -134,6 +143,9 @@ def run_operator_flow(
         raw_result = runner.run_openai_governed_workflow(task, user_prompt=user_prompt)
     except Exception as exc:
         failure_result = _build_operator_failure_result(task, exc)
+        failure_result["created_by"] = created_by
+        failure_result["operator_id"] = operator_id
+        failure_result["workspace_id"] = workspace_id
         _attach_validated_input_artifact(
             failure_result,
             artifact_dir=artifact_dir,
@@ -144,6 +156,9 @@ def run_operator_flow(
             _record_registry_final_result_best_effort(registry_path, task, artifact_dir, failure_result)
         return failure_result
     normalized = _normalize_operator_result(task, raw_result)
+    normalized["created_by"] = created_by
+    normalized["operator_id"] = operator_id
+    normalized["workspace_id"] = workspace_id
     _attach_validated_input_artifact(
         normalized,
         artifact_dir=artifact_dir,
@@ -397,6 +412,9 @@ def _record_registry_event(
     user_prompt: str | None,
     review_delivery_dir: str | Path | None,
     validated_input: dict[str, Any] | None,
+    created_by: str | None,
+    operator_id: str | None,
+    workspace_id: str | None,
     summary: str,
 ) -> dict[str, Any]:
     registry_module = _load_run_registry_module()
@@ -409,6 +427,9 @@ def _record_registry_event(
         "review_threshold_origin_count": review_threshold_origin_count,
         "user_prompt": user_prompt,
         "review_delivery_dir": str(review_delivery_dir) if review_delivery_dir is not None else None,
+        "created_by": created_by,
+        "operator_id": operator_id,
+        "workspace_id": workspace_id,
     }
     if validated_input is not None:
         operator_params["validated_input"] = validated_input
@@ -421,6 +442,9 @@ def _record_registry_event(
         artifact_root=str(Path(artifact_dir).expanduser().resolve()),
         summary=summary,
         operator_params=operator_params,
+        created_by=created_by,
+        operator_id=operator_id,
+        workspace_id=workspace_id,
         review_required=status == "needs_review",
     )
 
@@ -435,6 +459,9 @@ def _record_registry_final_result(registry_path: str | Path, task: Any, artifact
         status=result.get("status", "failed"),
         artifact_root=str(Path(artifact_dir).expanduser().resolve()),
         summary=result.get("summary"),
+        created_by=result.get("created_by"),
+        operator_id=result.get("operator_id"),
+        workspace_id=result.get("workspace_id"),
         review_required=result.get("status") == "needs_review",
         error_category=result.get("error_category"),
         errors=list(result.get("errors", []) or []),

@@ -153,6 +153,13 @@ The FastAPI routes are intentionally aligned to the future Symphony-style operat
 
 Derived events are mapped from registry `status_history` into `run.accepted`, `run.queued`, `run.running`, `run.completed`, `run.needs_review`, or `run.failed` event types. The PR5 console shell reuses those events and the existing artifact/review/rerun endpoints to present a thin operator-facing workspace. PR6 adds a bounded background mode: the API writes an initial `accepted` registry event, schedules the same operator entrypoint through FastAPI background tasks, and exposes `/runs/{run_id}/events` for polling. This is still not a production queue, streaming bus, or separate business runtime.
 
+PR13 adds a lightweight per-actuary ownership layer on top of the same local control plane:
+
+- runs can carry `operator_id`, `workspace_id`, and `created_by`
+- the single-user fallback stays local-only and defaults to `local-actuary` plus `default-workspace`
+- `/runs`, `/reviews`, and `/console/state` can apply bounded operator/workspace filters without introducing auth or multitenancy
+- review assignment remains a prototype `assigned_to` field derived from local ownership metadata rather than RBAC
+
 PR8 adds a bounded tool catalog and control-plane contract layer:
 
 - tool discovery is explicit through a local registry and builtin `chainladder` catalog entry
