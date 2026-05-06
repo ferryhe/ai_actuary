@@ -138,6 +138,27 @@ def test_run_registry_serializes_review_delivery_on_creation(tmp_path):
     assert persisted["runs"][0]["review_delivery"]["json"] == str(delivery_path)
 
 
+def test_run_registry_records_custom_workflow_event_types(tmp_path):
+    registry = _load_module("run_registry_workflow_event_types", REGISTRY_PATH)
+    registry_path = tmp_path / "run-registry.json"
+
+    registry.record_run_event(
+        registry_path=registry_path,
+        task_id="operator-workflow-case",
+        case_id="workflow-case",
+        run_id="workflow-run",
+        status="running",
+        summary="running workflow step",
+        operator_params={"workflow_id": "chainladder-basic"},
+        event_type="workflow.step.running",
+        event_payload={"workflow_id": "chainladder-basic", "step_id": "chainladder"},
+    )
+
+    entry = registry.get_run(registry_path, "workflow-run")
+    assert entry["status_history"][0]["event_type"] == "workflow.step.running"
+    assert entry["status_history"][0]["payload"]["step_id"] == "chainladder"
+
+
 def test_run_registry_preserves_case_id_when_update_event_omits_it(tmp_path):
     registry = _load_module("run_registry_case_id", REGISTRY_PATH)
     registry_path = tmp_path / "run-registry.json"
