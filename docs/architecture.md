@@ -152,6 +152,10 @@ The FastAPI routes are intentionally aligned to the future Symphony-style operat
 - `POST /runs/{run_id}/report-export` — generate auditable operator handoff markdown/json from recorded evidence
 - `GET /runs/{run_id}/artifacts` — expose artifact manifest and artifact paths for an artifact panel
 - `GET /runs/{run_id}/review-packet` — expose review packet metadata for a review panel
+- `GET /runs/{run_id}/review` — expose the independent review object for one run
+- `GET /reviews` — list local review records and lazily materialized review-needed runs
+- `GET /reviews/{review_id}` — return one review contract
+- `POST /reviews/{review_id}/decision` — persist an independent review decision and decision artifacts
 - `POST /replay` — wrap the existing replay helper
 - `POST /repeatability` — wrap the existing repeatability helper
 - `POST /benchmarks/batch` — wrap the existing batch benchmark runner
@@ -171,11 +175,11 @@ PR14 adds an agent adapter seam on top of the same public API:
 - the Hermes client starts runs and polls status through public HTTP endpoints only
 - neither adapter writes deterministic results, review decisions, or artifact-store records directly
 
-PR8 adds a bounded tool catalog and control-plane contract layer:
+PR8/PR9 add a bounded tool catalog and tool-backed run invocation layer:
 
 - tool discovery is explicit through a local registry and builtin `chainladder` catalog entry
 - the console create-run form now loads its selector from `GET /tools`
-- `POST /runs` still preserves the existing `method` request contract and does not introduce tool-backed execution dispatch
+- `POST /runs` accepts `tool_id` plus `inputs`, preserves the legacy `method` alias for compatibility, and writes `validated_input.json` into run artifacts
 - run status values, run event types, artifact refs, review status, and rerun semantics are frozen in `docs/contracts/control-plane.md`
 
 PR10 adds a store boundary under the existing control plane:

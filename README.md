@@ -319,11 +319,15 @@ Key routes:
 - `POST /runs/{run_id}/rerun`
 - `GET /runs/{run_id}/artifacts`
 - `GET /runs/{run_id}/review-packet`
+- `GET /reviews`
+- `GET /runs/{run_id}/review`
+- `POST /reviews/{review_id}/decision`
+- `POST /runs/{run_id}/report-export`
 - `POST /replay`
 - `POST /repeatability`
 - `POST /benchmarks/batch`
 
-The `/runs/{run_id}` detail payload includes derived `events` such as `run.queued`, `run.running`, and `run.completed`. Workflow-backed runs keep that same outer lifecycle and append ordered workflow events like `workflow.started`, `workflow.step.started`, `workflow.step.completed`, and `workflow.completed`, with a top-level `run_manifest.json` pointing at workflow summary and step manifests. PR5 adds `/console` and `/console/state` on top of the same data, giving operators a simple run queue, timeline, artifact panel, review panel, and rerun action panel without introducing a second runtime contract or a frontend build system. PR6 adds a bounded background execution mode: `POST /runs` can return `202 accepted` with a `run.accepted` event, then the existing operator flow appends `run.queued`, `run.running`, and the final lifecycle event for polling through `/runs/{run_id}/events`. PR7 keeps the same lightweight shell but makes it operational: the console can create governed runs through `POST /runs`, poll background lifecycle events through `GET /runs/{run_id}/events`, and trigger the existing rerun contract through `POST /runs/{run_id}/rerun`. PR12 extends that shell with a review inbox and review decision form backed by `GET /reviews`, `GET /runs/{run_id}/review`, and `POST /reviews/{review_id}/decision`.
+The `/runs/{run_id}` detail payload includes derived `events` such as `run.queued`, `run.running`, and `run.completed`. Workflow-backed runs keep that same outer lifecycle and append ordered workflow events like `workflow.started`, `workflow.step.started`, `workflow.step.completed`, `workflow.step.needs_review`, `workflow.needs_review`, and `workflow.completed`, with a top-level `run_manifest.json` pointing at workflow summary and step manifests. PR5 adds `/console` and `/console/state` on top of the same data, giving operators a simple run queue, timeline, artifact panel, review panel, and rerun action panel without introducing a second runtime contract or a frontend build system. PR6 adds a bounded background execution mode: `POST /runs` can return `202 accepted` with a `run.accepted` event, then the existing operator flow appends `run.queued`, `run.running`, and the final lifecycle event for polling through `/runs/{run_id}/events`. PR7 keeps the same lightweight shell but makes it operational: the console can create governed runs through `POST /runs`, poll background lifecycle events through `GET /runs/{run_id}/events`, and trigger the existing rerun contract through `POST /runs/{run_id}/rerun`. PR12 extends that shell with a review inbox and review decision form backed by `GET /reviews`, `GET /runs/{run_id}/review`, and `POST /reviews/{review_id}/decision`.
 
 The console intentionally remains text-contract first. PR9 moves the create-run payload to a tool-backed shape: `case_id`, `tool_id`, `inputs`, and `background`, while preserving the legacy top-level `method` alias for compatibility. PR11 adds builtin workflow templates discoverable through `GET /workflows`, and `POST /runs` can now also accept `workflow_id` while preserving the legacy single-tool path unchanged. For the built-in deterministic path the normalized payload is `tool_id="chainladder"` with `inputs.method_variant="chainladder"`, and each run now writes `validated_input.json` alongside `run_manifest.json`.
 
@@ -414,20 +418,35 @@ Minimum runtime requirements:
 - PR5: lightweight Symphony-style operator console shell over the run/event/artifact/review payloads
 - PR6: bounded background execution mode and `/runs/{run_id}/events` lifecycle polling
 - PR7: actionable lightweight console for creating governed runs, polling background events, and rerunning recorded cases through the existing API contracts
+- PR8: foundation control-plane contracts and the first registered actuarial tool catalog (`chainladder`)
+- PR9: tool-backed run dispatch inputs, `tool_id` plus `inputs`, legacy `method` compatibility, and `validated_input.json`
+- PR10: local `RunStore`, `ArtifactStore`, and `ReviewStore` boundaries over the current JSON/filesystem implementation
+- PR11: builtin workflow template catalog and bounded sequential workflow execution
+- PR12: independent review contract, review decision artifacts, and console review inbox/decision form
+- PR13: prototype per-actuary workspace and ownership metadata (`operator_id`, `workspace_id`, `created_by`)
+- PR14: bounded OpenAI planner and Hermes worker adapter seam over public control-plane APIs
+- PR15: evidence-only operator handoff report export through CLI, API, and console action panel
+
+### Current Usable Product Slice
+
+The repository is now a local **Agentic Actuarial Workbench** prototype. A local operator can use CLI, FastAPI, or the lightweight console to create governed runs, inspect lifecycle events, review artifacts, submit independent review decisions, rerun recorded cases, and export handoff reports from recorded evidence.
 
 ### Not Yet Implemented
 
-- persistent artifact store beyond local filesystem
-- outbound messaging/delivery of review packets
-- production Hermes runtime orchestration instead of local callable worker modules
-- richer actuarial methods, multi-dataset benchmark catalogs, and formal sign-off workflows
-- production-grade operator web console, production queue worker, streaming event bus, and multi-user access control
+- persistent artifact store beyond local filesystem, including retention and archival policy
+- production queue worker, streaming event bus, and service-backed Hermes runtime orchestration
+- outbound messaging/delivery adapters for review packets and operator handoff reports
+- authentication, SSO/RBAC, enterprise multitenancy, and production workspace governance
+- richer actuarial method catalog beyond the current `chainladder` path
+- expanded benchmark datasets and CI-grade scheduled replay/repeatability regression workflows
+- production-grade web console frontend and formal sign-off workflow automation
 
 ### Next Recommended Steps
 
-1. add artifact-store and retention strategy
-2. expand benchmark coverage beyond the current sample-driven path
-3. harden replay/repeatability into CI-grade regression workflows
+1. harden artifact persistence and retention while preserving `run_manifest.json` compatibility
+2. expand the actuarial tool catalog and benchmark case coverage
+3. add outbound review/report delivery adapters without moving delivery into planner/core logic
+4. promote replay/repeatability and report export into scheduled regression and release checks
 
 ---
 

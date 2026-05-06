@@ -28,7 +28,7 @@ The export path reads:
 
 - Review decisions remain independent governance records.
 - Run execution status remains `completed`, `needs_review`, or `failed`.
-- Missing reserve metrics are marked as missing; the export must do not fabricate or infer missing numeric facts.
+- Missing reserve metrics are marked as missing; the export must not fabricate or infer missing numeric facts. Operator report generation should treat this as a hard rule: do not fabricate reserve values.
 - The export does not add PDF, BI dashboard, queue, or workflow expansion.
 
 ## Operator Surfaces
