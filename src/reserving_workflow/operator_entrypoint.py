@@ -8,9 +8,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from reserving_workflow.artifacts.storage import read_json_artifact, resolve_artifact_path, write_json_artifact
 from reserving_workflow.contracts.control_plane import RerunSemantics
 
 DEFAULT_REQUIRED_ARTIFACTS = [
+    "validated_input",
     "case_input",
     "deterministic_result",
     "narrative_draft",
@@ -66,9 +68,21 @@ def run_operator_flow(
     review_delivery_dir: str | Path | None = None,
     registry_path: str | Path | None = None,
     run_id: str | None = None,
+    validated_input: dict[str, Any] | None = None,
     runner_module=None,
     task_contracts_module=None,
 ):
+    normalized_validated_input = (
+        validated_input
+        if validated_input is not None
+        else _build_validated_input_payload(
+            case_id=case_id,
+            sample_name=sample_name,
+            method=method,
+            review_threshold_origin_count=review_threshold_origin_count,
+        )
+    )
+    validated_input_path = _write_validated_input_artifact(artifact_dir, normalized_validated_input)
     task = build_operator_task(
         case_id=case_id,
         artifact_dir=artifact_dir,
@@ -95,6 +109,7 @@ def run_operator_flow(
             review_threshold_origin_count=review_threshold_origin_count,
             user_prompt=user_prompt,
             review_delivery_dir=review_delivery_dir,
+            validated_input=normalized_validated_input,
             summary=f"Queued operator run for {case_id}",
         )
         running_registry_error = _record_registry_event_best_effort(
@@ -109,6 +124,7 @@ def run_operator_flow(
             review_threshold_origin_count=review_threshold_origin_count,
             user_prompt=user_prompt,
             review_delivery_dir=review_delivery_dir,
+            validated_input=normalized_validated_input,
             summary=f"Running operator run for {case_id}",
         )
     else:
@@ -118,11 +134,21 @@ def run_operator_flow(
         raw_result = runner.run_openai_governed_workflow(task, user_prompt=user_prompt)
     except Exception as exc:
         failure_result = _build_operator_failure_result(task, exc)
+        _attach_validated_input_artifact(
+            failure_result,
+            artifact_dir=artifact_dir,
+            validated_input_path=validated_input_path,
+        )
         _append_registry_errors(failure_result, queued_registry_error, running_registry_error)
         if registry_path is not None:
             _record_registry_final_result_best_effort(registry_path, task, artifact_dir, failure_result)
         return failure_result
     normalized = _normalize_operator_result(task, raw_result)
+    _attach_validated_input_artifact(
+        normalized,
+        artifact_dir=artifact_dir,
+        validated_input_path=validated_input_path,
+    )
     if review_delivery_dir is not None and normalized.get("status") == "needs_review" and normalized.get("review_packet"):
         try:
             delivery_module = _load_review_delivery_module()
@@ -272,6 +298,63 @@ def _build_operator_failure_result(task: Any, exc: Exception) -> dict[str, Any]:
     }
 
 
+def _build_validated_input_payload(
+    *,
+    case_id: str,
+    sample_name: str,
+    method: str,
+    review_threshold_origin_count: int | None,
+) -> dict[str, Any]:
+    payload = {
+        "case_id": case_id,
+        "tool_id": method,
+        "inputs": {
+            "sample_name": sample_name,
+            "method_variant": method,
+        },
+    }
+    if review_threshold_origin_count is not None:
+        payload["inputs"]["review_threshold_origin_count"] = review_threshold_origin_count
+    return payload
+
+
+def _write_validated_input_artifact(artifact_dir: str | Path, payload: dict[str, Any]) -> Path:
+    target = resolve_artifact_path(artifact_dir, "validated_input.json")
+    return write_json_artifact(target, payload)
+
+
+def _attach_validated_input_artifact(
+    result: dict[str, Any],
+    *,
+    artifact_dir: str | Path,
+    validated_input_path: str | Path,
+) -> None:
+    manifest_path = _resolve_manifest_path(result, artifact_dir=artifact_dir)
+    if manifest_path is not None and manifest_path.exists():
+        manifest = read_json_artifact(manifest_path)
+        artifact_paths = dict(manifest.get("artifact_paths", {}) or {})
+        artifact_paths["validated_input"] = str(Path(validated_input_path).expanduser().resolve())
+        manifest["artifact_paths"] = artifact_paths
+        write_json_artifact(manifest_path, manifest)
+
+    worker_result = result.setdefault("worker_result", {})
+    artifact_paths = dict(worker_result.get("artifact_paths", {}) or {})
+    artifact_paths["validated_input"] = str(Path(validated_input_path).expanduser().resolve())
+    worker_result["artifact_paths"] = artifact_paths
+
+
+def _resolve_manifest_path(result: dict[str, Any], *, artifact_dir: str | Path) -> Path | None:
+    final_output = dict(result.get("final_output", {}) or {})
+    worker_result = dict(result.get("worker_result", {}) or {})
+    manifest_candidate = final_output.get("artifact_manifest_path") or worker_result.get("artifact_paths", {}).get("run_manifest")
+    if manifest_candidate:
+        return Path(manifest_candidate).expanduser().resolve()
+    fallback = Path(artifact_dir).expanduser().resolve() / "run_manifest.json"
+    if fallback.exists():
+        return fallback
+    return None
+
+
 def _load_task_contracts_module():
     return _load_module(
         "operator_task_contracts",
@@ -313,6 +396,7 @@ def _record_registry_event(
     review_threshold_origin_count: int | None,
     user_prompt: str | None,
     review_delivery_dir: str | Path | None,
+    validated_input: dict[str, Any] | None,
     summary: str,
 ) -> dict[str, Any]:
     registry_module = _load_run_registry_module()
@@ -326,6 +410,8 @@ def _record_registry_event(
         "user_prompt": user_prompt,
         "review_delivery_dir": str(review_delivery_dir) if review_delivery_dir is not None else None,
     }
+    if validated_input is not None:
+        operator_params["validated_input"] = validated_input
     return registry_module.record_run_event(
         registry_path=registry_path,
         task_id=getattr(task, "task_id", "unknown-task"),

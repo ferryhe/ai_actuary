@@ -19,10 +19,13 @@ from reserving_workflow.artifacts import replay as replay_helpers
 from reserving_workflow.artifacts.storage import read_json_artifact, resolve_artifact_path
 from reserving_workflow.contracts.control_plane import (
     ArtifactRef,
+    ChainladderToolInput,
     Review,
     Run,
     RunEvent,
     RerunSemantics,
+    ToolInvocation,
+    ValidatedToolInput,
     run_event_type_for_status,
 )
 from reserving_workflow.runtime import run_registry
@@ -41,8 +44,10 @@ class RunCreateRequest(BaseModel):
     case_id: str
     artifact_dir: str | Path | None = None
     objective: str = "API-triggered governed workflow run"
-    sample_name: str = "RAA"
-    method: str = "chainladder"
+    tool_id: str | None = None
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    sample_name: str | None = None
+    method: str | None = None
     review_threshold_origin_count: int | None = None
     user_prompt: str | None = None
     review_delivery_dir: str | Path | None = None
@@ -120,13 +125,17 @@ def create_app(
         try:
             _safe_artifact_component(request.case_id, field_name="case_id")
             artifact_dir = request.artifact_dir or _default_artifact_dir(resolved_settings, request.case_id)
+            validated_tool_input = _normalize_tool_invocation(request, tool_registry=resolved_tool_registry)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValidationError as exc:
+            raise HTTPException(status_code=400, detail=exc.errors()) from exc
         review_delivery_dir = request.review_delivery_dir
         if review_delivery_dir is None:
             review_delivery_dir = resolved_settings.review_delivery_dir
         operator_params = _operator_params_from_request(
             request,
+            validated_tool_input=validated_tool_input,
             artifact_dir=artifact_dir,
             review_delivery_dir=review_delivery_dir,
             registry_path=resolved_settings.registry_path,
@@ -138,6 +147,7 @@ def create_app(
             operator_params["run_id"] = run_id
             accepted_payload = _record_background_acceptance(
                 request,
+                validated_tool_input=validated_tool_input,
                 artifact_dir=artifact_dir,
                 review_delivery_dir=review_delivery_dir,
                 registry_path=resolved_settings.registry_path,
@@ -245,22 +255,29 @@ def _default_artifact_dir(settings: ApiSettings, case_id: str) -> Path:
 def _operator_params_from_request(
     request: RunCreateRequest,
     *,
+    validated_tool_input: ValidatedToolInput,
     artifact_dir: str | Path,
     review_delivery_dir: str | Path | None,
     registry_path: str | Path,
     runner_module=None,
     task_contracts_module=None,
 ) -> dict[str, Any]:
+    tool_inputs = dict(validated_tool_input.inputs)
     params: dict[str, Any] = {
         "case_id": request.case_id,
         "artifact_dir": artifact_dir,
         "objective": request.objective,
-        "sample_name": request.sample_name,
-        "method": request.method,
-        "review_threshold_origin_count": request.review_threshold_origin_count,
+        "sample_name": tool_inputs.get("sample_name", "RAA"),
+        "method": tool_inputs.get("method_variant", "chainladder"),
+        "review_threshold_origin_count": tool_inputs.get("review_threshold_origin_count"),
         "user_prompt": request.user_prompt,
         "review_delivery_dir": review_delivery_dir,
         "registry_path": registry_path,
+        "validated_input": {
+            "case_id": request.case_id,
+            "tool_id": validated_tool_input.tool_id,
+            "inputs": tool_inputs,
+        },
     }
     if runner_module is not None:
         params["runner_module"] = runner_module
@@ -272,21 +289,28 @@ def _operator_params_from_request(
 def _record_background_acceptance(
     request: RunCreateRequest,
     *,
+    validated_tool_input: ValidatedToolInput,
     artifact_dir: str | Path,
     review_delivery_dir: str | Path | None,
     registry_path: str | Path,
     run_id: str,
 ) -> dict[str, Any]:
+    tool_inputs = dict(validated_tool_input.inputs)
     task_id = f"operator-{request.case_id}"
     operator_params = {
         "case_id": request.case_id,
         "artifact_dir": str(artifact_dir),
         "objective": request.objective,
-        "sample_name": request.sample_name,
-        "method": request.method,
-        "review_threshold_origin_count": request.review_threshold_origin_count,
+        "sample_name": tool_inputs.get("sample_name", "RAA"),
+        "method": tool_inputs.get("method_variant", "chainladder"),
+        "review_threshold_origin_count": tool_inputs.get("review_threshold_origin_count"),
         "user_prompt": request.user_prompt,
         "review_delivery_dir": str(review_delivery_dir) if review_delivery_dir is not None else None,
+        "validated_input": {
+            "case_id": request.case_id,
+            "tool_id": validated_tool_input.tool_id,
+            "inputs": tool_inputs,
+        },
     }
     entry = run_registry.record_run_event(
         registry_path=registry_path,
@@ -342,6 +366,39 @@ def _record_background_failure(operator_params: dict[str, Any], exc: Exception) 
 def _generate_api_run_id(case_id: str) -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     return f"operator-{case_id}-{timestamp}"
+
+
+def _normalize_tool_invocation(request: RunCreateRequest, *, tool_registry) -> ValidatedToolInput:
+    tool_invocation = ToolInvocation(tool_id=request.tool_id or "chainladder", inputs=dict(request.inputs or {}))
+    legacy_method = (request.method or "").strip() or None
+    if request.tool_id is None and legacy_method is not None:
+        tool_invocation.tool_id = legacy_method
+    elif request.tool_id is not None and legacy_method is not None and request.tool_id != legacy_method:
+        raise ValueError(
+            f"Conflicting tool selectors: tool_id={request.tool_id!r} does not match legacy method={legacy_method!r}"
+        )
+
+    try:
+        tool_registry.get_tool(tool_invocation.tool_id)
+    except ValueError as exc:
+        raise ValueError(f"Unknown tool_id: {tool_invocation.tool_id}") from exc
+
+    merged_inputs = dict(tool_invocation.inputs)
+    if request.sample_name is not None and "sample_name" not in merged_inputs:
+        merged_inputs["sample_name"] = request.sample_name
+    if request.review_threshold_origin_count is not None and "review_threshold_origin_count" not in merged_inputs:
+        merged_inputs["review_threshold_origin_count"] = request.review_threshold_origin_count
+    if legacy_method is not None and "method_variant" not in merged_inputs and "method" not in merged_inputs:
+        merged_inputs["method_variant"] = legacy_method
+
+    if tool_invocation.tool_id == "chainladder":
+        validated_inputs = ChainladderToolInput.model_validate(merged_inputs)
+        return ValidatedToolInput(
+            tool_id=tool_invocation.tool_id,
+            inputs=validated_inputs.model_dump(mode="json"),
+        )
+
+    raise ValueError(f"Unknown tool_id: {tool_invocation.tool_id}")
 
 
 def _safe_artifact_component(value: Any, *, field_name: str) -> str:
@@ -635,7 +692,7 @@ def _operator_console_html() -> str:
         <label>case_id<input name="case_id" required placeholder="demo-case"></label>
         <label>sample_name<input name="sample_name" value="RAA"></label>
         <label>tool
-          <select id="tool-selector" name="method" data-default-tool-id="chainladder">
+          <select id="tool-selector" name="tool_id" data-default-tool-id="chainladder">
             <option value="chainladder">Loading tool catalog…</option>
           </select>
         </label>
@@ -713,7 +770,7 @@ def _operator_console_html() -> str:
         selector.innerHTML = "";
         for (const tool of tools) {
           const option = document.createElement("option");
-          option.value = tool.method || tool.tool_id;
+          option.value = tool.tool_id || tool.method;
           option.textContent = tool.title ? `${tool.title} (${tool.tool_id})` : (tool.tool_id || tool.method || "tool");
           if ((tool.tool_id || tool.method) === selector.dataset.defaultToolId) {
             option.selected = true;
@@ -721,7 +778,7 @@ def _operator_console_html() -> str:
           selector.appendChild(option);
         }
         if (!selector.value && tools.length) {
-          selector.value = tools[0].method || tools[0].tool_id;
+          selector.value = tools[0].tool_id || tools[0].method;
         }
       } catch (error) {
         const fallback = selector.querySelector("option[value='chainladder']") || selector.options[0];
@@ -871,8 +928,11 @@ def _operator_console_html() -> str:
       const thresholdValue = formData.get("review_threshold_origin_count");
       const payload = {
         case_id: String(formData.get("case_id") || "").trim(),
-        sample_name: String(formData.get("sample_name") || "RAA").trim() || "RAA",
-        method: String(formData.get("method") || "chainladder").trim() || "chainladder",
+        tool_id: String(formData.get("tool_id") || "chainladder").trim() || "chainladder",
+        method: String(formData.get("tool_id") || "chainladder").trim() || "chainladder",
+        inputs: {
+          sample_name: String(formData.get("sample_name") || "RAA").trim() || "RAA",
+        },
         background: formData.get("background") === "on",
       };
       if (thresholdValue !== null && String(thresholdValue).trim() !== "") {
@@ -881,7 +941,7 @@ def _operator_console_html() -> str:
           setOperationStatus("review_threshold_origin_count must be a non-negative integer.", "error");
           return;
         }
-        payload.review_threshold_origin_count = thresholdNumber;
+        payload.inputs.review_threshold_origin_count = thresholdNumber;
       }
       setOperationStatus("Creating governed run…");
       try {

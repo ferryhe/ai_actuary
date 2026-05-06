@@ -40,5 +40,7 @@ def test_builtin_tool_registry_returns_chainladder_schema():
     tool = registry.get_tool("chainladder")
 
     assert tool.console_defaults["sample_name"] == "RAA"
-    assert tool.input_schema["required"] == ["case_id"]
+    assert tool.console_defaults["method_variant"] == "chainladder"
+    assert tool.input_schema["required"] == []
+    assert tool.input_schema["properties"]["method_variant"]["const"] == "chainladder"
     assert tool.input_schema["properties"]["method"]["const"] == "chainladder"
