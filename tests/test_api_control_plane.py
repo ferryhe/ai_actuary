@@ -5,7 +5,11 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from reserving_workflow.api.app import ApiSettings, _load_batch_runner_module, create_app
+from reserving_workflow.api.app import (
+    ApiSettings,
+    _load_batch_runner_module,
+    create_app,
+)
 from reserving_workflow.schemas import RunArtifactManifest
 
 
@@ -31,6 +35,51 @@ class FakeRunnerModule:
                     "run_id": task.run_id,
                     "artifact_root": str(artifact_dir),
                     "artifact_paths": {"run_manifest": str(run_manifest)},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return {
+            "route": {"mode": "governed"},
+            "trace": {"workflow_name": "test-workflow"},
+            "worker_result": {
+                "status": "completed",
+                "case_id": task.case_ref,
+                "run_id": task.run_id,
+                "summary": "worker complete",
+                "artifact_paths": {"run_manifest": str(run_manifest)},
+                "metrics": {},
+                "review_reasons": [],
+                "errors": [],
+                "worker_metadata": {"adapter": "fake"},
+            },
+            "final_output": {
+                "case_id": task.case_ref,
+                "worker_status": "completed",
+                "deterministic_method": "chainladder",
+                "cited_values": {"ibnr": 1.0},
+                "review_reasons": [],
+                "artifact_manifest_path": str(run_manifest),
+                "narrative_summary": "ok",
+            },
+        }
+
+
+class RelativeArtifactPathRunnerModule:
+    @staticmethod
+    def run_openai_governed_workflow(task, *, user_prompt=None):
+        artifact_dir = Path(task.inputs["artifact_dir"])
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        deterministic_result = artifact_dir / "deterministic_result.json"
+        deterministic_result.write_text('{"ibnr": 1.0}', encoding="utf-8")
+        run_manifest = artifact_dir / "run_manifest.json"
+        run_manifest.write_text(
+            json.dumps(
+                {
+                    "case_id": task.case_ref,
+                    "run_id": task.run_id,
+                    "artifact_root": str(artifact_dir),
+                    "artifact_paths": {"deterministic_result": "deterministic_result.json"},
                 }
             ),
             encoding="utf-8",
@@ -168,6 +217,20 @@ def test_post_run_records_registry_and_returns_operator_contract(tmp_path):
     assert list_payload["runs"][0]["run_id"] == payload["run_id"]
 
 
+def test_tool_catalog_endpoints_expose_builtin_chainladder(tmp_path):
+    client = _client(tmp_path)
+
+    tools = client.get("/tools")
+    tool = client.get("/tools/chainladder")
+
+    assert tools.status_code == 200
+    assert tools.json()["tool_count"] == 1
+    assert tools.json()["tools"][0]["tool_id"] == "chainladder"
+    assert tool.status_code == 200
+    assert tool.json()["method"] == "chainladder"
+    assert tool.json()["input_schema"]["properties"]["sample_name"]["default"] == "RAA"
+
+
 def test_post_run_can_accept_background_execution_and_poll_events(tmp_path):
     scheduled = []
 
@@ -237,7 +300,27 @@ def test_run_detail_exposes_symphony_style_events_and_artifacts(tmp_path):
         "run.running",
         "run.completed",
     ]
+    assert [event["type"] for event in detail["events"]] == [
+        "run.queued",
+        "run.running",
+        "run.completed",
+    ]
     assert detail["artifact_manifest"]["case_id"] == "detail-case"
+    assert detail["artifacts"][0]["artifact_id"] == "run_manifest"
+
+
+def test_run_detail_resolves_relative_manifest_artifact_paths(tmp_path):
+    client = _client(tmp_path, runner_module=RelativeArtifactPathRunnerModule)
+    run = client.post("/runs", json={"case_id": "relative-artifact-case"}).json()
+
+    response = client.get(f"/runs/{run['run_id']}")
+
+    assert response.status_code == 200
+    artifact = response.json()["artifacts"][0]
+    assert artifact["artifact_id"] == "deterministic_result"
+    assert artifact["present"] is True
+    assert artifact["path"].endswith("deterministic_result.json")
+    assert Path(artifact["path"]).is_absolute()
 
 
 def test_console_shell_serves_operator_console_html(tmp_path):
@@ -261,12 +344,16 @@ def test_console_shell_serves_operator_console_html(tmp_path):
     assert "Create Governed Run" in html
     assert "case_id" in html
     assert "sample_name" in html
-    assert "method" in html
+    assert "tool-selector" in html
     assert "review_threshold_origin_count" in html
     assert "background" in html
     assert "createRun(" in html
     assert "pollRunEvents(" in html
     assert "runConsoleAction(" in html
+    assert "loadToolCatalog()" in html
+    assert "fetch(\"/tools\")" in html
+    assert "Tool catalog unavailable; using default tool." in html
+    assert "fallback.selected = true" in html
 
 
 def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path):
@@ -277,10 +364,11 @@ def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path)
     assert "name=\"sample_name\"" in html
     assert "value=\"RAA\"" in html
     assert "name=\"method\"" in html
-    assert "value=\"chainladder\"" in html
+    assert "data-default-tool-id=\"chainladder\"" in html
     assert "name=\"background\"" in html
     assert "checked" in html
     assert "fetch(\"/runs\"" in html
+    assert "Tool catalog" in html
     assert "fetch(`/runs/${encodeURIComponent(runId)}/events`)" in html
     assert "run.accepted" in html
     assert "run.queued" in html
@@ -306,6 +394,7 @@ def test_console_state_exposes_symphony_style_panels(tmp_path):
     assert response.status_code == 200
     state = response.json()
     assert state["console"]["title"] == "AI Actuary Operator Console"
+    assert state["tool_catalog"]["tools"][0]["tool_id"] == "chainladder"
     assert state["selected_run_id"] == run["run_id"]
     assert state["selected_run"] == {
         "run_id": run["run_id"],
@@ -330,6 +419,7 @@ def test_console_state_exposes_symphony_style_panels(tmp_path):
     assert state["review_panel"]["present"] is True
     assert state["review_panel"]["status"] == "review_required"
     assert [action["action_id"] for action in state["action_panel"]["actions"]] == ["rerun"]
+    assert state["action_panel"]["actions"][0]["semantics"]["creates_distinct_run"] is True
 
 
 def test_console_state_defaults_to_latest_run(tmp_path):
@@ -354,6 +444,7 @@ def test_rerun_endpoint_creates_distinct_run_id(tmp_path):
 
     assert rerun["status"] == "completed"
     assert rerun["run_id"] != original["run_id"]
+    assert rerun["rerun"]["source_run_id"] == original["run_id"]
     runs = client.get("/runs").json()["runs"]
     assert {item["run_id"] for item in runs} == {original["run_id"], rerun["run_id"]}
 

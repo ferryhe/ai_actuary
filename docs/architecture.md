@@ -135,6 +135,8 @@ The FastAPI routes are intentionally aligned to the future Symphony-style operat
 
 - `GET /console` — serve a lightweight operator console shell without a frontend build system
 - `GET /console/state` — return console-ready run cards, selected-run detail, timeline, artifact, review, and action panels
+- `GET /tools` — return the operator-visible tool catalog summary
+- `GET /tools/{tool_id}` — return tool metadata and input schema for one registered tool
 - `POST /runs` — start a governed single-case run through the existing operator entrypoint; with `background=true`, accept immediately and execute through FastAPI background tasks
 - `GET /runs` — list registry-backed run summaries
 - `GET /runs/{run_id}` — return registry detail, derived run events, artifact manifest, and review metadata
@@ -147,6 +149,13 @@ The FastAPI routes are intentionally aligned to the future Symphony-style operat
 - `POST /benchmarks/batch` — wrap the existing batch benchmark runner
 
 Derived events are mapped from registry `status_history` into `run.accepted`, `run.queued`, `run.running`, `run.completed`, `run.needs_review`, or `run.failed` event types. The PR5 console shell reuses those events and the existing artifact/review/rerun endpoints to present a thin operator-facing workspace. PR6 adds a bounded background mode: the API writes an initial `accepted` registry event, schedules the same operator entrypoint through FastAPI background tasks, and exposes `/runs/{run_id}/events` for polling. This is still not a production queue, streaming bus, or separate business runtime.
+
+PR8 adds a bounded tool catalog and control-plane contract layer:
+
+- tool discovery is explicit through a local registry and builtin `chainladder` catalog entry
+- the console create-run form now loads its selector from `GET /tools`
+- `POST /runs` still preserves the existing `method` request contract and does not introduce tool-backed execution dispatch
+- run status values, run event types, artifact refs, review status, and rerun semantics are frozen in `docs/contracts/control-plane.md`
 
 ---
 
@@ -192,6 +201,8 @@ When local task-state tracking is enabled, the operator runtime also writes a JS
 - `status_history`
 
 The registry is not a replacement for manifests; it is a lightweight operational index layered on top of the artifact contract.
+
+The operator-facing API also derives stable artifact refs from `run_manifest.json` for console/detail views. Those refs are a presentation contract over the manifest, not a second artifact source of truth.
 
 The system currently treats the local filesystem as the artifact store. That is a deliberate prototype constraint, not the final intended deployment architecture.
 

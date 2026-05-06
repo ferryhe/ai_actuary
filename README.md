@@ -25,6 +25,7 @@ One-line model:
 ├── benchmarks/
 ├── docs/
 │   ├── architecture/
+│   ├── contracts/
 │   ├── plans/
 │   └── reports/
 ├── prompts/
@@ -40,9 +41,11 @@ One-line model:
 ### Key handoff docs
 
 - `docs/architecture.md` — current three-layer architecture and runtime boundaries
+- `docs/contracts/control-plane.md` — frozen operator-facing status, event, artifact, review, tool, and rerun contracts
 - `docs/project-plan.md` — completed scope, remaining gaps, and next recommended steps
 - `docs/architecture/overview.md` — short architecture summary for quick orientation
 - `docs/plans/openai-hermes-composition-design.md` — full original design and phased roadmap
+- `docs/plans/actuarial-workbench-tool-console-roadmap.md` — workbench roadmap for console and tool surfaces
 - `prompts/codex/step-by-step-prompts.md` — staged implementation prompt sequence
 
 ---
@@ -54,6 +57,7 @@ One-line model:
 - `src/reserving_workflow/schemas/`
 - `src/reserving_workflow/calculators/`
 - `src/reserving_workflow/constitution/`
+- `src/reserving_workflow/contracts/`
 - `src/reserving_workflow/artifacts/`
 - `src/reserving_workflow/evaluation/`
 
@@ -72,6 +76,12 @@ One-line model:
 - `workflows/agent-runtimes/hermes-worker/batch_worker.py`
 - `workflows/agent-runtimes/hermes-worker/artifact_packager.py`
 
+### Local Control Plane
+
+- `src/reserving_workflow/api/`
+- `src/reserving_workflow/runtime/run_registry.py`
+- `src/reserving_workflow/tools/catalog.py`
+
 ---
 
 ## Operator CLI Entry Points
@@ -85,6 +95,13 @@ All current operator-facing entry points are machine-readable JSON CLIs.
 5. `scripts/list_runs.py`
 6. `scripts/show_run.py`
 7. `scripts/rerun_case.py`
+
+The local FastAPI wrapper also exposes:
+
+- `GET /tools`
+- `GET /tools/{tool_id}`
+- `POST /runs`
+- `POST /runs/{run_id}/rerun`
 
 ---
 
@@ -133,6 +150,7 @@ python scripts/run_governed_case.py \
 - `needs_review` means the workflow executed successfully but governance escalated the case
 - `failed` means the run did not complete successfully
 - worker-side invalid input failures expose structured metadata under `worker_result.worker_metadata`, including `failure_category`, `failure_stage`, and `error_type`
+- the console tool selector is catalog-backed, but PR8 still dispatches through the existing `method` field and operator entrypoint
 
 ### B. Trigger review flow
 

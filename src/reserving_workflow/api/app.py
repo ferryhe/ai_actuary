@@ -17,7 +17,16 @@ from pydantic import BaseModel, Field, ValidationError
 from reserving_workflow import operator_entrypoint
 from reserving_workflow.artifacts import replay as replay_helpers
 from reserving_workflow.artifacts.storage import read_json_artifact, resolve_artifact_path
+from reserving_workflow.contracts.control_plane import (
+    ArtifactRef,
+    Review,
+    Run,
+    RunEvent,
+    RerunSemantics,
+    run_event_type_for_status,
+)
 from reserving_workflow.runtime import run_registry
+from reserving_workflow.tools import build_builtin_tool_registry
 
 
 class ApiSettings(BaseModel):
@@ -66,6 +75,7 @@ def create_app(
     replay_module=None,
     batch_runner_module=None,
     background_task_runner=None,
+    tool_registry=None,
 ) -> FastAPI:
     """Create the FastAPI control plane app.
 
@@ -76,24 +86,37 @@ def create_app(
     resolved_settings = settings or ApiSettings()
     resolved_replay_module = replay_module or replay_helpers
     resolved_batch_runner_module = batch_runner_module
+    resolved_tool_registry = tool_registry or build_builtin_tool_registry()
     app = FastAPI(title="AI Actuary Control Plane", version="0.1.0")
 
     @app.get("/health")
-    def health() -> dict[str, Any]:
+    async def health() -> dict[str, Any]:
         return {"ok": True, "service": "ai-actuary-control-plane"}
 
     @app.get("/console", response_class=HTMLResponse)
-    def operator_console() -> str:
+    async def operator_console() -> str:
         return _operator_console_html()
 
     @app.get("/console/state")
-    def operator_console_state(run_id: str | None = None) -> dict[str, Any]:
+    async def operator_console_state(run_id: str | None = None) -> dict[str, Any]:
         runs = run_registry.list_runs(resolved_settings.registry_path)
         selected_entry = _select_console_run(runs, run_id)
-        return _console_state_payload(selected_entry, runs)
+        return _console_state_payload(selected_entry, runs, tool_registry=resolved_tool_registry)
+
+    @app.get("/tools")
+    async def list_tools() -> dict[str, Any]:
+        tools = resolved_tool_registry.list_tool_summaries()
+        return {"tool_count": len(tools), "tools": tools}
+
+    @app.get("/tools/{tool_id}")
+    async def get_tool(tool_id: str) -> dict[str, Any]:
+        try:
+            return resolved_tool_registry.get_tool(tool_id).model_dump()
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/runs")
-    def create_run(request: RunCreateRequest, background_tasks: BackgroundTasks) -> Any:
+    async def create_run(request: RunCreateRequest, background_tasks: BackgroundTasks) -> Any:
         try:
             _safe_artifact_component(request.case_id, field_name="case_id")
             artifact_dir = request.artifact_dir or _default_artifact_dir(resolved_settings, request.case_id)
@@ -123,10 +146,10 @@ def create_app(
             scheduler = background_task_runner or background_tasks.add_task
             scheduler(_run_operator_flow_background, operator_params)
             return JSONResponse(status_code=202, content=accepted_payload)
-        return operator_entrypoint.run_operator_flow(**operator_params)
+        return JSONResponse(content=operator_entrypoint.run_operator_flow(**operator_params))
 
     @app.get("/runs")
-    def list_runs() -> dict[str, Any]:
+    async def list_runs() -> dict[str, Any]:
         runs = run_registry.list_runs(resolved_settings.registry_path)
         return {
             "registry_path": str(Path(resolved_settings.registry_path)),
@@ -135,40 +158,45 @@ def create_app(
         }
 
     @app.get("/runs/{run_id}")
-    def get_run_detail(run_id: str) -> dict[str, Any]:
+    async def get_run_detail(run_id: str) -> dict[str, Any]:
         entry = _get_registry_entry(resolved_settings.registry_path, run_id)
         artifact_manifest = _load_manifest_for_entry(entry)
         review_packet = _load_review_packet_for_entry(entry)
+        run_payload = dict(entry)
+        run_payload.update(_console_selected_run(entry) or {})
         return {
-            "run": entry,
+            "run": run_payload,
             "events": [_event_from_history(run_id, item) for item in entry.get("status_history", [])],
             "artifact_manifest": artifact_manifest,
+            "artifacts": _artifact_refs_from_manifest(artifact_manifest),
             "review_packet": review_packet.get("packet") if review_packet.get("present") else None,
             "review_delivery": entry.get("review_delivery"),
         }
 
     @app.get("/runs/{run_id}/events")
-    def get_run_events(run_id: str) -> dict[str, Any]:
+    async def get_run_events(run_id: str) -> dict[str, Any]:
         entry = _get_registry_entry(resolved_settings.registry_path, run_id)
         events = [_event_from_history(run_id, item) for item in entry.get("status_history", [])]
         return {"run_id": run_id, "event_count": len(events), "events": events}
 
     @app.post("/runs/{run_id}/rerun")
-    def rerun(run_id: str, request: RerunRequest) -> dict[str, Any]:
+    async def rerun(run_id: str, request: RerunRequest) -> dict[str, Any]:
         try:
-            return operator_entrypoint.rerun_from_registry(
-                run_id,
-                registry_path=resolved_settings.registry_path,
-                artifact_dir=request.artifact_dir,
-                review_delivery_dir=request.review_delivery_dir or resolved_settings.review_delivery_dir,
-                runner_module=runner_module,
-                task_contracts_module=task_contracts_module,
+            return JSONResponse(
+                content=operator_entrypoint.rerun_from_registry(
+                    run_id,
+                    registry_path=resolved_settings.registry_path,
+                    artifact_dir=request.artifact_dir,
+                    review_delivery_dir=request.review_delivery_dir or resolved_settings.review_delivery_dir,
+                    runner_module=runner_module,
+                    task_contracts_module=task_contracts_module,
+                )
             )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/runs/{run_id}/artifacts")
-    def get_artifacts(run_id: str) -> dict[str, Any]:
+    async def get_artifacts(run_id: str) -> dict[str, Any]:
         entry = _get_registry_entry(resolved_settings.registry_path, run_id)
         manifest = _load_manifest_for_entry(entry)
         artifact_root = entry.get("artifact_root")
@@ -177,29 +205,30 @@ def create_app(
             "artifact_root": artifact_root,
             "artifact_manifest": manifest,
             "artifact_paths": manifest.get("artifact_paths", {}) if manifest else {},
+            "artifacts": _artifact_refs_from_manifest(manifest),
         }
 
     @app.get("/runs/{run_id}/review-packet")
-    def get_review_packet(run_id: str) -> dict[str, Any]:
+    async def get_review_packet(run_id: str) -> dict[str, Any]:
         entry = _get_registry_entry(resolved_settings.registry_path, run_id)
         return _load_review_packet_for_entry(entry)
 
     @app.post("/replay")
-    def replay_case(request: ReplayRequest) -> dict[str, Any]:
+    async def replay_case(request: ReplayRequest) -> dict[str, Any]:
         try:
             return resolved_replay_module.replay_case_from_manifest(request.manifest_path)
         except (FileNotFoundError, ValueError, KeyError, ValidationError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/repeatability")
-    def compare_repeatability(request: RepeatabilityRequest) -> dict[str, Any]:
+    async def compare_repeatability(request: RepeatabilityRequest) -> dict[str, Any]:
         try:
             return resolved_replay_module.compare_repeatability(request.manifest_paths)
         except (FileNotFoundError, ValueError, KeyError, ValidationError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/benchmarks/batch")
-    def run_batch_benchmark(request: BatchBenchmarkRequest) -> dict[str, Any]:
+    async def run_batch_benchmark(request: BatchBenchmarkRequest) -> dict[str, Any]:
         nonlocal resolved_batch_runner_module
         if resolved_batch_runner_module is None:
             resolved_batch_runner_module = _load_batch_runner_module()
@@ -335,14 +364,16 @@ def _get_registry_entry(registry_path: str | Path, run_id: str) -> dict[str, Any
 
 
 def _run_summary(entry: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "run_id": entry.get("run_id"),
-        "case_id": entry.get("case_id"),
-        "status": entry.get("status"),
-        "summary": entry.get("summary"),
-        "created_at": entry.get("created_at"),
-        "updated_at": entry.get("updated_at"),
-    }
+    return Run(
+        run_id=str(entry.get("run_id")),
+        case_id=entry.get("case_id"),
+        status=entry.get("status"),
+        summary=entry.get("summary"),
+        created_at=entry.get("created_at"),
+        updated_at=entry.get("updated_at"),
+        artifact_root=entry.get("artifact_root"),
+        review_required=bool(entry.get("review_required")) or entry.get("status") == "needs_review",
+    ).model_dump()
 
 
 def _select_console_run(runs: list[dict[str, Any]], run_id: str | None) -> dict[str, Any] | None:
@@ -354,14 +385,20 @@ def _select_console_run(runs: list[dict[str, Any]], run_id: str | None) -> dict[
     raise HTTPException(status_code=404, detail=f"Run id not found in registry: {run_id}")
 
 
-def _console_state_payload(selected_entry: dict[str, Any] | None, runs: list[dict[str, Any]]) -> dict[str, Any]:
+def _console_state_payload(
+    selected_entry: dict[str, Any] | None,
+    runs: list[dict[str, Any]],
+    *,
+    tool_registry,
+) -> dict[str, Any]:
     selected_run_id = str(selected_entry.get("run_id")) if selected_entry else None
     return {
         "console": {
             "title": "AI Actuary Operator Console",
             "description": "Symphony-style shell over the existing governed run control plane.",
-            "version": "pr5-shell",
+            "version": "pr8-tool-catalog",
         },
+        "tool_catalog": {"tool_count": len(tool_registry.list_tools()), "tools": tool_registry.list_tool_summaries()},
         "selected_run_id": selected_run_id,
         "selected_run": _console_selected_run(selected_entry),
         "run_cards": [_console_run_card(entry, selected_run_id=selected_run_id) for entry in runs],
@@ -375,16 +412,16 @@ def _console_state_payload(selected_entry: dict[str, Any] | None, runs: list[dic
 def _console_selected_run(entry: dict[str, Any] | None) -> dict[str, Any] | None:
     if entry is None:
         return None
-    return {
-        "run_id": entry.get("run_id"),
-        "case_id": entry.get("case_id"),
-        "status": entry.get("status"),
-        "summary": entry.get("summary"),
-        "created_at": entry.get("created_at"),
-        "updated_at": entry.get("updated_at"),
-        "artifact_root": entry.get("artifact_root"),
-        "review_required": bool(entry.get("review_required")) or entry.get("status") == "needs_review",
-    }
+    return Run(
+        run_id=str(entry.get("run_id")),
+        case_id=entry.get("case_id"),
+        status=entry.get("status"),
+        summary=entry.get("summary"),
+        created_at=entry.get("created_at"),
+        updated_at=entry.get("updated_at"),
+        artifact_root=entry.get("artifact_root"),
+        review_required=bool(entry.get("review_required")) or entry.get("status") == "needs_review",
+    ).model_dump()
 
 
 def _console_run_card(entry: dict[str, Any], *, selected_run_id: str | None) -> dict[str, Any]:
@@ -409,30 +446,35 @@ def _console_timeline(entry: dict[str, Any] | None) -> list[dict[str, Any]]:
 
 def _console_artifact_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
     if entry is None:
-        return {"present": False, "artifact_root": None, "artifact_manifest": None, "artifact_paths": {}}
+        return {"present": False, "artifact_root": None, "artifact_manifest": None, "artifact_paths": {}, "artifacts": []}
     manifest = _load_manifest_for_entry(entry)
     return {
         "present": manifest is not None,
         "artifact_root": entry.get("artifact_root"),
         "artifact_manifest": manifest,
         "artifact_paths": manifest.get("artifact_paths", {}) if manifest else {},
+        "artifacts": _artifact_refs_from_manifest(manifest),
     }
 
 
 def _console_review_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
     if entry is None:
-        return {"present": False, "status": "not_available", "review_required": False, "packet": None}
-    packet = _load_review_packet_for_entry(entry)
-    packet_payload = packet.get("packet") if packet.get("present") else None
-    return {
-        "present": bool(packet.get("present")),
-        "status": (packet_payload or {}).get("status", "not_required"),
-        "review_required": bool(entry.get("review_required")) or entry.get("status") == "needs_review",
-        "packet": packet_payload,
-        "json_path": packet.get("json_path"),
-        "markdown_path": packet.get("markdown_path"),
-        "review_delivery": entry.get("review_delivery"),
-    }
+        review = Review(status="not_available", review_required=False)
+    else:
+        packet = _load_review_packet_for_entry(entry)
+        packet_payload = packet.get("packet") if packet.get("present") else None
+        review = Review(
+            status=(packet_payload or {}).get("status", "not_required"),
+            review_required=bool(entry.get("review_required")) or entry.get("status") == "needs_review",
+            decision=None,
+            packet=packet_payload,
+            json_path=packet.get("json_path"),
+            markdown_path=packet.get("markdown_path"),
+            review_delivery=entry.get("review_delivery"),
+        )
+    payload = review.model_dump()
+    payload["present"] = payload["packet"] is not None
+    return payload
 
 
 def _console_action_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
@@ -447,6 +489,7 @@ def _console_action_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
                 "method": "POST",
                 "path": f"/runs/{run_id}/rerun",
                 "enabled": bool(run_id),
+                "semantics": RerunSemantics(source_run_id=str(run_id)).model_dump(),
             }
         ]
     }
@@ -454,26 +497,16 @@ def _console_action_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
 
 def _event_from_history(run_id: str, history_item: dict[str, Any]) -> dict[str, Any]:
     status = history_item.get("status")
-    return {
-        "event_type": _event_type_for_status(status),
-        "run_id": run_id,
-        "timestamp": history_item.get("timestamp"),
-        "status": status,
-        "summary": history_item.get("summary"),
-        "payload": dict(history_item),
-    }
-
-
-def _event_type_for_status(status: Any) -> str:
-    mapping = {
-        "accepted": "run.accepted",
-        "queued": "run.queued",
-        "running": "run.running",
-        "completed": "run.completed",
-        "needs_review": "run.needs_review",
-        "failed": "run.failed",
-    }
-    return mapping.get(str(status), f"run.{status}")
+    event = RunEvent(
+        type=run_event_type_for_status(status),
+        run_id=run_id,
+        timestamp=history_item.get("timestamp"),
+        status=status,
+        summary=history_item.get("summary"),
+        payload=dict(history_item),
+    ).model_dump()
+    event["event_type"] = event["type"]
+    return event
 
 
 def _load_manifest_for_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
@@ -499,6 +532,28 @@ def _load_review_packet_for_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "json_path": str(packet_json),
         "markdown_path": str(markdown_path) if markdown_path is not None else None,
     }
+
+
+def _artifact_refs_from_manifest(manifest: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if manifest is None:
+        return []
+    artifact_paths = manifest.get("artifact_paths", {}) or {}
+    artifact_root = manifest.get("artifact_root")
+    root = Path(artifact_root).expanduser() if artifact_root else None
+    artifacts = []
+    for artifact_id, path in artifact_paths.items():
+        artifact_path = Path(str(path)).expanduser()
+        if not artifact_path.is_absolute() and root is not None:
+            artifact_path = root / artifact_path
+        artifacts.append(
+            ArtifactRef(
+                artifact_id=str(artifact_id),
+                label=str(artifact_id).replace("_", " "),
+                path=str(artifact_path),
+                present=artifact_path.exists(),
+            ).model_dump()
+        )
+    return artifacts
 
 
 def _review_packet_paths(entry: dict[str, Any]) -> dict[str, str | None]:
@@ -548,7 +603,7 @@ def _operator_console_html() -> str:
     h1, h2 { margin: 0 0 12px; }
     h2 { font-size: 16px; }
     label { display: block; margin: 10px 0; font-size: 13px; color: var(--muted); }
-    input { box-sizing: border-box; width: 100%; margin-top: 4px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; color: #102a43; background: white; }
+    input, select { box-sizing: border-box; width: 100%; margin-top: 4px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; color: #102a43; background: white; }
     input[type="checkbox"] { width: auto; margin-right: 6px; }
     button, .pill { border: 1px solid var(--border); border-radius: 999px; padding: 6px 10px; background: #f8fafc; cursor: pointer; }
     button.primary { border-color: var(--accent); background: var(--accent); color: white; }
@@ -579,7 +634,11 @@ def _operator_console_html() -> str:
       <form id="create-run-form" onsubmit="createRun(event)">
         <label>case_id<input name="case_id" required placeholder="demo-case"></label>
         <label>sample_name<input name="sample_name" value="RAA"></label>
-        <label>method<input name="method" value="chainladder"></label>
+        <label>tool
+          <select id="tool-selector" name="method" data-default-tool-id="chainladder">
+            <option value="chainladder">Loading tool catalog…</option>
+          </select>
+        </label>
         <label>review_threshold_origin_count<input name="review_threshold_origin_count" type="number" min="0" step="1" placeholder="optional"></label>
         <label><input name="background" type="checkbox" checked> background</label>
         <button id="create-run-button" class="primary" type="submit">Create run</button>
@@ -642,6 +701,38 @@ def _operator_console_html() -> str:
         throw new Error(`${context} failed (${response.status} ${response.statusText})${detail}`);
       }
       return payload;
+    }
+
+    async function loadToolCatalog() {
+      const selector = document.getElementById("tool-selector");
+      try {
+        const response = await fetch("/tools");
+        const payload = await parseJsonOrThrow(response, "Tool catalog");
+        const tools = payload.tools || [];
+        if (!tools.length) return;
+        selector.innerHTML = "";
+        for (const tool of tools) {
+          const option = document.createElement("option");
+          option.value = tool.method || tool.tool_id;
+          option.textContent = tool.title ? `${tool.title} (${tool.tool_id})` : (tool.tool_id || tool.method || "tool");
+          if ((tool.tool_id || tool.method) === selector.dataset.defaultToolId) {
+            option.selected = true;
+          }
+          selector.appendChild(option);
+        }
+        if (!selector.value && tools.length) {
+          selector.value = tools[0].method || tools[0].tool_id;
+        }
+      } catch (error) {
+        const fallback = selector.querySelector("option[value='chainladder']") || selector.options[0];
+        if (fallback) {
+          fallback.value = fallback.value || "chainladder";
+          fallback.textContent = "Chainladder (chainladder)";
+          fallback.selected = true;
+        }
+        const message = error instanceof Error ? error.message : "Tool catalog unavailable; using default tool.";
+        setOperationStatus(message, "error");
+      }
     }
 
     function renderTimeline(events) {
@@ -837,7 +928,11 @@ def _operator_console_html() -> str:
       }
     }
 
-    loadConsole();
+    Promise.all([loadToolCatalog(), loadConsole()]).catch((error) => {
+      const message = error instanceof Error ? error.message : "Failed to initialize console.";
+      renderConsoleError(message);
+      setOperationStatus(message, "error");
+    });
   </script>
 </body>
 </html>"""
