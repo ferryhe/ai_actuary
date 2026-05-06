@@ -72,11 +72,15 @@ def run_operator_flow(
     runner_module=None,
     task_contracts_module=None,
 ):
-    normalized_validated_input = validated_input or _build_validated_input_payload(
-        case_id=case_id,
-        sample_name=sample_name,
-        method=method,
-        review_threshold_origin_count=review_threshold_origin_count,
+    normalized_validated_input = (
+        validated_input
+        if validated_input is not None
+        else _build_validated_input_payload(
+            case_id=case_id,
+            sample_name=sample_name,
+            method=method,
+            review_threshold_origin_count=review_threshold_origin_count,
+        )
     )
     validated_input_path = _write_validated_input_artifact(artifact_dir, normalized_validated_input)
     task = build_operator_task(

@@ -109,6 +109,22 @@ def test_run_operator_flow_returns_governed_result(tmp_path):
     assert "review_packet" not in result
 
 
+def test_run_operator_flow_preserves_explicit_empty_validated_input(tmp_path):
+    module = _load_module()
+
+    result = module.run_operator_flow(
+        case_id="operator-case",
+        artifact_dir=tmp_path,
+        objective="Operator flow",
+        validated_input={},
+        runner_module=FakeRunnerModule,
+        task_contracts_module=FakeTaskContractsModule,
+    )
+
+    validated_input_path = Path(result["worker_result"]["artifact_paths"]["validated_input"])
+    assert json.loads(validated_input_path.read_text(encoding="utf-8")) == {}
+
+
 class MissingRunIdRunnerModule:
     @staticmethod
     def run_openai_governed_workflow(task, *, user_prompt=None):

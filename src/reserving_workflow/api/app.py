@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from reserving_workflow import operator_entrypoint
 from reserving_workflow.artifacts import replay as replay_helpers
-from reserving_workflow.artifacts.storage import read_json_artifact, resolve_artifact_path, write_json_artifact
+from reserving_workflow.artifacts.storage import read_json_artifact, resolve_artifact_path
 from reserving_workflow.contracts.control_plane import (
     ArtifactRef,
     ChainladderToolInput,
