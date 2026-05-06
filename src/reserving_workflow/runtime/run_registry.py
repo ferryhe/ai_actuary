@@ -5,13 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from reserving_workflow.storage.local import DEFAULT_REGISTRY_PAYLOAD, LocalRunStore, resolve_registry_path
-
-
-def resolve_registry_path(path: str | Path) -> Path:
-    target = Path(path).expanduser().resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    return target
+from reserving_workflow.storage.local import DEFAULT_REGISTRY_PAYLOAD, LocalRunStore, RunNotFoundError, resolve_registry_path
 
 
 def record_run_event(
@@ -44,9 +38,7 @@ def record_run_event(
             errors=errors,
             review_delivery=review_delivery,
         )
-    except ValueError as exc:
-        if "Run id not found in registry" not in str(exc):
-            raise
+    except RunNotFoundError:
         return store.create_run(
             task_id=task_id,
             case_id=case_id,

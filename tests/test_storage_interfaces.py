@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -109,7 +108,9 @@ def test_local_review_store_creates_and_updates_artifact_backed_reviews(tmp_path
 
     assert isinstance(store, ReviewStore)
     assert created["status"] == "pending"
+    assert created["created_at"] == created["updated_at"]
     assert decided["decision"] == "approved"
+    assert decided["decided_at"] == loaded["updated_at"]
     assert loaded["decision"]["decision"] == "approved"
     assert review_record["run_id"] == "run-001"
     assert review_record["packet"] == {"status": "review_required"}
@@ -133,8 +134,21 @@ def test_local_review_store_rejects_duplicate_review_id_without_overwriting_deci
     assert decision["decision"] == "approved"
 
 
-def test_local_review_store_rejects_decision_for_missing_review(tmp_path):
-    store = LocalReviewStore(tmp_path / "reviews")
+def test_local_review_store_rejects_decision_for_missing_review_without_creating_directory(tmp_path):
+    root = tmp_path / "reviews"
+    store = LocalReviewStore(root)
 
     with pytest.raises(ValueError, match="Review id not found"):
         store.submit_decision(review_id="missing-review", decision="approved")
+
+    assert not (root / "missing-review").exists()
+
+
+def test_local_review_store_rejects_nested_review_ids(tmp_path):
+    store = LocalReviewStore(tmp_path / "reviews")
+
+    with pytest.raises(ValueError, match="review_id must be a single safe path component"):
+        store.create_review(review_id="nested/review", run_id="run-001", case_id="case-001", status="pending")
+
+    with pytest.raises(ValueError, match="review_id must be a single safe path component"):
+        store.submit_decision(review_id="nested/review", decision="approved")

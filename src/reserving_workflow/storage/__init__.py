@@ -1,7 +1,7 @@
 """Storage boundaries and local adapters for the operator control plane."""
 
 from .interfaces import ArtifactStore, ReviewStore, RunStore
-from .local import LocalArtifactStore, LocalReviewStore, LocalRunStore
+from .local import LocalArtifactStore, LocalReviewStore, LocalRunStore, ReviewNotFoundError, RunNotFoundError
 
 __all__ = [
     "ArtifactStore",
@@ -10,4 +10,6 @@ __all__ = [
     "LocalArtifactStore",
     "LocalReviewStore",
     "LocalRunStore",
+    "ReviewNotFoundError",
+    "RunNotFoundError",
 ]

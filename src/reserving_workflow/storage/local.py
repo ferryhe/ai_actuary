@@ -14,6 +14,14 @@ from reserving_workflow.contracts.control_plane import validate_run_status
 DEFAULT_REGISTRY_PAYLOAD = {"runs": []}
 
 
+class RunNotFoundError(ValueError):
+    """Raised when a run id is absent from the local registry."""
+
+
+class ReviewNotFoundError(ValueError):
+    """Raised when a review id is absent from the local review store."""
+
+
 class LocalRunStore:
     """Adapter over the existing local JSON run registry."""
 
@@ -35,8 +43,6 @@ class LocalRunStore:
         errors: list[str] | None = None,
         review_delivery: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if any(entry.get("run_id") == run_id for entry in self.list_runs()):
-            raise ValueError(f"Run id already exists in registry: {run_id}")
         return self._upsert_run(
             task_id=task_id,
             case_id=case_id,
@@ -50,6 +56,7 @@ class LocalRunStore:
             errors=errors,
             review_delivery=review_delivery,
             create_if_missing=True,
+            reject_existing=True,
         )
 
     def update_run_status(
@@ -80,6 +87,7 @@ class LocalRunStore:
             errors=errors,
             review_delivery=review_delivery,
             create_if_missing=False,
+            reject_existing=False,
         )
 
     def append_event(self, *, run_id: str, status: str, summary: str | None = None) -> dict[str, Any]:
@@ -102,7 +110,7 @@ class LocalRunStore:
         for entry in self.list_runs():
             if entry.get("run_id") == run_id:
                 return entry
-        raise ValueError(f"Run id not found in registry: {run_id}")
+        raise RunNotFoundError(f"Run id not found in registry: {run_id}")
 
     def list_runs(self) -> list[dict[str, Any]]:
         payload = _read_registry_payload(self.registry_path)
@@ -124,6 +132,7 @@ class LocalRunStore:
         errors: list[str] | None,
         review_delivery: dict[str, Any] | None,
         create_if_missing: bool,
+        reject_existing: bool,
     ) -> dict[str, Any]:
         status = validate_run_status(status)
         payload = _read_registry_payload(self.registry_path)
@@ -134,9 +143,12 @@ class LocalRunStore:
         if summary is not None:
             history_item["summary"] = summary
 
+        if entry is not None and reject_existing:
+            raise ValueError(f"Run id already exists in registry: {run_id}")
+
         if entry is None:
             if not create_if_missing:
-                raise ValueError(f"Run id not found in registry: {run_id}")
+                raise RunNotFoundError(f"Run id not found in registry: {run_id}")
             entry = {
                 "task_id": task_id,
                 "case_id": case_id,
@@ -241,9 +253,10 @@ class LocalReviewStore:
         assigned_to: str | None = None,
         packet: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        review_path = resolve_artifact_path(self.root, Path(review_id) / "review_record.json")
+        review_path = self._review_path(review_id, create_parent=True)
         if review_path.exists():
             raise ValueError(f"Review id already exists: {review_id}")
+        now = _utc_now()
         record = {
             "review_id": review_id,
             "run_id": run_id,
@@ -252,8 +265,8 @@ class LocalReviewStore:
             "reason_codes": list(reason_codes or []),
             "assigned_to": assigned_to,
             "packet": _to_serializable(packet),
-            "created_at": _utc_now(),
-            "updated_at": _utc_now(),
+            "created_at": now,
+            "updated_at": now,
             "decision": None,
         }
         self.artifact_store.write_artifact(
@@ -273,17 +286,18 @@ class LocalReviewStore:
         follow_up_run_id: str | None = None,
     ) -> dict[str, Any]:
         review = self.get_review(review_id)
+        now = _utc_now()
         decision_record = {
             "review_id": review_id,
             "run_id": review["run_id"],
             "decision": decision,
             "comment": comment,
             "decided_by": decided_by,
-            "decided_at": _utc_now(),
+            "decided_at": now,
             "follow_up_run_id": follow_up_run_id,
         }
         review["decision"] = decision_record
-        review["updated_at"] = _utc_now()
+        review["updated_at"] = now
         self.artifact_store.write_artifact(
             root=self.root,
             relative_path=Path(review_id) / "review_record.json",
@@ -297,10 +311,21 @@ class LocalReviewStore:
         return decision_record
 
     def get_review(self, review_id: str) -> dict[str, Any]:
-        review_path = resolve_artifact_path(self.root, Path(review_id) / "review_record.json")
+        review_path = self._review_path(review_id, create_parent=False)
         if not review_path.exists():
-            raise ValueError(f"Review id not found: {review_id}")
+            raise ReviewNotFoundError(f"Review id not found: {review_id}")
         return self.artifact_store.read_artifact(review_path)
+
+    def _review_path(self, review_id: str, *, create_parent: bool) -> Path:
+        _validate_artifact_component(review_id, field_name="review_id")
+        path = (self.root / review_id / "review_record.json").resolve()
+        try:
+            path.relative_to(self.root)
+        except ValueError as exc:
+            raise ValueError(f"Review path escapes review root: {review_id}") from exc
+        if create_parent:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        return path
 
 
 def resolve_registry_path(path: str | Path) -> Path:
@@ -327,6 +352,11 @@ def resolve_artifact_path(root: str | Path, relative_path: str | Path) -> Path:
         raise ValueError(f"Artifact path escapes artifact root: {relative_path}") from exc
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _validate_artifact_component(value: str, *, field_name: str) -> None:
+    if not value or Path(value).name != value or value in {".", ".."}:
+        raise ValueError(f"{field_name} must be a single safe path component: {value!r}")
 
 
 def _read_registry_payload(path: Path) -> dict[str, Any]:
