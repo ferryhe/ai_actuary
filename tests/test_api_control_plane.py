@@ -462,6 +462,7 @@ def test_console_shell_serves_operator_console_html(tmp_path):
     assert "Timeline" in html
     assert "Artifact Panel" in html
     assert "Review Panel" in html
+    assert "Review Inbox" in html
     assert "Action Panel" in html
     assert "/console/state" in html
     assert "renderConsoleError" in html
@@ -476,8 +477,10 @@ def test_console_shell_serves_operator_console_html(tmp_path):
     assert "createRun(" in html
     assert "pollRunEvents(" in html
     assert "runConsoleAction(" in html
+    assert "submitReviewDecision(" in html
     assert "loadToolCatalog()" in html
     assert "fetch(\"/tools\")" in html
+    assert "fetch(`/reviews/${encodeURIComponent(reviewId)}/decision`" in html
     assert "Tool catalog unavailable; using default tool." in html
     assert "fallback.selected = true" in html
 
@@ -500,6 +503,9 @@ def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path)
     assert "method: String(formData.get(\"tool_id\") || \"chainladder\")" in html
     assert "Tool catalog" in html
     assert "fetch(`/runs/${encodeURIComponent(runId)}/events`)" in html
+    assert "review-inbox" in html
+    assert "review-id-input" in html
+    assert "changes_requested" in html
     assert "run.accepted" in html
     assert "run.queued" in html
     assert "run.running" in html
@@ -513,6 +519,7 @@ def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path)
     assert "pollGeneration += 1" in html
     assert "runId === selectedRunId" in html
     assert "if (!isCurrentPoll()) return" in html
+    assert "No review selected for decision submission." in html
 
 
 def test_console_state_exposes_symphony_style_panels(tmp_path):
@@ -547,7 +554,10 @@ def test_console_state_exposes_symphony_style_panels(tmp_path):
         "run.needs_review",
     ]
     assert state["artifact_panel"]["artifact_root"]
+    assert state["review_inbox"][0]["review_id"].startswith("review-")
+    assert state["review_inbox"][0]["status"] == "review_required"
     assert state["review_panel"]["present"] is True
+    assert state["review_panel"]["review_id"].startswith("review-")
     assert state["review_panel"]["status"] == "review_required"
     assert [action["action_id"] for action in state["action_panel"]["actions"]] == ["rerun"]
     assert state["action_panel"]["actions"][0]["semantics"]["creates_distinct_run"] is True
@@ -615,6 +625,61 @@ def test_review_packet_endpoint_returns_packet_metadata(tmp_path):
     assert payload["present"] is True
     assert payload["packet"]["status"] == "review_required"
     assert payload["markdown_path"].endswith("review_packet.md")
+
+
+def test_review_endpoints_materialize_review_records_and_list_inbox(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path, runner_module=ReviewRunnerModule)
+    run = client.post("/runs", json={"case_id": "review-inbox-case"}).json()
+
+    run_review = client.get(f"/runs/{run['run_id']}/review")
+    reviews = client.get("/reviews")
+    review_id = run_review.json()["review"]["review_id"]
+    detail = client.get(f"/reviews/{review_id}")
+
+    assert run_review.status_code == 200
+    assert run_review.json()["review"]["status"] == "review_required"
+    assert reviews.status_code == 200
+    assert reviews.json()["review_count"] == 1
+    assert reviews.json()["reviews"][0]["review_id"] == review_id
+    assert detail.status_code == 200
+    assert detail.json()["review"]["run_id"] == run["run_id"]
+
+
+def test_review_decision_submission_writes_independent_artifacts_without_mutating_run_status(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path, runner_module=ReviewRunnerModule)
+    run = client.post("/runs", json={"case_id": "decision-case"}).json()
+    review = client.get(f"/runs/{run['run_id']}/review").json()["review"]
+
+    response = client.post(
+        f"/reviews/{review['review_id']}/decision",
+        json={"decision": "changes_requested", "comment": "Please rerun with updated assumptions.", "decided_by": "actuary-001"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["decision"]["decision"] == "changes_requested"
+    assert payload["run_status"] == "needs_review"
+    assert payload["review"]["status"] == "review_decided"
+    run_detail = client.get(f"/runs/{run['run_id']}").json()
+    decision_json_path = Path(run_detail["run"]["artifact_root"]) / "review_decision.json"
+    decision_md_path = Path(run_detail["run"]["artifact_root"]) / "review_decision.md"
+    assert json.loads(decision_json_path.read_text(encoding="utf-8"))["decision"] == "changes_requested"
+    assert "updated assumptions" in decision_md_path.read_text(encoding="utf-8")
+    assert run_detail["run"]["status"] == "needs_review"
+    assert run_detail["artifact_manifest"]["artifact_paths"]["review_decision"] == str(decision_json_path)
+
+
+def test_review_decision_endpoint_rejects_invalid_decision_values(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path, runner_module=ReviewRunnerModule)
+    run = client.post("/runs", json={"case_id": "bad-decision-case"}).json()
+    review = client.get(f"/runs/{run['run_id']}/review").json()["review"]
+
+    response = client.post(f"/reviews/{review['review_id']}/decision", json={"decision": "pending"})
+
+    assert response.status_code == 400
 
 
 def test_replay_and_repeatability_endpoints_wrap_existing_helpers(tmp_path):

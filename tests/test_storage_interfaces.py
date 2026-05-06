@@ -122,7 +122,7 @@ def test_local_review_store_creates_and_updates_artifact_backed_reviews(tmp_path
         review_id="review-001",
         run_id="run-001",
         case_id="case-001",
-        status="pending",
+        status="review_required",
         reason_codes=["origin_count_below_threshold"],
         packet={"status": "review_required"},
     )
@@ -137,26 +137,31 @@ def test_local_review_store_creates_and_updates_artifact_backed_reviews(tmp_path
     review_dir = tmp_path / "reviews" / "review-001"
     review_record = json.loads((review_dir / "review_record.json").read_text(encoding="utf-8"))
     review_decision = json.loads((review_dir / "review_decision.json").read_text(encoding="utf-8"))
+    review_decision_markdown = (review_dir / "review_decision.md").read_text(encoding="utf-8")
 
     assert isinstance(store, ReviewStore)
-    assert created["status"] == "pending"
+    assert created["status"] == "review_required"
     assert created["created_at"] == created["updated_at"]
     assert decided["decision"] == "approved"
     assert decided["decided_at"] == loaded["updated_at"]
     assert loaded["decision"]["decision"] == "approved"
+    assert loaded["status"] == "review_decided"
     assert review_record["run_id"] == "run-001"
     assert review_record["packet"] == {"status": "review_required"}
     assert review_decision["comment"] == "Looks good."
     assert review_decision["decided_by"] == "actuary-001"
+    assert "Review Decision" in review_decision_markdown
+    assert store.get_review_for_run("run-001")["review_id"] == "review-001"
+    assert store.list_reviews()[0]["review_id"] == "review-001"
 
 
 def test_local_review_store_rejects_duplicate_review_id_without_overwriting_decision(tmp_path):
     store = LocalReviewStore(tmp_path / "reviews")
-    store.create_review(review_id="review-001", run_id="run-001", case_id="case-001", status="pending")
+    store.create_review(review_id="review-001", run_id="run-001", case_id="case-001", status="review_required")
     store.submit_decision(review_id="review-001", decision="approved", comment="Approved")
 
     with pytest.raises(ValueError, match="Review id already exists"):
-        store.create_review(review_id="review-001", run_id="run-002", case_id="case-002", status="pending")
+        store.create_review(review_id="review-001", run_id="run-002", case_id="case-002", status="review_required")
 
     loaded = store.get_review("review-001")
     decision_path = tmp_path / "reviews" / "review-001" / "review_decision.json"
@@ -180,7 +185,7 @@ def test_local_review_store_rejects_nested_review_ids(tmp_path):
     store = LocalReviewStore(tmp_path / "reviews")
 
     with pytest.raises(ValueError, match="review_id must be a single safe path component"):
-        store.create_review(review_id="nested/review", run_id="run-001", case_id="case-001", status="pending")
+        store.create_review(review_id="nested/review", run_id="run-001", case_id="case-001", status="review_required")
 
     with pytest.raises(ValueError, match="review_id must be a single safe path component"):
         store.submit_decision(review_id="nested/review", decision="approved")

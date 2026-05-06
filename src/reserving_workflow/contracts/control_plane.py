@@ -25,8 +25,8 @@ RunEventType = Literal[
     "workflow.step.needs_review",
     "workflow.step.failed",
 ]
-ReviewStatus = Literal["not_available", "not_required", "review_required"]
-ReviewDecision = Literal["not_required", "pending", "approved", "rejected"]
+ReviewStatus = Literal["not_available", "not_required", "review_required", "review_decided"]
+ReviewDecisionValue = Literal["approved", "rejected", "changes_requested"]
 
 _RUN_EVENT_TYPE_BY_STATUS: dict[str, RunEventType] = {
     "accepted": "run.accepted",
@@ -114,11 +114,37 @@ class RunEvent(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class ReviewDecisionArtifact(BaseModel):
+    artifact_id: str
+    path: str | None = None
+    label: str | None = None
+    present: bool = False
+
+
+class ReviewDecision(BaseModel):
+    review_id: str
+    run_id: str
+    decision: ReviewDecisionValue
+    comment: str | None = None
+    decided_by: str | None = None
+    decided_at: str | None = None
+    follow_up_run_id: str | None = None
+    artifacts: list[ReviewDecisionArtifact] = Field(default_factory=list)
+
+
 class Review(BaseModel):
     status: ReviewStatus
+    review_id: str | None = None
+    run_id: str | None = None
+    case_id: str | None = None
     review_required: bool = False
     decision: ReviewDecision | None = None
+    reason_codes: list[str] = Field(default_factory=list)
+    assigned_to: str | None = None
     packet: dict[str, Any] | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    record_path: str | None = None
     json_path: str | None = None
     markdown_path: str | None = None
     review_delivery: dict[str, Any] | None = None

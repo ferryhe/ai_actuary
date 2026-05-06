@@ -105,6 +105,10 @@ The local FastAPI wrapper also exposes:
 - `GET /workflows/{workflow_id}`
 - `POST /runs`
 - `POST /runs/{run_id}/rerun`
+- `GET /reviews`
+- `GET /reviews/{review_id}`
+- `GET /runs/{run_id}/review`
+- `POST /reviews/{review_id}/decision`
 
 ---
 
@@ -152,6 +156,7 @@ python scripts/run_governed_case.py \
 
 - `needs_review` means the workflow executed successfully but governance escalated the case
 - `failed` means the run did not complete successfully
+- `approved`, `rejected`, and `changes_requested` are review decisions, not run statuses
 - worker-side invalid input failures expose structured metadata under `worker_result.worker_metadata`, including `failure_category`, `failure_stage`, and `error_type`
 - PR9 keeps the legacy `method` alias but normalizes `POST /runs` into stable `tool_id` plus `inputs.method_variant`, and writes `validated_input.json` into the run artifact set
 
@@ -179,6 +184,15 @@ python scripts/run_governed_case.py \
 **Step 2 — Agent system:** the worker produces governance outputs and, when required, writes `review_packet.json` and `review_packet.md`.
 
 **Step 3 — Human:** inspect `constitution_check.json`, then read `review_packet.md`.
+
+**Step 4 — Human:** review through the console or API inbox, for example:
+
+```bash
+curl http://127.0.0.1:8000/reviews
+curl -X POST http://127.0.0.1:8000/reviews/<review_id>/decision \
+  -H 'content-type: application/json' \
+  -d '{"decision":"changes_requested","comment":"Re-run with updated assumptions.","decided_by":"actuary-001"}'
+```
 
 ### C. Run a batch benchmark comparison
 
@@ -290,7 +304,7 @@ Key routes:
 - `POST /repeatability`
 - `POST /benchmarks/batch`
 
-The `/runs/{run_id}` detail payload includes derived `events` such as `run.queued`, `run.running`, and `run.completed`. Workflow-backed runs keep that same outer lifecycle and append ordered workflow events like `workflow.started`, `workflow.step.started`, `workflow.step.completed`, and `workflow.completed`, with a top-level `run_manifest.json` pointing at workflow summary and step manifests. PR5 adds `/console` and `/console/state` on top of the same data, giving operators a simple run queue, timeline, artifact panel, review panel, and rerun action panel without introducing a second runtime contract or a frontend build system. PR6 adds a bounded background execution mode: `POST /runs` can return `202 accepted` with a `run.accepted` event, then the existing operator flow appends `run.queued`, `run.running`, and the final lifecycle event for polling through `/runs/{run_id}/events`. PR7 keeps the same lightweight shell but makes it operational: the console can create governed runs through `POST /runs`, poll background lifecycle events through `GET /runs/{run_id}/events`, and trigger the existing rerun contract through `POST /runs/{run_id}/rerun`.
+The `/runs/{run_id}` detail payload includes derived `events` such as `run.queued`, `run.running`, and `run.completed`. Workflow-backed runs keep that same outer lifecycle and append ordered workflow events like `workflow.started`, `workflow.step.started`, `workflow.step.completed`, and `workflow.completed`, with a top-level `run_manifest.json` pointing at workflow summary and step manifests. PR5 adds `/console` and `/console/state` on top of the same data, giving operators a simple run queue, timeline, artifact panel, review panel, and rerun action panel without introducing a second runtime contract or a frontend build system. PR6 adds a bounded background execution mode: `POST /runs` can return `202 accepted` with a `run.accepted` event, then the existing operator flow appends `run.queued`, `run.running`, and the final lifecycle event for polling through `/runs/{run_id}/events`. PR7 keeps the same lightweight shell but makes it operational: the console can create governed runs through `POST /runs`, poll background lifecycle events through `GET /runs/{run_id}/events`, and trigger the existing rerun contract through `POST /runs/{run_id}/rerun`. PR12 extends that shell with a review inbox and review decision form backed by `GET /reviews`, `GET /runs/{run_id}/review`, and `POST /reviews/{review_id}/decision`.
 
 The console intentionally remains text-contract first. PR9 moves the create-run payload to a tool-backed shape: `case_id`, `tool_id`, `inputs`, and `background`, while preserving the legacy top-level `method` alias for compatibility. PR11 adds builtin workflow templates discoverable through `GET /workflows`, and `POST /runs` can now also accept `workflow_id` while preserving the legacy single-tool path unchanged. For the built-in deterministic path the normalized payload is `tool_id="chainladder"` with `inputs.method_variant="chainladder"`, and each run now writes `validated_input.json` alongside `run_manifest.json`.
 

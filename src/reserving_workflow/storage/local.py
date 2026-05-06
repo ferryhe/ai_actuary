@@ -326,6 +326,7 @@ class LocalReviewStore:
             "follow_up_run_id": follow_up_run_id,
         }
         review["decision"] = decision_record
+        review["status"] = "review_decided"
         review["updated_at"] = now
         self.artifact_store.write_artifact(
             root=self.root,
@@ -337,6 +338,12 @@ class LocalReviewStore:
             relative_path=Path(review_id) / "review_decision.json",
             payload=decision_record,
         )
+        self.artifact_store.write_artifact(
+            root=self.root,
+            relative_path=Path(review_id) / "review_decision.md",
+            payload=_render_review_decision_markdown(review, decision_record),
+            format="text",
+        )
         return decision_record
 
     def get_review(self, review_id: str) -> dict[str, Any]:
@@ -344,6 +351,20 @@ class LocalReviewStore:
         if not review_path.exists():
             raise ReviewNotFoundError(f"Review id not found: {review_id}")
         return self.artifact_store.read_artifact(review_path)
+
+    def get_review_for_run(self, run_id: str) -> dict[str, Any] | None:
+        for review in self.list_reviews():
+            if review.get("run_id") == run_id:
+                return review
+        return None
+
+    def list_reviews(self) -> list[dict[str, Any]]:
+        reviews: list[dict[str, Any]] = []
+        if not self.root.exists():
+            return reviews
+        for review_path in self.root.glob("*/review_record.json"):
+            reviews.append(self.artifact_store.read_artifact(review_path))
+        return sorted(reviews, key=lambda item: item.get("updated_at", ""), reverse=True)
 
     def _review_path(self, review_id: str, *, create_parent: bool) -> Path:
         _validate_artifact_component(review_id, field_name="review_id")
@@ -419,3 +440,21 @@ def _to_serializable(payload: Any) -> Any:
     if isinstance(payload, (list, tuple)):
         return [_to_serializable(item) for item in payload]
     return payload
+
+
+def _render_review_decision_markdown(review: dict[str, Any], decision_record: dict[str, Any]) -> str:
+    lines = [
+        "# Review Decision",
+        "",
+        f"- review_id: {review.get('review_id')}",
+        f"- run_id: {review.get('run_id')}",
+        f"- case_id: {review.get('case_id')}",
+        f"- decision: {decision_record.get('decision')}",
+        f"- decided_by: {decision_record.get('decided_by') or 'unknown'}",
+        f"- decided_at: {decision_record.get('decided_at')}",
+    ]
+    if decision_record.get("follow_up_run_id"):
+        lines.append(f"- follow_up_run_id: {decision_record['follow_up_run_id']}")
+    if decision_record.get("comment"):
+        lines.extend(["", "## Comment", "", str(decision_record["comment"])])
+    return "\n".join(lines) + "\n"
