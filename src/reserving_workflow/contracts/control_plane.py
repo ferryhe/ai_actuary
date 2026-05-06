@@ -27,6 +27,7 @@ RunEventType = Literal[
 ]
 ReviewStatus = Literal["not_available", "not_required", "review_required", "review_decided"]
 ReviewDecisionValue = Literal["approved", "rejected", "changes_requested"]
+AgentExecutionMode = Literal["background", "inline"]
 
 _RUN_EVENT_TYPE_BY_STATUS: dict[str, RunEventType] = {
     "accepted": "run.accepted",
@@ -162,6 +163,78 @@ class RerunSemantics(BaseModel):
     overrideable_fields: tuple[str, ...] = ("artifact_dir", "review_delivery_dir")
 
 
+class AgentPlanningRequest(BaseModel):
+    case_id: str
+    objective: str
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    available_tool_ids: list[str] = Field(default_factory=list)
+    available_workflow_ids: list[str] = Field(default_factory=list)
+    user_prompt: str | None = None
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentExecutionPlan(BaseModel):
+    case_id: str
+    objective: str
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    tool_id: str | None = None
+    workflow_id: str | None = None
+    user_prompt: str | None = None
+    operator_id: str | None = None
+    workspace_id: str | None = None
+    created_by: str | None = None
+    background: bool = True
+
+    @model_validator(mode="after")
+    def _validate_single_target(self) -> "AgentExecutionPlan":
+        targets = [self.tool_id is not None, self.workflow_id is not None]
+        if sum(targets) != 1:
+            raise ValueError("Exactly one of tool_id or workflow_id must be provided.")
+        return self
+
+    def to_run_create_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "case_id": self.case_id,
+            "objective": self.objective,
+            "inputs": dict(self.inputs),
+            "background": self.background,
+        }
+        if self.tool_id is not None:
+            payload["tool_id"] = self.tool_id
+        if self.workflow_id is not None:
+            payload["workflow_id"] = self.workflow_id
+        if self.user_prompt is not None:
+            payload["user_prompt"] = self.user_prompt
+        if self.operator_id is not None:
+            payload["operator_id"] = self.operator_id
+        if self.workspace_id is not None:
+            payload["workspace_id"] = self.workspace_id
+        if self.created_by is not None:
+            payload["created_by"] = self.created_by
+        return payload
+
+
+class AgentRunHandle(BaseModel):
+    run_id: str
+    case_id: str
+    status: RunStatus
+    summary: str | None = None
+    execution_mode: AgentExecutionMode | None = None
+
+
+class AgentRunSummary(BaseModel):
+    run_id: str
+    case_id: str | None = None
+    status: RunStatus
+    summary: str | None = None
+    terminal: bool = False
+    event_count: int = 0
+    last_event_type: RunEventType | None = None
+    artifact_ids: list[str] = Field(default_factory=list)
+    review_status: ReviewStatus = "not_available"
+    review_required: bool = False
+
+
 def validate_run_status(status: Any) -> RunStatus:
     candidate = str(status)
     if candidate not in _RUN_EVENT_TYPE_BY_STATUS:
@@ -171,3 +244,7 @@ def validate_run_status(status: Any) -> RunStatus:
 
 def run_event_type_for_status(status: Any) -> RunEventType:
     return _RUN_EVENT_TYPE_BY_STATUS[validate_run_status(status)]
+
+
+def is_terminal_run_status(status: Any) -> bool:
+    return validate_run_status(status) in {"completed", "needs_review", "failed"}

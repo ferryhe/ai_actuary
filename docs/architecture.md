@@ -43,6 +43,7 @@ Responsibilities:
 Primary files:
 
 - `workflows/agent-runtimes/openai-agents/agents.py`
+- `workflows/agent-runtimes/openai-agents/planner_adapter.py`
 - `workflows/agent-runtimes/openai-agents/routing.py`
 - `workflows/agent-runtimes/openai-agents/tools.py`
 - `workflows/agent-runtimes/openai-agents/runner.py`
@@ -50,6 +51,7 @@ Primary files:
 Responsibilities:
 
 - decide route for a governed run
+- emit bounded `AgentExecutionPlan` payloads for control-plane execution
 - invoke the worker tool boundary
 - assemble final governed output
 - keep the planner separate from deterministic numeric truth
@@ -59,6 +61,7 @@ Responsibilities:
 Primary files:
 
 - `workflows/agent-runtimes/hermes-worker/task_contracts.py`
+- `workflows/agent-runtimes/hermes-worker/control_plane_client.py`
 - `workflows/agent-runtimes/hermes-worker/case_worker.py`
 - `workflows/agent-runtimes/hermes-worker/review_worker.py`
 - `workflows/agent-runtimes/hermes-worker/batch_worker.py`
@@ -69,6 +72,7 @@ Primary files:
 Responsibilities:
 
 - execute single-case tasks
+- consume public control-plane HTTP endpoints to start and monitor runs
 - package artifacts under a stable local directory
 - emit `run_manifest.json` for audit and replay
 - generate review flow outputs when a case needs escalation
@@ -159,6 +163,12 @@ PR13 adds a lightweight per-actuary ownership layer on top of the same local con
 - the single-user fallback stays local-only and defaults to `local-actuary` plus `default-workspace`
 - `/runs`, `/reviews`, and `/console/state` can apply bounded operator/workspace filters without introducing auth or multitenancy
 - review assignment remains a prototype `assigned_to` field derived from local ownership metadata rather than RBAC
+
+PR14 adds an agent adapter seam on top of the same public API:
+
+- the planner adapter produces only a bounded execution plan
+- the Hermes client starts runs and polls status through public HTTP endpoints only
+- neither adapter writes deterministic results, review decisions, or artifact-store records directly
 
 PR8 adds a bounded tool catalog and control-plane contract layer:
 

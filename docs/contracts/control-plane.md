@@ -9,6 +9,7 @@ These contracts apply to the local FastAPI control plane and the lightweight ope
 - They define stable status and event literals for run tracking.
 - They define the operator-visible tool catalog shape.
 - They define the operator-visible builtin workflow catalog shape.
+- They define the bounded agent-adapter plan and summary shapes used to call the control plane.
 - They do not change planner routing, worker execution, or deterministic dispatch behavior.
 - They do not add upload flows, workflow builders, SSO/RBAC, websocket/SSE, DB, queues, or object storage.
 
@@ -146,6 +147,55 @@ The initial builtin workflow catalog contains:
 - `chainladder-basic`
 
 Workflow-backed runs keep the existing run lifecycle and execution modes (`inline` and local FastAPI background tasks only). They add workflow-level and step-level events into the same run timeline and write a top-level `run_manifest.json` that references workflow summary artifacts and per-step manifests.
+
+## Agent Adapter Contract
+
+PR14 adds a bounded agent-facing adapter contract for planner and Hermes runtime wrappers.
+
+`AgentExecutionPlan` is frozen to:
+
+- `case_id`
+- `objective`
+- `inputs`
+- exactly one of `tool_id` or `workflow_id`
+- optional `user_prompt`
+- optional `operator_id`
+- optional `workspace_id`
+- optional `created_by`
+- `background`
+
+`AgentExecutionPlan` is a request-planning contract only. It does not contain deterministic results, review decisions, or direct artifact paths to write.
+
+`AgentRunHandle` is the bounded create-run response shape consumed by agent adapters:
+
+- `run_id`
+- `case_id`
+- `status`
+- `summary`
+- optional `execution_mode`
+
+`AgentRunSummary` is the bounded polling/read-model shape:
+
+- `run_id`
+- `case_id`
+- `status`
+- `summary`
+- `terminal`
+- `event_count`
+- `last_event_type`
+- `artifact_ids`
+- `review_status`
+- `review_required`
+
+Hermes/OpenAI/Codex adapters must use public HTTP surfaces only:
+
+- `POST /runs`
+- `GET /runs/{run_id}`
+- `GET /runs/{run_id}/events`
+- `GET /runs/{run_id}/artifacts`
+- `GET /runs/{run_id}/review`
+
+The adapter contract does not authorize direct writes to the artifact store, review store, or deterministic result files.
 
 ## Rerun Semantics
 

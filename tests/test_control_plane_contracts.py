@@ -4,6 +4,10 @@ import pytest
 from pydantic import ValidationError
 
 from reserving_workflow.contracts.control_plane import (
+    AgentExecutionPlan,
+    AgentPlanningRequest,
+    AgentRunHandle,
+    AgentRunSummary,
     ArtifactRef,
     ChainladderToolInput,
     Review,
@@ -13,6 +17,7 @@ from reserving_workflow.contracts.control_plane import (
     RunEvent,
     ToolInvocation,
     ValidatedToolInput,
+    is_terminal_run_status,
     Workflow,
     WorkflowStep,
     run_event_type_for_status,
@@ -95,3 +100,61 @@ def test_workflow_contracts_freeze_builtin_schema_shape():
     assert workflow.workflow_id == "chainladder-basic"
     assert workflow.step_count == 1
     assert workflow.steps[0].tool_id == "chainladder"
+
+
+def test_agent_planning_and_summary_contracts_stay_json_serializable():
+    request = AgentPlanningRequest(
+        case_id="case-14",
+        objective="Run governed workflow",
+        inputs={"sample_name": "RAA"},
+        available_tool_ids=["chainladder"],
+        available_workflow_ids=["chainladder-basic"],
+    )
+    plan = AgentExecutionPlan(
+        case_id="case-14",
+        objective="Run governed workflow",
+        workflow_id="chainladder-basic",
+        inputs={"sample_name": "RAA"},
+        background=True,
+    )
+    handle = AgentRunHandle(
+        run_id="run-14",
+        case_id="case-14",
+        status="accepted",
+        execution_mode="background",
+    )
+    summary = AgentRunSummary(
+        run_id="run-14",
+        case_id="case-14",
+        status="needs_review",
+        terminal=True,
+        event_count=3,
+        last_event_type="run.needs_review",
+        artifact_ids=["run_manifest", "review_packet"],
+        review_status="review_required",
+        review_required=True,
+    )
+
+    assert request.model_dump(mode="json")["available_tool_ids"] == ["chainladder"]
+    assert plan.to_run_create_payload()["workflow_id"] == "chainladder-basic"
+    assert handle.execution_mode == "background"
+    assert summary.model_dump(mode="json")["artifact_ids"] == ["run_manifest", "review_packet"]
+    assert is_terminal_run_status(summary.status) is True
+
+
+def test_agent_execution_plan_requires_exactly_one_target():
+    with pytest.raises(ValidationError, match="Exactly one of tool_id or workflow_id"):
+        AgentExecutionPlan(
+            case_id="case-14",
+            objective="Invalid plan",
+            inputs={},
+        )
+
+    with pytest.raises(ValidationError, match="Exactly one of tool_id or workflow_id"):
+        AgentExecutionPlan(
+            case_id="case-14",
+            objective="Invalid plan",
+            tool_id="chainladder",
+            workflow_id="chainladder-basic",
+            inputs={},
+        )
