@@ -22,6 +22,8 @@ def test_chainladder_adapter_with_official_sample():
     assert result.reserve_summary["ultimate"] >= result.reserve_summary["latest_diagonal"]
     assert result.reserve_summary["ibnr"] >= 0
     assert result.diagnostics["origin_count"] > 0
+    assert result.diagnostics["input_validation"]["status"] == "validated"
+    assert result.diagnostics["input_validation"]["source_kind"] == "sample"
 
 
 def test_chainladder_adapter_with_triangle_rows():
@@ -51,6 +53,7 @@ def test_chainladder_adapter_with_triangle_rows():
     assert result.reserve_summary["latest_diagonal"] == pytest.approx(480.0)
     assert result.reserve_summary["ultimate"] > result.reserve_summary["latest_diagonal"]
     assert result.metadata["source"] == "rows"
+    assert result.diagnostics["input_validation"]["source_kind"] == "triangle_rows"
 
 
 def test_chainladder_adapter_rejects_missing_triangle_source():
@@ -81,4 +84,29 @@ def test_chainladder_adapter_rejects_missing_required_row_columns():
     )
 
     with pytest.raises(ChainladderAdapterError, match="missing required columns"):
+        ChainladderAdapter().calculate(case)
+
+
+def test_chainladder_adapter_rejects_duplicate_origin_development_rows():
+    case = ReservingCaseInput(
+        case_id="duplicate-rows",
+        metadata={
+            "triangle_rows": [
+                {"origin": 1981, "development": 1981, "value": 100.0},
+                {"origin": 1981, "development": 1981, "value": 120.0},
+            ],
+        },
+    )
+
+    with pytest.raises(ChainladderAdapterError, match="duplicate origin/development"):
+        ChainladderAdapter().calculate(case)
+
+
+def test_chainladder_adapter_rejects_unknown_sample_names_early():
+    case = ReservingCaseInput(
+        case_id="bad-sample",
+        metadata={"chainladder_sample": "NOT_A_SAMPLE"},
+    )
+
+    with pytest.raises(ChainladderAdapterError, match="Unknown chainladder sample"):
         ChainladderAdapter().calculate(case)

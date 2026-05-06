@@ -393,15 +393,11 @@ def test_post_run_normalizes_tool_backed_request_and_writes_validated_input_arti
     validated_input_path = Path(payload["worker_result"]["artifact_paths"]["validated_input"])
     assert validated_input_path.exists()
     validated_input = json.loads(validated_input_path.read_text(encoding="utf-8"))
-    assert validated_input == {
-        "case_id": "tool-backed-case",
-        "tool_id": "chainladder",
-        "inputs": {
-            "sample_name": "RAA",
-            "method_variant": "chainladder",
-            "review_threshold_origin_count": 3,
-        },
-    }
+    assert validated_input["case_id"] == "tool-backed-case"
+    assert validated_input["tool_id"] == "chainladder"
+    assert validated_input["inputs"]["sample_name"] == "RAA"
+    assert validated_input["inputs"]["method_variant"] == "chainladder"
+    assert validated_input["inputs"]["review_threshold_origin_count"] == 3
 
     run_manifest = Path(payload["final_output"]["artifact_manifest_path"])
     manifest_payload = json.loads(run_manifest.read_text(encoding="utf-8"))
@@ -430,6 +426,56 @@ def test_post_run_normalizes_legacy_method_alias_into_tool_backed_validated_inpu
     assert validated_input["inputs"]["sample_name"] == "RAA"
     assert validated_input["inputs"]["method_variant"] == "chainladder"
     assert validated_input["inputs"]["review_threshold_origin_count"] == 2
+
+
+def test_post_run_accepts_triangle_rows_tool_input_and_passes_case_payload(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/runs",
+        json={
+            "case_id": "triangle-rows-case",
+            "tool_id": "chainladder",
+            "inputs": {
+                "triangle_rows": [
+                    {"origin": 1981, "development": 1981, "value": 100.0},
+                    {"origin": 1981, "development": 1982, "value": 150.0},
+                    {"origin": 1982, "development": 1982, "value": 120.0},
+                ]
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    validated_input_path = Path(payload["worker_result"]["artifact_paths"]["validated_input"])
+    validated_input = json.loads(validated_input_path.read_text(encoding="utf-8"))
+    assert validated_input["inputs"]["triangle_rows"][0]["value"] == 100.0
+    assert validated_input["inputs"]["sample_name"] is None
+    assert FakeRunnerModule.calls
+
+
+def test_post_run_rejects_invalid_triangle_rows_with_http_400(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/runs",
+        json={
+            "case_id": "bad-triangle-rows-case",
+            "tool_id": "chainladder",
+            "inputs": {
+                "triangle_rows": [
+                    {"origin": 1981, "development": 1981, "value": 100.0},
+                    {"origin": 1981, "development": 1981, "value": 120.0},
+                ]
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert "duplicate origin/development" in str(response.json()["detail"])
 
 
 def test_post_run_rejects_unknown_tool_id_with_http_400(tmp_path):
@@ -722,15 +768,12 @@ def test_rerun_endpoint_creates_distinct_run_id(tmp_path):
 
     registry = json.loads((tmp_path / "run-registry.json").read_text(encoding="utf-8"))
     original_entry = next(item for item in registry["runs"] if item["run_id"] == original["run_id"])
-    assert original_entry["operator_params"]["validated_input"] == {
-        "case_id": "rerun-case",
-        "tool_id": "chainladder",
-        "inputs": {
-            "sample_name": "RAA",
-            "method_variant": "chainladder",
-            "review_threshold_origin_count": 4,
-        },
-    }
+    validated_input = original_entry["operator_params"]["validated_input"]
+    assert validated_input["case_id"] == "rerun-case"
+    assert validated_input["tool_id"] == "chainladder"
+    assert validated_input["inputs"]["sample_name"] == "RAA"
+    assert validated_input["inputs"]["method_variant"] == "chainladder"
+    assert validated_input["inputs"]["review_threshold_origin_count"] == 4
 
     rerun = client.post(f"/runs/{original['run_id']}/rerun", json={}).json()
 
@@ -893,9 +936,9 @@ def test_workflow_catalog_endpoints_expose_builtin_workflow(tmp_path):
     workflow = client.get("/workflows/chainladder-basic")
 
     assert workflows.status_code == 200
-    assert workflows.json()["workflow_count"] == 1
-    assert workflows.json()["workflows"][0]["workflow_id"] == "chainladder-basic"
-    assert workflows.json()["workflows"][0]["step_count"] == 1
+    assert workflows.json()["workflow_count"] == 2
+    workflow_ids = {item["workflow_id"] for item in workflows.json()["workflows"]}
+    assert workflow_ids == {"chainladder-basic", "chainladder-validated"}
     assert workflow.status_code == 200
     assert workflow.json()["workflow_id"] == "chainladder-basic"
     assert workflow.json()["steps"][0]["tool_id"] == "chainladder"
@@ -938,6 +981,71 @@ def test_post_run_with_workflow_id_executes_steps_sequentially_and_records_workf
     assert detail["artifact_manifest"]["workflow_id"] == "chainladder-basic"
     assert detail["artifact_manifest"]["artifact_paths"]["workflow_summary"].endswith("workflow_summary.json")
     assert any(artifact["artifact_id"] == "step_chainladder_run_manifest" for artifact in detail["artifacts"])
+
+
+def test_post_run_with_validation_workflow_records_validation_then_execution(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/runs",
+        json={
+            "case_id": "workflow-validated",
+            "workflow_id": "chainladder-validated",
+            "inputs": {"sample_name": "RAA"},
+            "background": False,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "completed"
+    assert [step["step_id"] for step in payload["workflow"]["steps"]] == ["validate", "execute"]
+    assert [step["step_kind"] for step in payload["workflow"]["steps"]] == ["validate", "execute"]
+    assert [step["status"] for step in payload["workflow"]["steps"]] == ["completed", "completed"]
+    assert len(FakeRunnerModule.calls) == 1
+    assert Path(FakeRunnerModule.calls[0]["artifact_dir"]).name == "execute"
+
+    validate_manifest = Path(payload["worker_result"]["artifact_paths"]["step_validate_run_manifest"])
+    validate_manifest_payload = json.loads(validate_manifest.read_text(encoding="utf-8"))
+    assert validate_manifest_payload["artifact_paths"]["validation_result"].endswith("validation_result.json")
+
+    events = client.get(f"/runs/{payload['run_id']}/events").json()["events"]
+    assert [event["event_type"] for event in events] == [
+        "run.queued",
+        "run.running",
+        "workflow.started",
+        "workflow.step.started",
+        "workflow.step.completed",
+        "workflow.step.started",
+        "workflow.step.completed",
+        "workflow.completed",
+        "run.completed",
+    ]
+    assert events[3]["payload"]["step_kind"] == "validate"
+    assert events[5]["payload"]["step_kind"] == "execute"
+
+
+def test_validation_workflow_stops_before_execution_when_validation_fails(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/runs",
+        json={
+            "case_id": "workflow-validation-fails",
+            "workflow_id": "chainladder-validated",
+            "inputs": {
+                "triangle_rows": [
+                    {"origin": 1981, "development": 1981, "value": 100.0},
+                    {"origin": 1981, "development": 1981, "value": 120.0},
+                ]
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert not FakeRunnerModule.calls
 
 
 def test_post_run_with_workflow_id_accepts_background_mode_without_changing_legacy_background_contract(tmp_path):

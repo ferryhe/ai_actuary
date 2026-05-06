@@ -113,6 +113,11 @@ The local FastAPI wrapper also exposes:
 - `GET /runs/{run_id}/review`
 - `POST /reviews/{review_id}/decision`
 
+Builtin workflow notes:
+
+- `chainladder-basic` preserves the legacy single-step execution path.
+- `chainladder-validated` is a two-step path that validates tool/case inputs first, then executes the deterministic reserving run only after validation passes.
+
 ---
 
 ## Step-by-Step Operating Guide

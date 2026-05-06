@@ -54,7 +54,13 @@ class ToolInvocation(BaseModel):
 class ChainladderToolInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    sample_name: str = "RAA"
+    sample_name: str | None = None
+    triangle_rows: list[dict[str, Any]] | None = None
+    origin_column: str = "origin"
+    development_column: str = "development"
+    value_column: str = "value"
+    cumulative: bool = True
+    index_column: str | None = None
     method_variant: Literal["chainladder"] = "chainladder"
     review_threshold_origin_count: int | None = Field(default=None, ge=0)
 
@@ -69,6 +75,23 @@ class ChainladderToolInput(BaseModel):
             normalized["method_variant"] = legacy_method
         return normalized
 
+    @model_validator(mode="after")
+    def _validate_triangle_source(self) -> "ChainladderToolInput":
+        sample_name = self.sample_name.strip() if isinstance(self.sample_name, str) else None
+        if sample_name == "":
+            sample_name = None
+        triangle_rows_present = self.triangle_rows is not None
+
+        if sample_name is None and not triangle_rows_present:
+            sample_name = "RAA"
+        if sample_name is not None and triangle_rows_present:
+            raise ValueError("Provide exactly one of sample_name or triangle_rows.")
+        if sample_name is None and not triangle_rows_present:
+            raise ValueError("Provide sample_name or triangle_rows.")
+
+        self.sample_name = sample_name
+        return self
+
 
 class ValidatedToolInput(BaseModel):
     tool_id: str
@@ -80,6 +103,7 @@ class WorkflowStep(BaseModel):
     tool_id: str
     title: str
     description: str | None = None
+    step_kind: Literal["validate", "execute"] = "execute"
     order: int | None = None
     inputs: dict[str, Any] = Field(default_factory=dict)
     status: RunStatus | None = None

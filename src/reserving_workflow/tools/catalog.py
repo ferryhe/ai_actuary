@@ -72,7 +72,39 @@ def _builtin_chainladder_tool() -> ToolCatalogEntry:
                 "sample_name": {
                     "type": "string",
                     "default": "RAA",
-                    "description": "chainladder sample name passed through to the worker case payload.",
+                    "description": "Built-in chainladder sample name. Provide this or triangle_rows, but not both.",
+                },
+                "triangle_rows": {
+                    "type": "array",
+                    "description": "Explicit triangle rows. Provide this or sample_name, but not both.",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": True,
+                    },
+                },
+                "origin_column": {
+                    "type": "string",
+                    "default": "origin",
+                    "description": "Column name used for origin periods when triangle_rows is provided.",
+                },
+                "development_column": {
+                    "type": "string",
+                    "default": "development",
+                    "description": "Column name used for development periods when triangle_rows is provided.",
+                },
+                "value_column": {
+                    "type": "string",
+                    "default": "value",
+                    "description": "Numeric value column used when triangle_rows is provided.",
+                },
+                "cumulative": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Whether triangle_rows are cumulative values.",
+                },
+                "index_column": {
+                    "type": "string",
+                    "description": "Optional index column passed through to chainladder Triangle construction.",
                 },
                 "method_variant": {
                     "type": "string",

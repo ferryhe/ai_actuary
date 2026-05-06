@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -14,6 +14,7 @@ class WorkflowStepEntry(BaseModel):
     tool_id: str
     title: str
     description: str | None = None
+    step_kind: Literal["validate", "execute"] = "execute"
     inputs: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("step_id")
@@ -27,6 +28,7 @@ class WorkflowStepEntry(BaseModel):
             tool_id=self.tool_id,
             title=self.title,
             description=self.description,
+            step_kind=self.step_kind,
             order=order,
             inputs=dict(self.inputs),
             status=status,
@@ -88,7 +90,12 @@ class WorkflowCatalog:
 
 
 def build_builtin_workflow_catalog() -> WorkflowCatalog:
-    return WorkflowCatalog(entries=[_builtin_chainladder_basic_workflow()])
+    return WorkflowCatalog(
+        entries=[
+            _builtin_chainladder_basic_workflow(),
+            _builtin_chainladder_validation_workflow(),
+        ]
+    )
 
 
 def _safe_catalog_id(value: str, *, field_name: str) -> str:
@@ -112,5 +119,29 @@ def _builtin_chainladder_basic_workflow() -> WorkflowCatalogEntry:
                 title="Run chainladder",
                 description="Execute the legacy chainladder governed run path.",
             )
+        ],
+    )
+
+
+def _builtin_chainladder_validation_workflow() -> WorkflowCatalogEntry:
+    return WorkflowCatalogEntry(
+        workflow_id="chainladder-validated",
+        title="Chainladder Validated",
+        description="Two-step builtin workflow that validates chainladder inputs before executing the deterministic governed run.",
+        steps=[
+            WorkflowStepEntry(
+                step_id="validate",
+                tool_id="chainladder",
+                step_kind="validate",
+                title="Validate chainladder input",
+                description="Validate triangle/sample inputs and write a deterministic validation artifact.",
+            ),
+            WorkflowStepEntry(
+                step_id="execute",
+                tool_id="chainladder",
+                step_kind="execute",
+                title="Run chainladder",
+                description="Execute the deterministic chainladder run after validation passes.",
+            ),
         ],
     )

@@ -10,10 +10,12 @@ def test_builtin_workflow_catalog_lists_chainladder_basic_summary():
 
     workflows = catalog.list_workflow_summaries()
 
-    assert len(workflows) == 1
-    assert workflows[0]["workflow_id"] == "chainladder-basic"
-    assert workflows[0]["step_count"] == 1
-    assert workflows[0]["builtin"] is True
+    workflow_ids = {workflow["workflow_id"] for workflow in workflows}
+
+    assert len(workflows) == 2
+    assert workflow_ids == {"chainladder-basic", "chainladder-validated"}
+    assert next(item for item in workflows if item["workflow_id"] == "chainladder-basic")["step_count"] == 1
+    assert next(item for item in workflows if item["workflow_id"] == "chainladder-validated")["step_count"] == 2
 
 
 def test_builtin_workflow_catalog_returns_chainladder_basic_detail():
@@ -24,6 +26,17 @@ def test_builtin_workflow_catalog_returns_chainladder_basic_detail():
     assert workflow.workflow_id == "chainladder-basic"
     assert workflow.steps[0].step_id == "chainladder"
     assert workflow.steps[0].tool_id == "chainladder"
+    assert workflow.steps[0].step_kind == "execute"
+
+
+def test_builtin_workflow_catalog_returns_validation_first_workflow_detail():
+    catalog = build_builtin_workflow_catalog()
+
+    workflow = catalog.get_workflow("chainladder-validated")
+
+    assert workflow.workflow_id == "chainladder-validated"
+    assert [step.step_id for step in workflow.steps] == ["validate", "execute"]
+    assert [step.step_kind for step in workflow.steps] == ["validate", "execute"]
 
 
 def test_workflow_catalog_rejects_duplicate_workflow_ids():

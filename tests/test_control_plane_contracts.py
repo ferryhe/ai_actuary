@@ -84,7 +84,17 @@ def test_tool_invocation_contract_normalizes_chainladder_legacy_method_alias():
     validated = ValidatedToolInput(tool_id=invocation.tool_id, inputs=normalized.model_dump(mode="json"))
 
     assert invocation.tool_id == "chainladder"
-    assert validated.inputs == {"sample_name": "RAA", "method_variant": "chainladder", "review_threshold_origin_count": None}
+    assert validated.inputs == {
+        "sample_name": "RAA",
+        "triangle_rows": None,
+        "origin_column": "origin",
+        "development_column": "development",
+        "value_column": "value",
+        "cumulative": True,
+        "index_column": None,
+        "method_variant": "chainladder",
+        "review_threshold_origin_count": None,
+    }
 
 
 def test_workflow_contracts_freeze_builtin_schema_shape():

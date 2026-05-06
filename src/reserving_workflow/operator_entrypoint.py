@@ -29,6 +29,7 @@ def build_operator_task(
     sample_name: str = "RAA",
     method: str = "chainladder",
     review_threshold_origin_count: int | None = None,
+    case_payload: dict[str, Any] | None = None,
     task_contracts_module=None,
 ):
     task_contracts = task_contracts_module or _load_task_contracts_module()
@@ -38,6 +39,15 @@ def build_operator_task(
     }
     if review_threshold_origin_count is not None:
         run_config["review_thresholds"] = {"origin_count": review_threshold_origin_count}
+    resolved_case_payload = (
+        case_payload
+        if case_payload is not None
+        else {
+            "case_id": case_id,
+            "metadata": {"chainladder_sample": sample_name},
+            "run_config": run_config,
+        }
+    )
 
     return task_contracts.WorkerTask(
         task_id=f"operator-{case_id}",
@@ -46,11 +56,7 @@ def build_operator_task(
         objective=objective,
         inputs={
             "artifact_dir": str(Path(artifact_dir)),
-            "case_payload": {
-                "case_id": case_id,
-                "metadata": {"chainladder_sample": sample_name},
-                "run_config": run_config,
-            },
+            "case_payload": resolved_case_payload,
         },
         required_artifacts=list(DEFAULT_REQUIRED_ARTIFACTS),
     )
@@ -69,6 +75,7 @@ def run_operator_flow(
     registry_path: str | Path | None = None,
     run_id: str | None = None,
     validated_input: dict[str, Any] | None = None,
+    case_payload: dict[str, Any] | None = None,
     created_by: str | None = None,
     operator_id: str | None = None,
     workspace_id: str | None = None,
@@ -93,6 +100,7 @@ def run_operator_flow(
         sample_name=sample_name,
         method=method,
         review_threshold_origin_count=review_threshold_origin_count,
+        case_payload=case_payload,
         task_contracts_module=task_contracts_module,
     )
     run_id = run_id or getattr(task, "run_id", None) or _generate_operator_run_id(getattr(task, "task_id", "task"))

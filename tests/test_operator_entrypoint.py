@@ -85,6 +85,28 @@ def test_build_operator_task_creates_run_case_task(tmp_path):
     assert "run_manifest" in task.inputs["case_payload"]["run_config"]["required_artifacts"]
 
 
+def test_build_operator_task_preserves_explicit_case_payload(tmp_path):
+    module = _load_module()
+
+    task = module.build_operator_task(
+        case_id="operator-case",
+        artifact_dir=tmp_path,
+        objective="Operator flow",
+        case_payload={
+            "case_id": "operator-case",
+            "metadata": {
+                "triangle_rows": [
+                    {"origin": 1981, "development": 1981, "value": 100.0},
+                ]
+            },
+            "run_config": {"method": "chainladder"},
+        },
+        task_contracts_module=FakeTaskContractsModule,
+    )
+
+    assert task.inputs["case_payload"]["metadata"]["triangle_rows"][0]["value"] == 100.0
+
+
 
 def test_run_operator_flow_returns_governed_result(tmp_path):
     module = _load_module()

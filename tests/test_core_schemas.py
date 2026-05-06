@@ -1,3 +1,5 @@
+import pytest
+
 from reserving_workflow.schemas import (
     ConstitutionCheckResult,
     DeterministicReserveResult,
@@ -47,3 +49,8 @@ def test_core_schema_creation_and_serialization():
     assert check.model_dump()["status"] == "pass"
     assert review.model_dump()["status"] == "not_required"
     assert manifest.model_dump()["artifact_paths"]["result"] == "artifacts/result.json"
+
+
+def test_reserving_case_input_rejects_blank_case_id():
+    with pytest.raises(ValueError, match="case_id must not be empty"):
+        ReservingCaseInput(case_id="   ")
