@@ -21,6 +21,7 @@ from reserving_workflow.contracts.control_plane import (
     ArtifactRef,
     ChainladderToolInput,
     Review,
+    ReviewDecision,
     Run,
     RunEvent,
     RerunSemantics,
@@ -28,6 +29,8 @@ from reserving_workflow.contracts.control_plane import (
     ValidatedToolInput,
     run_event_type_for_status,
 )
+from reserving_workflow.review import build_review_contract, ensure_review_record, write_run_review_decision_artifacts
+from reserving_workflow.storage.local import LocalReviewStore
 from reserving_workflow.runtime import run_registry
 from reserving_workflow.tools import build_builtin_tool_registry
 from reserving_workflow.workflows import build_builtin_workflow_catalog
@@ -39,6 +42,7 @@ class ApiSettings(BaseModel):
     registry_path: str | Path = Field(default="./tmp/run-registry.json")
     artifact_root: str | Path = Field(default="./tmp/api-artifacts")
     review_delivery_dir: str | Path | None = None
+    review_store_dir: str | Path = Field(default="./tmp/reviews")
 
 
 class RunCreateRequest(BaseModel):
@@ -74,6 +78,13 @@ class BatchBenchmarkRequest(BaseModel):
     artifact_root: str | Path | None = None
 
 
+class ReviewDecisionRequest(BaseModel):
+    decision: str
+    comment: str | None = None
+    decided_by: str | None = None
+    follow_up_run_id: str | None = None
+
+
 def create_app(
     *,
     settings: ApiSettings | None = None,
@@ -96,6 +107,7 @@ def create_app(
     resolved_batch_runner_module = batch_runner_module
     resolved_tool_registry = tool_registry or build_builtin_tool_registry()
     resolved_workflow_catalog = workflow_catalog or build_builtin_workflow_catalog()
+    resolved_review_store = LocalReviewStore(resolved_settings.review_store_dir)
     app = FastAPI(title="AI Actuary Control Plane", version="0.1.0")
 
     @app.get("/health")
@@ -110,7 +122,13 @@ def create_app(
     async def operator_console_state(run_id: str | None = None) -> dict[str, Any]:
         runs = run_registry.list_runs(resolved_settings.registry_path)
         selected_entry = _select_console_run(runs, run_id)
-        return _console_state_payload(selected_entry, runs, tool_registry=resolved_tool_registry)
+        return _console_state_payload(
+            selected_entry,
+            runs,
+            tool_registry=resolved_tool_registry,
+            review_store=resolved_review_store,
+            review_store_root=resolved_settings.review_store_dir,
+        )
 
     @app.get("/tools")
     async def list_tools() -> dict[str, Any]:
@@ -288,6 +306,80 @@ def create_app(
     async def get_review_packet(run_id: str) -> dict[str, Any]:
         entry = _get_registry_entry(resolved_settings.registry_path, run_id)
         return _load_review_packet_for_entry(entry)
+
+    @app.get("/runs/{run_id}/review")
+    async def get_run_review(run_id: str) -> dict[str, Any]:
+        entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+        return {
+            "review": _review_payload_for_run(
+                entry,
+                review_store=resolved_review_store,
+                review_store_root=resolved_settings.review_store_dir,
+            )
+        }
+
+    @app.get("/reviews")
+    async def list_reviews() -> dict[str, Any]:
+        reviews = _list_review_payloads(
+            registry_path=resolved_settings.registry_path,
+            review_store=resolved_review_store,
+            review_store_root=resolved_settings.review_store_dir,
+        )
+        return {"review_count": len(reviews), "reviews": reviews}
+
+    @app.get("/reviews/{review_id}")
+    async def get_review(review_id: str) -> dict[str, Any]:
+        try:
+            record = resolved_review_store.get_review(review_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        run_entry = _get_registry_entry(resolved_settings.registry_path, str(record.get("run_id")))
+        review_packet = _load_review_packet_for_entry(run_entry)
+        return {
+            "review": build_review_contract(
+                record,
+                review_packet_result=review_packet,
+                review_store_root=resolved_settings.review_store_dir,
+            )
+        }
+
+    @app.post("/reviews/{review_id}/decision")
+    async def submit_review_decision(review_id: str, request: ReviewDecisionRequest) -> dict[str, Any]:
+        try:
+            decision_contract = ReviewDecision(
+                review_id=review_id,
+                run_id="pending-run-id",
+                decision=request.decision,
+                comment=request.comment,
+                decided_by=request.decided_by,
+                follow_up_run_id=request.follow_up_run_id,
+            )
+        except ValidationError as exc:
+            raise HTTPException(status_code=400, detail=exc.errors()) from exc
+
+        try:
+            review_record = resolved_review_store.get_review(review_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        run_entry = _get_registry_entry(resolved_settings.registry_path, str(review_record.get("run_id")))
+        decision_record = resolved_review_store.submit_decision(
+            review_id=review_id,
+            decision=decision_contract.decision,
+            comment=request.comment,
+            decided_by=request.decided_by,
+            follow_up_run_id=request.follow_up_run_id,
+        )
+        decision_record["artifacts"] = write_run_review_decision_artifacts(
+            run_entry=run_entry,
+            decision_record=decision_record,
+        )
+        review_packet = _load_review_packet_for_entry(run_entry)
+        review = build_review_contract(
+            resolved_review_store.get_review(review_id),
+            review_packet_result=review_packet,
+            review_store_root=resolved_settings.review_store_dir,
+        )
+        return {"review": review, "decision": decision_record, "run_status": run_entry.get("status")}
 
     @app.post("/replay")
     async def replay_case(request: ReplayRequest) -> dict[str, Any]:
@@ -841,13 +933,22 @@ def _console_state_payload(
     runs: list[dict[str, Any]],
     *,
     tool_registry,
+    review_store,
+    review_store_root: str | Path,
 ) -> dict[str, Any]:
     selected_run_id = str(selected_entry.get("run_id")) if selected_entry else None
+    review_inbox = _review_inbox_payload(
+        registry_path=None,
+        runs=runs,
+        review_store=review_store,
+        review_store_root=review_store_root,
+        selected_run_id=selected_run_id,
+    )
     return {
         "console": {
             "title": "AI Actuary Operator Console",
             "description": "Symphony-style shell over the existing governed run control plane.",
-            "version": "pr8-tool-catalog",
+            "version": "pr12-review-inbox",
         },
         "tool_catalog": {"tool_count": len(tool_registry.list_tools()), "tools": tool_registry.list_tool_summaries()},
         "selected_run_id": selected_run_id,
@@ -855,7 +956,12 @@ def _console_state_payload(
         "run_cards": [_console_run_card(entry, selected_run_id=selected_run_id) for entry in runs],
         "timeline": _console_timeline(selected_entry),
         "artifact_panel": _console_artifact_panel(selected_entry),
-        "review_panel": _console_review_panel(selected_entry),
+        "review_inbox": review_inbox,
+        "review_panel": _console_review_panel(
+            selected_entry,
+            review_store=review_store,
+            review_store_root=review_store_root,
+        ),
         "action_panel": _console_action_panel(selected_entry),
     }
 
@@ -909,23 +1015,24 @@ def _console_artifact_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _console_review_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
+def _console_review_panel(
+    entry: dict[str, Any] | None,
+    *,
+    review_store,
+    review_store_root: str | Path,
+) -> dict[str, Any]:
     if entry is None:
         review = Review(status="not_available", review_required=False)
     else:
-        packet = _load_review_packet_for_entry(entry)
-        packet_payload = packet.get("packet") if packet.get("present") else None
-        review = Review(
-            status=(packet_payload or {}).get("status", "not_required"),
-            review_required=bool(entry.get("review_required")) or entry.get("status") == "needs_review",
-            decision=None,
-            packet=packet_payload,
-            json_path=packet.get("json_path"),
-            markdown_path=packet.get("markdown_path"),
-            review_delivery=entry.get("review_delivery"),
+        review = Review.model_validate(
+            _review_payload_for_run(
+                entry,
+                review_store=review_store,
+                review_store_root=review_store_root,
+            )
         )
     payload = review.model_dump()
-    payload["present"] = payload["packet"] is not None
+    payload["present"] = bool(payload.get("review_id")) or payload.get("packet") is not None
     return payload
 
 
@@ -985,6 +1092,90 @@ def _load_review_packet_for_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "json_path": str(packet_json),
         "markdown_path": str(markdown_path) if markdown_path is not None else None,
     }
+
+
+def _review_payload_for_run(
+    entry: dict[str, Any],
+    *,
+    review_store,
+    review_store_root: str | Path,
+) -> dict[str, Any]:
+    review_packet = _load_review_packet_for_entry(entry)
+    record = ensure_review_record(
+        review_store=review_store,
+        run_entry=entry,
+        review_packet=review_packet.get("packet") if review_packet.get("present") else None,
+    )
+    if record is None:
+        status = "review_required" if bool(entry.get("review_required")) or entry.get("status") == "needs_review" else "not_required"
+        return Review(
+            status=status,
+            review_required=status == "review_required",
+            run_id=str(entry.get("run_id")),
+            case_id=entry.get("case_id"),
+            packet=review_packet.get("packet") if review_packet.get("present") else None,
+            json_path=review_packet.get("json_path"),
+            markdown_path=review_packet.get("markdown_path"),
+            review_delivery=entry.get("review_delivery"),
+        ).model_dump(exclude_none=True)
+    return build_review_contract(
+        record,
+        review_packet_result=review_packet,
+        review_store_root=review_store_root,
+    )
+
+
+def _list_review_payloads(
+    *,
+    registry_path: str | Path,
+    review_store,
+    review_store_root: str | Path,
+) -> list[dict[str, Any]]:
+    runs = run_registry.list_runs(registry_path)
+    return _review_inbox_payload(
+        registry_path=registry_path,
+        runs=runs,
+        review_store=review_store,
+        review_store_root=review_store_root,
+        selected_run_id=None,
+    )
+
+
+def _review_inbox_payload(
+    *,
+    registry_path: str | Path | None,
+    runs: list[dict[str, Any]],
+    review_store,
+    review_store_root: str | Path,
+    selected_run_id: str | None,
+) -> list[dict[str, Any]]:
+    del registry_path
+    reviews: list[dict[str, Any]] = []
+    seen_review_ids: set[str] = set()
+    for entry in runs:
+        review_payload = _review_payload_for_run(
+            entry,
+            review_store=review_store,
+            review_store_root=review_store_root,
+        )
+        review_id = review_payload.get("review_id")
+        if not review_id:
+            continue
+        if review_id in seen_review_ids:
+            continue
+        seen_review_ids.add(str(review_id))
+        reviews.append(
+            {
+                "review_id": review_id,
+                "run_id": review_payload.get("run_id"),
+                "case_id": review_payload.get("case_id"),
+                "status": review_payload.get("status"),
+                "decision": (review_payload.get("decision") or {}).get("decision"),
+                "updated_at": review_payload.get("updated_at"),
+                "selected": review_payload.get("run_id") == selected_run_id,
+            }
+        )
+    return sorted(reviews, key=lambda item: item.get("updated_at") or "", reverse=True)
 
 
 def _artifact_refs_from_manifest(manifest: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -1099,11 +1290,29 @@ def _operator_console_html() -> str:
       <div id="operation-status" class="status" aria-live="polite"></div>
       <h2>Run Queue</h2>
       <div id="run-queue" class="empty">Loading runs…</div>
+      <h2>Review Inbox</h2>
+      <div id="review-inbox" class="empty">Loading reviews…</div>
     </section>
     <div class="workspace">
       <section aria-label="Timeline"><h2>Timeline</h2><div id="timeline" class="panel-body">Loading…</div></section>
       <section aria-label="Artifact Panel"><h2>Artifact Panel</h2><pre id="artifact-panel">Loading…</pre></section>
-      <section aria-label="Review Panel"><h2>Review Panel</h2><pre id="review-panel">Loading…</pre></section>
+      <section aria-label="Review Panel">
+        <h2>Review Panel</h2>
+        <pre id="review-panel">Loading…</pre>
+        <form id="review-decision-form" onsubmit="submitReviewDecision(event)">
+          <input id="review-id-input" name="review_id" type="hidden">
+          <label>decision
+            <select name="decision">
+              <option value="approved">approved</option>
+              <option value="changes_requested">changes_requested</option>
+              <option value="rejected">rejected</option>
+            </select>
+          </label>
+          <label>decided_by<input name="decided_by" placeholder="actuary-001"></label>
+          <label>comment<input name="comment" placeholder="Optional decision note"></label>
+          <button id="submit-review-decision" type="submit">Submit review decision</button>
+        </form>
+      </section>
       <section aria-label="Action Panel"><h2>Action Panel</h2><div id="action-panel" class="panel-body">Loading…</div></section>
     </div>
   </main>
@@ -1127,6 +1336,7 @@ def _operator_console_html() -> str:
       renderTimeline([{event_type: "run.failed", summary: message}]);
       document.getElementById("artifact-panel").textContent = message;
       document.getElementById("review-panel").textContent = message;
+      document.getElementById("review-inbox").textContent = message;
       document.getElementById("action-panel").textContent = message;
     }
 
@@ -1276,6 +1486,25 @@ def _operator_console_html() -> str:
       }
     }
 
+    function renderReviewInbox(reviews) {
+      const inbox = document.getElementById("review-inbox");
+      inbox.innerHTML = "";
+      if (!reviews || reviews.length === 0) {
+        inbox.textContent = "No reviews recorded yet.";
+        inbox.className = "empty";
+        return;
+      }
+      inbox.className = "";
+      for (const review of reviews) {
+        const button = document.createElement("button");
+        button.className = "run-card";
+        if (review.selected) button.setAttribute("selected", "selected");
+        button.textContent = `${review.case_id || "unknown case"} · ${review.status || "review"}`;
+        button.onclick = () => loadConsole(review.run_id);
+        inbox.appendChild(button);
+      }
+    }
+
     function renderActionPanel(actionPanel) {
       const container = document.getElementById("action-panel");
       container.innerHTML = "";
@@ -1303,9 +1532,12 @@ def _operator_console_html() -> str:
         const state = await parseJsonOrThrow(response, "Console state");
         selectedRunId = state.selected_run_id;
         renderRunQueue(state);
+        renderReviewInbox(state.review_inbox || []);
         renderTimeline(state.timeline || []);
         document.getElementById("artifact-panel").textContent = JSON.stringify(state.artifact_panel, null, 2);
         document.getElementById("review-panel").textContent = JSON.stringify(state.review_panel, null, 2);
+        document.getElementById("review-id-input").value = state.review_panel && state.review_panel.review_id ? state.review_panel.review_id : "";
+        document.getElementById("submit-review-decision").disabled = !(state.review_panel && state.review_panel.review_id);
         renderActionPanel(state.action_panel);
         if (!options.preservePolling && shouldPollEvents(state.timeline || [])) {
           startPolling(state.selected_run_id);
@@ -1380,6 +1612,35 @@ def _operator_console_html() -> str:
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to run console action.";
+        setOperationStatus(message, "error");
+      }
+    }
+
+    async function submitReviewDecision(event) {
+      event.preventDefault();
+      const formData = new FormData(event.currentTarget);
+      const reviewId = String(formData.get("review_id") || "").trim();
+      if (!reviewId) {
+        setOperationStatus("No review selected for decision submission.", "error");
+        return;
+      }
+      const payload = {
+        decision: String(formData.get("decision") || "").trim(),
+        decided_by: String(formData.get("decided_by") || "").trim() || null,
+        comment: String(formData.get("comment") || "").trim() || null,
+      };
+      setOperationStatus(`Submitting review decision for ${reviewId}…`);
+      try {
+        const response = await fetch(`/reviews/${encodeURIComponent(reviewId)}/decision`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const result = await parseJsonOrThrow(response, "Review decision");
+        setOperationStatus(`${result.decision.decision}: ${reviewId}`, "ok");
+        await loadConsole(result.review.run_id || selectedRunId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to submit review decision.";
         setOperationStatus(message, "error");
       }
     }

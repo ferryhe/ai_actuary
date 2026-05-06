@@ -1,6 +1,6 @@
 # Control-Plane Contracts
 
-This document freezes the bounded operator-facing control-plane contract as of PR11.
+This document freezes the bounded operator-facing control-plane contract as of PR12.
 
 ## Scope
 
@@ -10,7 +10,7 @@ These contracts apply to the local FastAPI control plane and the lightweight ope
 - They define the operator-visible tool catalog shape.
 - They define the operator-visible builtin workflow catalog shape.
 - They do not change planner routing, worker execution, or deterministic dispatch behavior.
-- They do not add upload flows, workflow builders, human review systems, auth, websocket/SSE, DB, or object storage.
+- They do not add upload flows, workflow builders, SSO/RBAC, websocket/SSE, DB, queues, or object storage.
 
 ## Run Status
 
@@ -63,15 +63,24 @@ Artifact lists are derived from `run_manifest.json`. The manifest remains the so
 - `not_available`
 - `not_required`
 - `review_required`
+- `review_decided`
 
-`ReviewDecision` is frozen to:
+`ReviewDecision.decision` is frozen to:
 
-- `not_required`
-- `pending`
 - `approved`
 - `rejected`
+- `changes_requested`
 
-The current control plane exposes review packet presence and packet metadata. It does not yet implement a persistent human review decision workflow.
+`Review` is an independent governance object. Review decisions do not mutate `Run.status`.
+
+The local control plane now exposes:
+
+- `GET /reviews`
+- `GET /reviews/{review_id}`
+- `GET /runs/{run_id}/review`
+- `POST /reviews/{review_id}/decision`
+
+Decision submission persists an independent review record under the local review store and, when a run artifact root exists, writes deterministic `review_decision.json` and `review_decision.md` artifacts under that run root. These decision artifacts may be added to `run_manifest.json` as artifact refs, but the run terminal status remains execution-only.
 
 ## Tool Catalog
 
@@ -131,6 +140,7 @@ PR10 keeps the current local storage behavior but moves it behind explicit inter
 
 - `RunStore` backs the JSON registry and remains an operational index only
 - `ArtifactStore` backs filesystem artifacts and remains the evidence source for manifests and derived artifact refs
-- `ReviewStore` is a local artifact-backed placeholder for persistent review records and decisions
+- `ReviewStore` is a local artifact-backed adapter for persistent review records and decisions
+- the console may lazily materialize a review record from an existing `needs_review` run plus review packet
 
-This boundary does not add DB, object storage, queues, auth, or review inbox behavior.
+This boundary still does not add DB, object storage, queues, or auth.

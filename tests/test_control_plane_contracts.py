@@ -7,6 +7,7 @@ from reserving_workflow.contracts.control_plane import (
     ArtifactRef,
     ChainladderToolInput,
     Review,
+    ReviewDecision,
     RerunSemantics,
     Run,
     RunEvent,
@@ -26,6 +27,8 @@ def test_control_plane_run_contract_freezes_status_values():
     assert validate_run_status("needs_review") == "needs_review"
     with pytest.raises(ValueError, match="Unsupported run status"):
         validate_run_status("accepted_pending")
+    with pytest.raises(ValueError, match="Unsupported run status"):
+        validate_run_status("approved")
 
 
 def test_control_plane_run_event_contract_freezes_event_types():
@@ -39,12 +42,13 @@ def test_control_plane_run_event_contract_freezes_event_types():
 
 def test_control_plane_artifact_review_and_rerun_contracts_are_stable():
     artifact = ArtifactRef(artifact_id="run_manifest", path="/tmp/run_manifest.json", present=True)
-    review = Review(status="review_required", review_required=True, decision="pending")
+    review = Review(status="review_required", review_required=True, review_id="review-run-1", run_id="run-1")
+    decision = ReviewDecision(review_id="review-run-1", run_id="run-1", decision="changes_requested")
     rerun = RerunSemantics(source_run_id="run-1")
 
     assert artifact.artifact_id == "run_manifest"
     assert review.status == "review_required"
-    assert review.decision == "pending"
+    assert decision.decision == "changes_requested"
     assert rerun.creates_distinct_run is True
     assert rerun.overrideable_fields == ("artifact_dir", "review_delivery_dir")
 
