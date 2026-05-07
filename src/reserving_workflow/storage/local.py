@@ -22,6 +22,10 @@ class ReviewNotFoundError(ValueError):
     """Raised when a review id is absent from the local review store."""
 
 
+class ReviewDecisionConflictError(ValueError):
+    """Raised when a submitted review decision conflicts with a stored decision."""
+
+
 class LocalRunStore:
     """Adapter over the existing local JSON run registry."""
 
@@ -354,15 +358,23 @@ class LocalReviewStore:
         follow_up_run_id: str | None = None,
     ) -> dict[str, Any]:
         review = self.get_review(review_id)
-        now = _utc_now()
-        decision_record = {
+        existing_decision = review.get("decision")
+        candidate_decision = {
             "review_id": review_id,
             "run_id": review["run_id"],
             "decision": decision,
             "comment": comment,
             "decided_by": decided_by,
-            "decided_at": now,
             "follow_up_run_id": follow_up_run_id,
+        }
+        if isinstance(existing_decision, dict):
+            if _decision_payload_matches(existing_decision, candidate_decision):
+                return existing_decision
+            raise ReviewDecisionConflictError("Review decision already recorded with different content.")
+        now = _utc_now()
+        decision_record = {
+            **candidate_decision,
+            "decided_at": now,
         }
         review["decision"] = decision_record
         review["status"] = "review_decided"
@@ -497,3 +509,8 @@ def _render_review_decision_markdown(review: dict[str, Any], decision_record: di
     if decision_record.get("comment"):
         lines.extend(["", "## Comment", "", str(decision_record["comment"])])
     return "\n".join(lines) + "\n"
+
+
+def _decision_payload_matches(existing: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    keys = ("review_id", "run_id", "decision", "comment", "decided_by", "follow_up_run_id")
+    return all(existing.get(key) == candidate.get(key) for key in keys)
