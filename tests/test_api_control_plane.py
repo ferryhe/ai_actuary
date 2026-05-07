@@ -947,8 +947,25 @@ def test_review_endpoints_materialize_review_records_and_list_inbox(tmp_path):
     assert reviews.status_code == 200
     assert reviews.json()["review_count"] == 1
     assert reviews.json()["reviews"][0]["review_id"] == review_id
+    assert reviews.json()["reviews"][0]["review_required"] is True
+    assert reviews.json()["reviews"][0]["reason_codes"] == ["threshold"]
     assert detail.status_code == 200
     assert detail.json()["review"]["run_id"] == run["run_id"]
+    assert detail.json()["review"]["assigned_to"] == DEFAULT_OPERATOR_ID
+
+
+def test_review_detail_materializes_record_when_fetched_directly_by_review_id(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path, runner_module=ReviewRunnerModule)
+    run = client.post("/runs", json={"case_id": "direct-review-detail-case"}).json()
+
+    response = client.get(f"/reviews/review-{run['run_id']}")
+
+    assert response.status_code == 200
+    payload = response.json()["review"]
+    assert payload["review_id"] == f"review-{run['run_id']}"
+    assert payload["run_id"] == run["run_id"]
+    assert payload["status"] == "review_required"
 
 
 def test_review_decision_submission_writes_independent_artifacts_without_mutating_run_status(tmp_path):
@@ -967,6 +984,8 @@ def test_review_decision_submission_writes_independent_artifacts_without_mutatin
     assert payload["decision"]["decision"] == "changes_requested"
     assert payload["run_status"] == "needs_review"
     assert payload["review"]["status"] == "review_decided"
+    assert payload["review"]["decision"]["artifacts"][0]["path"].endswith("review_decision.json")
+    assert payload["review"]["decision"]["artifacts"][0]["present"] is True
     run_detail = client.get(f"/runs/{run['run_id']}").json()
     decision_json_path = Path(run_detail["run"]["artifact_root"]) / "review_decision.json"
     decision_md_path = Path(run_detail["run"]["artifact_root"]) / "review_decision.md"
@@ -974,6 +993,49 @@ def test_review_decision_submission_writes_independent_artifacts_without_mutatin
     assert "updated assumptions" in decision_md_path.read_text(encoding="utf-8")
     assert run_detail["run"]["status"] == "needs_review"
     assert run_detail["artifact_manifest"]["artifact_paths"]["review_decision"] == str(decision_json_path)
+    review_list = client.get("/reviews").json()["reviews"]
+    assert review_list[0]["decision"] == "changes_requested"
+    assert review_list[0]["decision_artifacts"][0]["path"] == str(decision_json_path)
+
+
+def test_review_decision_submission_is_idempotent_for_same_payload(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path, runner_module=ReviewRunnerModule)
+    run = client.post("/runs", json={"case_id": "idempotent-decision-case"}).json()
+    review = client.get(f"/runs/{run['run_id']}/review").json()["review"]
+    payload = {"decision": "approved", "comment": "Approved for handoff.", "decided_by": "actuary-001"}
+
+    first = client.post(f"/reviews/{review['review_id']}/decision", json=payload)
+    second = client.post(f"/reviews/{review['review_id']}/decision", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_payload = first.json()
+    second_payload = second.json()
+    assert first_payload["decision"]["decision"] == "approved"
+    assert second_payload["decision"]["decision"] == "approved"
+    assert second_payload["decision"]["decided_at"] == first_payload["decision"]["decided_at"]
+    assert second_payload["review"]["updated_at"] == first_payload["review"]["updated_at"]
+
+
+def test_review_decision_submission_rejects_conflicting_duplicate_payload(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path, runner_module=ReviewRunnerModule)
+    run = client.post("/runs", json={"case_id": "conflict-decision-case"}).json()
+    review = client.get(f"/runs/{run['run_id']}/review").json()["review"]
+
+    first = client.post(
+        f"/reviews/{review['review_id']}/decision",
+        json={"decision": "approved", "comment": "Approved.", "decided_by": "actuary-001"},
+    )
+    second = client.post(
+        f"/reviews/{review['review_id']}/decision",
+        json={"decision": "rejected", "comment": "Actually reject.", "decided_by": "actuary-002"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.json() == {"detail": "Review decision already recorded with different content."}
 
 
 def test_report_export_endpoint_writes_operator_handoff_and_reserve_summary_artifacts(tmp_path):
@@ -1012,6 +1074,20 @@ def test_review_decision_endpoint_rejects_invalid_decision_values(tmp_path):
     response = client.post(f"/reviews/{review['review_id']}/decision", json={"decision": "pending"})
 
     assert response.status_code == 400
+
+
+def test_run_review_returns_not_required_without_materializing_review_for_completed_run(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path)
+    run = client.post("/runs", json={"case_id": "completed-no-review-case"}).json()
+
+    review_response = client.get(f"/runs/{run['run_id']}/review")
+    reviews_response = client.get("/reviews")
+
+    assert review_response.status_code == 200
+    assert review_response.json()["review"]["status"] == "not_required"
+    assert review_response.json()["review"]["run_id"] == run["run_id"]
+    assert reviews_response.json()["review_count"] == 0
 
 
 def test_replay_and_repeatability_endpoints_wrap_existing_helpers(tmp_path):

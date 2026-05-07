@@ -237,6 +237,13 @@ curl -X POST http://127.0.0.1:8000/reviews/<review_id>/decision \
   -d '{"decision":"changes_requested","comment":"Re-run with updated assumptions.","decided_by":"actuary-001"}'
 ```
 
+Decision submission notes:
+
+- allowed decisions are `approved`, `rejected`, and `changes_requested`
+- reposting the same decision payload is safe and idempotent
+- conflicting follow-up submissions for an already-decided review return `409`
+- when the run has an artifact root, review decision artifacts are written to `review_decision.json` and `review_decision.md`
+
 ### B2. Export operator handoff
 
 **Step 1 — Human:** export a report from an existing recorded run.

@@ -110,6 +110,14 @@ The local control plane now exposes:
 
 Decision submission persists an independent review record under the local review store and, when a run artifact root exists, writes deterministic `review_decision.json` and `review_decision.md` artifacts under that run root. These decision artifacts may be added to `run_manifest.json` as artifact refs, but the run terminal status remains execution-only.
 
+`POST /reviews/{review_id}/decision` is hardened to local deterministic semantics:
+
+- invalid decision values are rejected with HTTP 400
+- the first accepted decision moves `Review.status` to `review_decided`
+- reposting the same decision payload is idempotent and preserves the original decision timestamp
+- reposting a different payload for an already-decided review returns HTTP 409
+- review decision artifacts are exposed through review detail/list surfaces when the run artifact root exists
+
 ## Tool Catalog
 
 PR8 adds a bounded tool catalog and local registry.

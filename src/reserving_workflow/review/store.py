@@ -43,6 +43,7 @@ def build_review_contract(
     *,
     review_packet_result: dict[str, Any] | None = None,
     review_store_root: str | Path | None = None,
+    decision_artifacts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if record is None:
         return Review(status="not_available", review_required=False).model_dump()
@@ -53,7 +54,10 @@ def build_review_contract(
         packet_payload = review_packet_result.get("packet")
 
     decision_payload = record.get("decision")
-    artifacts = _decision_artifacts(record, review_store_root=review_store_root)
+    artifacts = decision_artifacts if decision_artifacts is not None else _decision_artifacts(
+        record,
+        review_store_root=review_store_root,
+    )
     if isinstance(decision_payload, dict):
         decision_payload = {**decision_payload, "artifacts": artifacts}
 

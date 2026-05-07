@@ -31,7 +31,7 @@ from reserving_workflow.contracts.control_plane import (
 )
 from reserving_workflow.review import build_review_contract, ensure_review_record, write_run_review_decision_artifacts
 from reserving_workflow.reports import export_run_report
-from reserving_workflow.storage.local import LocalReviewStore
+from reserving_workflow.storage.local import LocalReviewStore, ReviewDecisionConflictError
 from reserving_workflow.runtime import build_preflight_report, run_registry
 from reserving_workflow.tools import build_builtin_tool_registry
 from reserving_workflow.validation import (
@@ -410,9 +410,16 @@ def create_app(
     @app.get("/reviews/{review_id}")
     async def get_review(review_id: str) -> dict[str, Any]:
         try:
-            record = _get_review_store().get_review(review_id)
+            review_store = _get_review_store()
+            record = review_store.get_review(review_id)
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            record = _materialize_review_record_from_id(
+                review_id,
+                registry_path=resolved_settings.registry_path,
+                review_store=review_store,
+            )
+            if record is None:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
         run_entry = _get_registry_entry(resolved_settings.registry_path, str(record.get("run_id")))
         review_packet = _load_review_packet_for_entry(run_entry)
         return {
@@ -420,6 +427,7 @@ def create_app(
                 record,
                 review_packet_result=review_packet,
                 review_store_root=resolved_settings.review_store_dir,
+                decision_artifacts=_decision_artifacts_for_run(run_entry),
             )
         }
 
@@ -441,15 +449,26 @@ def create_app(
             review_store = _get_review_store()
             review_record = review_store.get_review(review_id)
         except ValueError as exc:
+            review_record = _materialize_review_record_from_id(
+                review_id,
+                registry_path=resolved_settings.registry_path,
+                review_store=review_store,
+            )
+            if review_record is None:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        try:
+            run_entry = _get_registry_entry(resolved_settings.registry_path, str(review_record.get("run_id")))
+            decision_record = review_store.submit_decision(
+                review_id=review_id,
+                decision=decision_contract.decision,
+                comment=request.comment,
+                decided_by=request.decided_by,
+                follow_up_run_id=request.follow_up_run_id,
+            )
+        except ReviewDecisionConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        run_entry = _get_registry_entry(resolved_settings.registry_path, str(review_record.get("run_id")))
-        decision_record = review_store.submit_decision(
-            review_id=review_id,
-            decision=decision_contract.decision,
-            comment=request.comment,
-            decided_by=request.decided_by,
-            follow_up_run_id=request.follow_up_run_id,
-        )
         decision_record["artifacts"] = write_run_review_decision_artifacts(
             run_entry=run_entry,
             decision_record=decision_record,
@@ -459,6 +478,7 @@ def create_app(
             review_store.get_review(review_id),
             review_packet_result=review_packet,
             review_store_root=resolved_settings.review_store_dir,
+            decision_artifacts=_decision_artifacts_for_run(run_entry),
         )
         return {"review": review, "decision": decision_record, "run_status": run_entry.get("status")}
 
@@ -1512,6 +1532,7 @@ def _review_payload_for_run(
         record,
         review_packet_result=review_packet,
         review_store_root=review_store_root,
+        decision_artifacts=_decision_artifacts_for_run(entry),
     )
 
 
@@ -1568,12 +1589,66 @@ def _review_inbox_payload(
                 "workspace_id": review_payload.get("workspace_id"),
                 "status": review_payload.get("status"),
                 "decision": (review_payload.get("decision") or {}).get("decision"),
+                "decision_artifacts": (review_payload.get("decision") or {}).get("artifacts", []),
+                "review_required": review_payload.get("review_required", False),
+                "reason_codes": list(review_payload.get("reason_codes", []) or []),
                 "assigned_to": review_payload.get("assigned_to"),
+                "created_at": review_payload.get("created_at"),
                 "updated_at": review_payload.get("updated_at"),
                 "selected": review_payload.get("run_id") == selected_run_id,
             }
         )
     return sorted(reviews, key=lambda item: item.get("updated_at") or "", reverse=True)
+
+
+def _materialize_review_record_from_id(
+    review_id: str,
+    *,
+    registry_path: str | Path,
+    review_store,
+) -> dict[str, Any] | None:
+    run_id = _run_id_from_review_id(review_id)
+    if run_id is None:
+        return None
+    try:
+        run_entry = _get_registry_entry(registry_path, run_id)
+    except HTTPException:
+        return None
+    review_packet = _load_review_packet_for_entry(run_entry)
+    return ensure_review_record(
+        review_store=review_store,
+        run_entry=run_entry,
+        review_packet=review_packet.get("packet") if review_packet.get("present") else None,
+    )
+
+
+def _run_id_from_review_id(review_id: str) -> str | None:
+    prefix = "review-"
+    if not review_id.startswith(prefix):
+        return None
+    run_id = review_id[len(prefix):].strip()
+    return run_id or None
+
+
+def _decision_artifacts_for_run(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    artifact_root = entry.get("artifact_root")
+    if not artifact_root:
+        return []
+    root = Path(artifact_root).expanduser().resolve()
+    return [
+        ArtifactRef(
+            artifact_id="review_decision",
+            path=str(root / "review_decision.json"),
+            label="review decision",
+            present=(root / "review_decision.json").exists(),
+        ).model_dump(),
+        ArtifactRef(
+            artifact_id="review_decision_markdown",
+            path=str(root / "review_decision.md"),
+            label="review decision markdown",
+            present=(root / "review_decision.md").exists(),
+        ).model_dump(),
+    ]
 
 
 def _identity_filter_options(runs: list[dict[str, Any]], *, field_name: str) -> list[str]:
