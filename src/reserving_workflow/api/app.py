@@ -32,7 +32,7 @@ from reserving_workflow.contracts.control_plane import (
 from reserving_workflow.review import build_review_contract, ensure_review_record, write_run_review_decision_artifacts
 from reserving_workflow.reports import export_run_report
 from reserving_workflow.storage.local import LocalReviewStore
-from reserving_workflow.runtime import run_registry
+from reserving_workflow.runtime import build_preflight_report, run_registry
 from reserving_workflow.tools import build_builtin_tool_registry
 from reserving_workflow.validation import (
     ReservingValidationError,
@@ -121,12 +121,32 @@ def create_app(
     resolved_batch_runner_module = batch_runner_module
     resolved_tool_registry = tool_registry or build_builtin_tool_registry()
     resolved_workflow_catalog = workflow_catalog or build_builtin_workflow_catalog()
-    resolved_review_store = LocalReviewStore(resolved_settings.review_store_dir)
     app = FastAPI(title="AI Actuary Control Plane", version="0.1.0")
+
+    def _get_review_store() -> LocalReviewStore:
+        try:
+            return LocalReviewStore(resolved_settings.review_store_dir)
+        except Exception as exc:  # pragma: no cover - exercised through API surface
+            raise HTTPException(status_code=503, detail=f"Review store unavailable: {exc}") from exc
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
         return {"ok": True, "service": "ai-actuary-control-plane"}
+
+    @app.get("/health/preflight")
+    async def health_preflight() -> dict[str, Any]:
+        return build_preflight_report(
+            service="ai-actuary-control-plane",
+            version=app.version,
+            registry_path=resolved_settings.registry_path,
+            artifact_root=resolved_settings.artifact_root,
+            review_store_dir=resolved_settings.review_store_dir,
+            review_delivery_dir=resolved_settings.review_delivery_dir,
+            tool_ids=[entry.tool_id for entry in resolved_tool_registry.list_tools()],
+            workflow_ids=[entry.workflow_id for entry in resolved_workflow_catalog.list_workflows()],
+            default_operator_id=DEFAULT_OPERATOR_ID,
+            default_workspace_id=DEFAULT_WORKSPACE_ID,
+        )
 
     @app.get("/console", response_class=HTMLResponse)
     async def operator_console() -> str:
@@ -157,7 +177,7 @@ def create_app(
             runs,
             all_runs=all_runs,
             tool_registry=resolved_tool_registry,
-            review_store=resolved_review_store,
+            review_store=_get_review_store(),
             review_store_root=resolved_settings.review_store_dir,
             filters=current_identity,
         )
@@ -359,7 +379,7 @@ def create_app(
         return {
             "review": _review_payload_for_run(
                 entry,
-                review_store=resolved_review_store,
+                review_store=_get_review_store(),
                 review_store_root=resolved_settings.review_store_dir,
             )
         }
@@ -380,7 +400,7 @@ def create_app(
     async def list_reviews(request: Request, operator_id: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
         reviews = _list_review_payloads(
             registry_path=resolved_settings.registry_path,
-            review_store=resolved_review_store,
+            review_store=_get_review_store(),
             review_store_root=resolved_settings.review_store_dir,
             operator_id=_normalize_identity_filter(operator_id, request=request, header_name="x-operator-id"),
             workspace_id=_normalize_identity_filter(workspace_id, request=request, header_name="x-workspace-id"),
@@ -390,7 +410,7 @@ def create_app(
     @app.get("/reviews/{review_id}")
     async def get_review(review_id: str) -> dict[str, Any]:
         try:
-            record = resolved_review_store.get_review(review_id)
+            record = _get_review_store().get_review(review_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         run_entry = _get_registry_entry(resolved_settings.registry_path, str(record.get("run_id")))
@@ -418,11 +438,12 @@ def create_app(
             raise HTTPException(status_code=400, detail=exc.errors()) from exc
 
         try:
-            review_record = resolved_review_store.get_review(review_id)
+            review_store = _get_review_store()
+            review_record = review_store.get_review(review_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         run_entry = _get_registry_entry(resolved_settings.registry_path, str(review_record.get("run_id")))
-        decision_record = resolved_review_store.submit_decision(
+        decision_record = review_store.submit_decision(
             review_id=review_id,
             decision=decision_contract.decision,
             comment=request.comment,
@@ -435,7 +456,7 @@ def create_app(
         )
         review_packet = _load_review_packet_for_entry(run_entry)
         review = build_review_contract(
-            resolved_review_store.get_review(review_id),
+            review_store.get_review(review_id),
             review_packet_result=review_packet,
             review_store_root=resolved_settings.review_store_dir,
         )
