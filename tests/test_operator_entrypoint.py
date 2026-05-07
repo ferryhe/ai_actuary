@@ -85,6 +85,28 @@ def test_build_operator_task_creates_run_case_task(tmp_path):
     assert "run_manifest" in task.inputs["case_payload"]["run_config"]["required_artifacts"]
 
 
+def test_build_operator_task_preserves_explicit_case_payload(tmp_path):
+    module = _load_module()
+
+    task = module.build_operator_task(
+        case_id="operator-case",
+        artifact_dir=tmp_path,
+        objective="Operator flow",
+        case_payload={
+            "case_id": "operator-case",
+            "metadata": {
+                "triangle_rows": [
+                    {"origin": 1981, "development": 1981, "value": 100.0},
+                ]
+            },
+            "run_config": {"method": "chainladder"},
+        },
+        task_contracts_module=FakeTaskContractsModule,
+    )
+
+    assert task.inputs["case_payload"]["metadata"]["triangle_rows"][0]["value"] == 100.0
+
+
 
 def test_run_operator_flow_returns_governed_result(tmp_path):
     module = _load_module()
@@ -372,6 +394,62 @@ def test_run_operator_flow_returns_result_when_initial_registry_write_fails(tmp_
 
     assert result["status"] == "completed"
     assert len([item for item in result["errors"] if item.startswith("registry_write_failed:")]) == 3
+
+
+def test_run_operator_flow_persists_explicit_case_payload_in_registry_for_reruns(tmp_path):
+    module = _load_module()
+    registry_spec = importlib.util.spec_from_file_location(
+        "run_registry_case_payload",
+        ROOT / "src" / "reserving_workflow" / "runtime" / "run_registry.py",
+    )
+    assert registry_spec is not None and registry_spec.loader is not None
+    registry_module = importlib.util.module_from_spec(registry_spec)
+    registry_spec.loader.exec_module(registry_module)
+    registry_path = tmp_path / "run-registry.json"
+    explicit_case_payload = {
+        "case_id": "registry-case",
+        "metadata": {
+            "triangle_rows": [
+                {"origin": 1981, "development": 1981, "value": 100.0},
+            ],
+            "origin_column": "origin",
+            "development_column": "development",
+            "value_column": "value",
+            "cumulative": True,
+        },
+        "run_config": {"method": "chainladder"},
+    }
+
+    original = module.run_operator_flow(
+        case_id="registry-case",
+        artifact_dir=tmp_path / "artifacts-original",
+        objective="registry case payload",
+        case_payload=explicit_case_payload,
+        runner_module=FakeRunnerModule,
+        task_contracts_module=FakeTaskContractsModule,
+        registry_path=registry_path,
+    )
+    original_entry = registry_module.get_run(registry_path, original["run_id"])
+
+    captured_case_payloads = []
+
+    class CapturingRunnerModule:
+        @staticmethod
+        def run_openai_governed_workflow(task, *, user_prompt=None):
+            captured_case_payloads.append(task.inputs["case_payload"])
+            return FakeRunnerModule.run_openai_governed_workflow(task, user_prompt=user_prompt)
+
+    rerun = module.rerun_from_registry(
+        original["run_id"],
+        registry_path=registry_path,
+        artifact_dir=tmp_path / "artifacts-rerun",
+        runner_module=CapturingRunnerModule,
+        task_contracts_module=FakeTaskContractsModule,
+    )
+
+    assert original_entry["operator_params"]["case_payload"] == explicit_case_payload
+    assert captured_case_payloads == [explicit_case_payload]
+    assert rerun["status"] == "completed"
 
 
 def test_rerun_from_registry_assigns_a_new_run_id(tmp_path):

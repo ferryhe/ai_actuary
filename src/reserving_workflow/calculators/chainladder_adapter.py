@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-
-import pandas as pd
 from pydantic import ValidationError
 
 try:
@@ -22,6 +20,11 @@ except ImportError as exc:  # pragma: no cover - exercised by environment setup,
     ) from exc
 
 from reserving_workflow.schemas import DeterministicReserveResult, ReservingCaseInput
+from reserving_workflow.validation import (
+    ReservingValidationError,
+    build_chainladder_validation_summary,
+    validate_chainladder_case,
+)
 
 
 class ChainladderAdapterError(ValueError):
@@ -32,6 +35,8 @@ class ChainladderAdapterError(ValueError):
 class _TriangleSource:
     triangle: Any
     source_description: str
+    input_kind: str
+    method: str
 
 
 class ChainladderAdapter:
@@ -43,8 +48,11 @@ class ChainladderAdapter:
     }
 
     def calculate(self, case_input: ReservingCaseInput) -> DeterministicReserveResult:
-        source = self._build_triangle_source(case_input)
-        method_name = str(case_input.run_config.get("method", "chainladder")).lower()
+        try:
+            source = self._build_triangle_source(case_input)
+        except ReservingValidationError as exc:
+            raise ChainladderAdapterError(str(exc)) from exc
+        method_name = source.method
         estimator_cls = self._METHODS.get(method_name)
         if estimator_cls is None:
             supported = ", ".join(sorted(self._METHODS))
@@ -70,6 +78,7 @@ class ChainladderAdapter:
                 "development_count": len(source.triangle.development),
                 "valuation_date": str(source.triangle.valuation_date),
                 "is_cumulative": bool(source.triangle.is_cumulative),
+                "input_validation": build_chainladder_validation_summary(case_input, source),
             },
             metadata={
                 "backend": "chainladder-python",
@@ -79,54 +88,13 @@ class ChainladderAdapter:
         )
 
     def _build_triangle_source(self, case_input: ReservingCaseInput) -> _TriangleSource:
-        metadata = case_input.metadata or {}
-        sample_name = metadata.get("chainladder_sample") or metadata.get("sample_name")
-        if sample_name:
-            return _TriangleSource(
-                triangle=cl.load_sample(str(sample_name)),
-                source_description=f"sample:{sample_name}",
-            )
-
-        triangle_rows = metadata.get("triangle_rows")
-        if triangle_rows:
-            return _TriangleSource(
-                triangle=self._triangle_from_rows(triangle_rows, metadata),
-                source_description="rows",
-            )
-
-        raise ChainladderAdapterError(
-            "Case input must provide metadata.chainladder_sample or metadata.triangle_rows."
+        validated = validate_chainladder_case(case_input)
+        return _TriangleSource(
+            triangle=validated.triangle,
+            source_description=validated.source_description,
+            input_kind=validated.source_kind,
+            method=validated.method,
         )
-
-    def _triangle_from_rows(self, triangle_rows: Any, metadata: dict[str, Any]):
-        if not isinstance(triangle_rows, list) or not triangle_rows:
-            raise ChainladderAdapterError("metadata.triangle_rows must be a non-empty list of row dicts.")
-        try:
-            frame = pd.DataFrame(triangle_rows)
-        except ValueError as exc:
-            raise ChainladderAdapterError("metadata.triangle_rows could not be converted into a DataFrame.") from exc
-
-        origin_col = metadata.get("origin_column", "origin")
-        development_col = metadata.get("development_column", "development")
-        value_col = metadata.get("value_column", "value")
-        missing_cols = [col for col in (origin_col, development_col, value_col) if col not in frame.columns]
-        if missing_cols:
-            raise ChainladderAdapterError(
-                "triangle_rows is missing required columns: " + ", ".join(missing_cols)
-            )
-
-        cumulative = bool(metadata.get("cumulative", True))
-        index_col = metadata.get("index_column")
-        triangle_kwargs = {
-            "data": frame,
-            "origin": origin_col,
-            "development": development_col,
-            "columns": value_col,
-            "cumulative": cumulative,
-        }
-        if index_col:
-            triangle_kwargs["index"] = index_col
-        return cl.Triangle(**triangle_kwargs)
 
     @staticmethod
     def _triangle_total(triangle_obj: Any) -> float:

@@ -34,6 +34,13 @@ from reserving_workflow.reports import export_run_report
 from reserving_workflow.storage.local import LocalReviewStore
 from reserving_workflow.runtime import run_registry
 from reserving_workflow.tools import build_builtin_tool_registry
+from reserving_workflow.validation import (
+    ReservingValidationError,
+    build_chainladder_case_input,
+    build_chainladder_case_payload,
+    build_chainladder_validation_summary,
+    validate_chainladder_case,
+)
 from reserving_workflow.workflows import build_builtin_workflow_catalog
 
 DEFAULT_OPERATOR_ID = "local-actuary"
@@ -180,7 +187,7 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/runs")
-    async def create_run(request: RunCreateRequest, background_tasks: BackgroundTasks, http_request: Request) -> Any:
+    def create_run(request: RunCreateRequest, background_tasks: BackgroundTasks, http_request: Request) -> Any:
         try:
             _safe_artifact_component(request.case_id, field_name="case_id")
             artifact_dir = request.artifact_dir or _default_artifact_dir(resolved_settings, request.case_id)
@@ -199,17 +206,22 @@ def create_app(
         if review_delivery_dir is None:
             review_delivery_dir = resolved_settings.review_delivery_dir
         if workflow_entry is not None:
-            operator_params = _workflow_operator_params_from_request(
-                request,
-                workflow_entry=workflow_entry,
-                artifact_dir=artifact_dir,
-                review_delivery_dir=review_delivery_dir,
-                registry_path=resolved_settings.registry_path,
-                ownership=ownership,
-                runner_module=runner_module,
-                task_contracts_module=task_contracts_module,
-                tool_registry=resolved_tool_registry,
-            )
+            try:
+                operator_params = _workflow_operator_params_from_request(
+                    request,
+                    workflow_entry=workflow_entry,
+                    artifact_dir=artifact_dir,
+                    review_delivery_dir=review_delivery_dir,
+                    registry_path=resolved_settings.registry_path,
+                    ownership=ownership,
+                    runner_module=runner_module,
+                    task_contracts_module=task_contracts_module,
+                    tool_registry=resolved_tool_registry,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except ValidationError as exc:
+                raise HTTPException(status_code=400, detail=exc.errors()) from exc
             if request.background:
                 run_id = _generate_api_run_id(request.case_id)
                 operator_params["run_id"] = run_id
@@ -293,7 +305,7 @@ def create_app(
         return {"run_id": run_id, "event_count": len(events), "events": events}
 
     @app.post("/runs/{run_id}/rerun")
-    async def rerun(run_id: str, request: RerunRequest) -> dict[str, Any]:
+    def rerun(run_id: str, request: RerunRequest) -> dict[str, Any]:
         entry = _get_registry_entry(resolved_settings.registry_path, run_id)
         operator_params = dict(entry.get("operator_params", {}) or {})
         if operator_params.get("workflow_id"):
@@ -470,6 +482,7 @@ def _operator_params_from_request(
     task_contracts_module=None,
 ) -> dict[str, Any]:
     tool_inputs = dict(validated_tool_input.inputs)
+    case_payload = _case_payload_from_tool_input(request.case_id, validated_tool_input)
     params: dict[str, Any] = {
         "case_id": request.case_id,
         "artifact_dir": artifact_dir,
@@ -477,6 +490,7 @@ def _operator_params_from_request(
         "sample_name": tool_inputs.get("sample_name", "RAA"),
         "method": tool_inputs.get("method_variant", "chainladder"),
         "review_threshold_origin_count": tool_inputs.get("review_threshold_origin_count"),
+        "case_payload": case_payload,
         "user_prompt": request.user_prompt,
         "review_delivery_dir": review_delivery_dir,
         "registry_path": registry_path,
@@ -508,12 +522,26 @@ def _workflow_operator_params_from_request(
     task_contracts_module=None,
     tool_registry=None,
 ) -> dict[str, Any]:
+    workflow_inputs = _workflow_inputs_from_request(request)
+    if tool_registry is not None:
+        for step in workflow_entry.steps:
+            _normalize_tool_invocation(
+                RunCreateRequest(
+                    case_id=request.case_id,
+                    objective=request.objective,
+                    tool_id=step.tool_id,
+                    inputs={**dict(step.inputs), **workflow_inputs},
+                    user_prompt=request.user_prompt,
+                ),
+                tool_registry=tool_registry,
+            )
     params: dict[str, Any] = {
         "case_id": request.case_id,
         "artifact_dir": artifact_dir,
         "objective": request.objective,
         "workflow_id": workflow_entry.workflow_id,
         "workflow_entry": workflow_entry,
+        "workflow_inputs": workflow_inputs,
         "review_delivery_dir": review_delivery_dir,
         "registry_path": registry_path,
         "user_prompt": request.user_prompt,
@@ -528,6 +556,26 @@ def _workflow_operator_params_from_request(
     if tool_registry is not None:
         params["tool_registry"] = tool_registry
     return params
+
+
+def _case_payload_from_tool_input(case_id: str, validated_tool_input: ValidatedToolInput) -> dict[str, Any]:
+    if validated_tool_input.tool_id != "chainladder":
+        raise ValueError(f"Unknown tool_id: {validated_tool_input.tool_id}")
+    return build_chainladder_case_payload(
+        case_id=case_id,
+        tool_inputs=validated_tool_input.inputs,
+    )
+
+
+def _workflow_inputs_from_request(request: RunCreateRequest) -> dict[str, Any]:
+    workflow_inputs = dict(request.inputs or {})
+    if request.sample_name is not None and "sample_name" not in workflow_inputs:
+        workflow_inputs["sample_name"] = request.sample_name
+    if request.review_threshold_origin_count is not None and "review_threshold_origin_count" not in workflow_inputs:
+        workflow_inputs["review_threshold_origin_count"] = request.review_threshold_origin_count
+    if request.method is not None and "method_variant" not in workflow_inputs and "method" not in workflow_inputs:
+        workflow_inputs["method"] = request.method
+    return workflow_inputs
 
 
 def _record_background_acceptance(
@@ -557,6 +605,7 @@ def _record_background_acceptance(
         "workspace_id": ownership["workspace_id"],
     }
     if validated_tool_input is not None:
+        operator_params["case_payload"] = _case_payload_from_tool_input(request.case_id, validated_tool_input)
         operator_params["validated_input"] = {
             "case_id": request.case_id,
             "tool_id": validated_tool_input.tool_id,
@@ -564,6 +613,7 @@ def _record_background_acceptance(
         }
     if workflow_id is not None:
         operator_params["workflow_id"] = workflow_id
+        operator_params["workflow_inputs"] = _workflow_inputs_from_request(request)
     entry = run_registry.record_run_event(
         registry_path=registry_path,
         task_id=task_id,
@@ -746,6 +796,11 @@ def _normalize_tool_invocation(request: RunCreateRequest, *, tool_registry) -> V
 
     if tool_invocation.tool_id == "chainladder":
         validated_inputs = ChainladderToolInput.model_validate(merged_inputs)
+        case_input = build_chainladder_case_input(
+            case_id=request.case_id,
+            tool_inputs=validated_inputs.model_dump(mode="json"),
+        )
+        validate_chainladder_case(case_input)
         return ValidatedToolInput(
             tool_id=tool_invocation.tool_id,
             inputs=validated_inputs.model_dump(mode="json"),
@@ -771,6 +826,7 @@ def _run_sequential_workflow(
     task_contracts_module=None,
     tool_registry=None,
     workflow_entry=None,
+    workflow_inputs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if workflow_entry is None:
         workflow_catalog = build_builtin_workflow_catalog()
@@ -787,6 +843,7 @@ def _run_sequential_workflow(
     final_status = "completed"
     final_summary = f"Workflow {workflow_id} completed for {case_id}"
     workflow_event_payload = {"workflow_id": workflow_id, "step_count": len(workflow_entry.steps)}
+    resolved_workflow_inputs = dict(workflow_inputs or {})
 
     run_registry.record_run_event(
         registry_path=registry_path,
@@ -800,6 +857,7 @@ def _run_sequential_workflow(
         operator_params={
             "case_id": case_id,
             "workflow_id": workflow_id,
+            "workflow_inputs": resolved_workflow_inputs,
             "created_by": created_by,
             "operator_id": operator_id,
             "workspace_id": workspace_id,
@@ -821,6 +879,7 @@ def _run_sequential_workflow(
         operator_params={
             "case_id": case_id,
             "workflow_id": workflow_id,
+            "workflow_inputs": resolved_workflow_inputs,
             "created_by": created_by,
             "operator_id": operator_id,
             "workspace_id": workspace_id,
@@ -848,15 +907,17 @@ def _run_sequential_workflow(
             case_id=case_id,
             objective=objective,
             tool_id=step.tool_id,
-            inputs=dict(step.inputs),
+            inputs={**dict(step.inputs), **resolved_workflow_inputs},
             user_prompt=user_prompt,
         )
         step_inputs = _normalize_tool_invocation(step_request, tool_registry=tool_registry)
         step_artifact_dir = artifact_root / step.step_id
+        case_payload = _case_payload_from_tool_input(case_id, step_inputs)
         step_payload = {
             "workflow_id": workflow_id,
             "step_id": step.step_id,
             "tool_id": step.tool_id,
+            "step_kind": step.step_kind,
             "order": step_index,
         }
         _record_workflow_event(
@@ -871,26 +932,35 @@ def _run_sequential_workflow(
             event_type="workflow.step.started",
             event_payload=step_payload,
         )
-        step_result = operator_entrypoint.run_operator_flow(
-            case_id=case_id,
-            artifact_dir=step_artifact_dir,
-            objective=objective,
-            sample_name=step_inputs.inputs.get("sample_name", "RAA"),
-            method=step_inputs.inputs.get("method_variant", "chainladder"),
-            review_threshold_origin_count=step_inputs.inputs.get("review_threshold_origin_count"),
-            user_prompt=user_prompt,
-            review_delivery_dir=review_delivery_dir,
-            created_by=created_by,
-            operator_id=operator_id,
-            workspace_id=workspace_id,
-            validated_input={
-                "case_id": case_id,
-                "tool_id": step_inputs.tool_id,
-                "inputs": dict(step_inputs.inputs),
-            },
-            runner_module=runner_module,
-            task_contracts_module=task_contracts_module,
-        )
+        if step.step_kind == "validate":
+            step_result = _run_validation_step(
+                case_id=case_id,
+                artifact_dir=step_artifact_dir,
+                tool_input=step_inputs,
+                case_payload=case_payload,
+            )
+        else:
+            step_result = operator_entrypoint.run_operator_flow(
+                case_id=case_id,
+                artifact_dir=step_artifact_dir,
+                objective=objective,
+                sample_name=step_inputs.inputs.get("sample_name", "RAA"),
+                method=step_inputs.inputs.get("method_variant", "chainladder"),
+                review_threshold_origin_count=step_inputs.inputs.get("review_threshold_origin_count"),
+                case_payload=case_payload,
+                user_prompt=user_prompt,
+                review_delivery_dir=review_delivery_dir,
+                created_by=created_by,
+                operator_id=operator_id,
+                workspace_id=workspace_id,
+                validated_input={
+                    "case_id": case_id,
+                    "tool_id": step_inputs.tool_id,
+                    "inputs": dict(step_inputs.inputs),
+                },
+                runner_module=runner_module,
+                task_contracts_module=task_contracts_module,
+            )
         last_result = step_result
         step_status = step_result.get("status", "failed")
         step_manifest_path = Path(step_result.get("final_output", {}).get("artifact_manifest_path") or step_artifact_dir / "run_manifest.json").expanduser().resolve()
@@ -900,6 +970,7 @@ def _run_sequential_workflow(
             {
                 "step_id": step.step_id,
                 "tool_id": step.tool_id,
+                "step_kind": step.step_kind,
                 "title": step.title,
                 "status": step_status,
                 "artifact_dir": str(step_artifact_dir),
@@ -976,6 +1047,7 @@ def _run_sequential_workflow(
             "workflow_id": workflow_id,
             "user_prompt": user_prompt,
             "review_delivery_dir": str(review_delivery_dir) if review_delivery_dir is not None else None,
+            "workflow_inputs": resolved_workflow_inputs,
             "created_by": created_by,
             "operator_id": operator_id,
             "workspace_id": workspace_id,
@@ -1025,6 +1097,91 @@ def _run_sequential_workflow(
         result["route"] = {}
         result["trace"] = {}
     return result
+
+
+def _run_validation_step(
+    *,
+    case_id: str,
+    artifact_dir: str | Path,
+    tool_input: ValidatedToolInput,
+    case_payload: dict[str, Any],
+) -> dict[str, Any]:
+    artifact_root = Path(artifact_dir).expanduser().resolve()
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    validated_input_payload = {
+        "case_id": case_id,
+        "tool_id": tool_input.tool_id,
+        "inputs": dict(tool_input.inputs),
+    }
+    validated_input_path = write_json_artifact(
+        resolve_artifact_path(artifact_root, "validated_input.json"),
+        validated_input_payload,
+    )
+    case_input_path = write_json_artifact(
+        resolve_artifact_path(artifact_root, "case_input.json"),
+        case_payload,
+    )
+    try:
+        case_input = build_chainladder_case_input(case_id=case_id, tool_inputs=tool_input.inputs)
+        validated_source = validate_chainladder_case(case_input)
+        validation_result = build_chainladder_validation_summary(case_input, validated_source)
+        status = "completed"
+        ok = True
+        summary = f"Validated chainladder input for {case_id}"
+        errors: list[str] = []
+        error_category = None
+    except (ValidationError, ReservingValidationError, ValueError) as exc:
+        validation_result = {
+            "case_id": case_id,
+            "status": "failed",
+            "tool_id": tool_input.tool_id,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }
+        status = "failed"
+        ok = False
+        summary = f"Validation failed for {case_id}"
+        errors = [str(exc)]
+        error_category = "validation"
+    validation_result_path = write_json_artifact(
+        resolve_artifact_path(artifact_root, "validation_result.json"),
+        validation_result,
+    )
+    manifest_payload = {
+        "case_id": case_id,
+        "run_id": None,
+        "artifact_root": str(artifact_root),
+        "artifact_paths": {
+            "validated_input": str(validated_input_path),
+            "case_input": str(case_input_path),
+            "validation_result": str(validation_result_path),
+        },
+    }
+    run_manifest_path = resolve_artifact_path(artifact_root, "run_manifest.json")
+    manifest_payload["artifact_paths"]["run_manifest"] = str(run_manifest_path)
+    write_json_artifact(run_manifest_path, manifest_payload)
+    return {
+        "ok": ok,
+        "status": status,
+        "case_id": case_id,
+        "run_id": None,
+        "summary": summary,
+        "route": {},
+        "trace": {},
+        "worker_result": {
+            "status": status,
+            "case_id": case_id,
+            "run_id": None,
+            "summary": summary,
+            "artifact_paths": manifest_payload["artifact_paths"],
+        },
+        "final_output": {
+            "artifact_manifest_path": str(run_manifest_path),
+        },
+        "validation": validation_result,
+        "errors": errors,
+        "error_category": error_category,
+    }
 
 
 def _workflow_step_finished_event_type(status: str) -> str:

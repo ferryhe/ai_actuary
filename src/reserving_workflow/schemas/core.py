@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ReservingCaseInput(BaseModel):
@@ -16,6 +16,14 @@ class ReservingCaseInput(BaseModel):
     triangles: dict[str, list[float]] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     run_config: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("case_id")
+    @classmethod
+    def _case_id_must_not_be_blank(cls, value: str) -> str:
+        candidate = str(value).strip()
+        if not candidate:
+            raise ValueError("case_id must not be empty")
+        return candidate
 
 
 class DeterministicReserveResult(BaseModel):

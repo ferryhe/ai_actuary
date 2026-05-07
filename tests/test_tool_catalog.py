@@ -42,5 +42,6 @@ def test_builtin_tool_registry_returns_chainladder_schema():
     assert tool.console_defaults["sample_name"] == "RAA"
     assert tool.console_defaults["method_variant"] == "chainladder"
     assert tool.input_schema["required"] == []
+    assert "triangle_rows" in tool.input_schema["properties"]
     assert tool.input_schema["properties"]["method_variant"]["const"] == "chainladder"
     assert tool.input_schema["properties"]["method"]["const"] == "chainladder"
