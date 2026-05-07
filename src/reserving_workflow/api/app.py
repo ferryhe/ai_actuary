@@ -1406,14 +1406,40 @@ def _console_timeline(entry: dict[str, Any] | None) -> list[dict[str, Any]]:
 
 def _console_artifact_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
     if entry is None:
-        return {"present": False, "artifact_root": None, "artifact_manifest": None, "artifact_paths": {}, "artifacts": []}
+        return {
+            "present": False,
+            "status": "no_run_selected",
+            "artifact_root": None,
+            "artifact_manifest": None,
+            "artifact_paths": {},
+            "artifacts": [],
+            "primary_artifact_refs": [],
+            "review_artifact_refs": [],
+            "decision_artifact_refs": [],
+            "evidence_items": [],
+            "missing_expected_artifacts": [],
+            "freshness": None,
+        }
     manifest = _load_manifest_for_entry(entry)
+    artifact_root = entry.get("artifact_root")
+    root = Path(artifact_root).expanduser().resolve() if artifact_root else None
+    primary_refs = _console_expected_artifact_refs(root, manifest, category="primary")
+    review_refs = _console_expected_artifact_refs(root, manifest, category="review")
+    decision_refs = _console_expected_artifact_refs(root, manifest, category="decision")
+    evidence_items = [*primary_refs, *review_refs, *decision_refs]
     return {
         "present": manifest is not None,
-        "artifact_root": entry.get("artifact_root"),
+        "status": "ok" if manifest is not None else "manifest_missing",
+        "artifact_root": artifact_root,
         "artifact_manifest": manifest,
         "artifact_paths": manifest.get("artifact_paths", {}) if manifest else {},
         "artifacts": _artifact_refs_from_manifest(manifest),
+        "primary_artifact_refs": primary_refs,
+        "review_artifact_refs": review_refs,
+        "decision_artifact_refs": decision_refs,
+        "evidence_items": evidence_items,
+        "missing_expected_artifacts": [item["artifact_id"] for item in evidence_items if not item["present"]],
+        "freshness": _artifact_panel_freshness(evidence_items),
     }
 
 
@@ -1682,6 +1708,101 @@ def _artifact_refs_from_manifest(manifest: dict[str, Any] | None) -> list[dict[s
     return artifacts
 
 
+_CONSOLE_ARTIFACT_SPECS: tuple[dict[str, str], ...] = (
+    {"artifact_id": "run_manifest", "label": "Run manifest", "filename": "run_manifest.json", "category": "primary"},
+    {"artifact_id": "validated_input", "label": "Validated input", "filename": "validated_input.json", "category": "primary"},
+    {"artifact_id": "deterministic_result", "label": "Deterministic result", "filename": "deterministic_result.json", "category": "primary"},
+    {"artifact_id": "narrative_draft", "label": "Narrative draft", "filename": "narrative_draft.json", "category": "primary"},
+    {"artifact_id": "constitution_check", "label": "Constitution check", "filename": "constitution_check.json", "category": "primary"},
+    {"artifact_id": "review_packet", "label": "Review packet", "filename": "review_packet.json", "category": "review"},
+    {"artifact_id": "review_packet_markdown", "label": "Review packet markdown", "filename": "review_packet.md", "category": "review"},
+    {"artifact_id": "review_decision", "label": "Review decision", "filename": "review_decision.json", "category": "decision"},
+    {"artifact_id": "review_decision_markdown", "label": "Review decision markdown", "filename": "review_decision.md", "category": "decision"},
+    {"artifact_id": "operator_handoff", "label": "Operator handoff", "filename": "operator_handoff.md", "category": "decision"},
+    {"artifact_id": "reserve_summary_json", "label": "Reserve summary", "filename": "reserve_summary.json", "category": "decision"},
+    {"artifact_id": "reserve_summary_markdown", "label": "Reserve summary markdown", "filename": "reserve_summary.md", "category": "decision"},
+)
+
+
+def _console_expected_artifact_refs(
+    artifact_root: Path | None,
+    manifest: dict[str, Any] | None,
+    *,
+    category: str,
+) -> list[dict[str, Any]]:
+    manifest_paths = manifest.get("artifact_paths", {}) if manifest else {}
+    refs: list[dict[str, Any]] = []
+    for spec in _CONSOLE_ARTIFACT_SPECS:
+        if spec["category"] != category:
+            continue
+        artifact_path = _console_artifact_path(
+            artifact_root,
+            manifest_paths.get(spec["artifact_id"]),
+            fallback_filename=spec["filename"],
+        )
+        refs.append(
+            {
+                "artifact_id": spec["artifact_id"],
+                "label": spec["label"],
+                "category": category,
+                "present": artifact_path.exists() if artifact_path is not None else False,
+                "ref": _safe_artifact_ref(artifact_path, artifact_root),
+                "mtime": _artifact_mtime(artifact_path),
+            }
+        )
+    return refs
+
+
+def _console_artifact_path(
+    artifact_root: Path | None,
+    manifest_path: Any,
+    *,
+    fallback_filename: str,
+) -> Path | None:
+    if manifest_path is not None:
+        candidate = Path(str(manifest_path)).expanduser()
+        if not candidate.is_absolute() and artifact_root is not None:
+            candidate = artifact_root / candidate
+        resolved = candidate.resolve()
+        if artifact_root is not None and not resolved.is_relative_to(artifact_root):
+            return None
+        return resolved
+    if artifact_root is None:
+        return None
+    return (artifact_root / fallback_filename).resolve()
+
+
+def _safe_artifact_ref(path: Path | None, artifact_root: Path | None) -> str | None:
+    if path is None:
+        return None
+    if artifact_root is not None:
+        try:
+            return str(path.relative_to(artifact_root))
+        except ValueError:
+            pass
+    return path.name
+
+
+def _artifact_mtime(path: Path | None) -> str | None:
+    if path is None or not path.exists():
+        return None
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+
+
+def _artifact_panel_freshness(evidence_items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    present_items = [item for item in evidence_items if item.get("present")]
+    if not present_items:
+        return None
+    mtimes = [item["mtime"] for item in present_items if item.get("mtime")]
+    latest_mtime = max(mtimes) if mtimes else None
+    manifest_mtime = next((item.get("mtime") for item in present_items if item.get("artifact_id") == "run_manifest"), None)
+    return {
+        "present_artifact_count": len(present_items),
+        "latest_mtime": latest_mtime,
+        "run_manifest_mtime": manifest_mtime,
+    }
+
+
 def _review_packet_paths(entry: dict[str, Any]) -> dict[str, str | None]:
     delivery_paths = (entry.get("review_delivery") or {}).get("delivered_paths")
     if isinstance(delivery_paths, dict):
@@ -1746,6 +1867,22 @@ def _operator_console_html() -> str:
     .event-type { color: var(--accent); font-weight: 700; }
     .event-time { display: block; color: var(--muted); font-size: 12px; }
     .empty { color: var(--muted); }
+    .artifact-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; margin-bottom: 12px; }
+    .artifact-summary strong { display: block; font-size: 12px; color: var(--muted); font-weight: 600; }
+    .artifact-summary span { display: block; margin-top: 2px; }
+    .artifact-group { margin-top: 14px; }
+    .artifact-group h3 { margin: 0 0 8px; font-size: 14px; }
+    .artifact-list { display: grid; gap: 8px; }
+    .artifact-card { border: 1px solid var(--border); border-radius: 10px; padding: 10px; background: #fbfcfe; }
+    .artifact-card header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; padding: 0; background: transparent; color: inherit; }
+    .artifact-card h4 { margin: 0; font-size: 14px; color: #102a43; }
+    .artifact-chip { border-radius: 999px; padding: 2px 8px; font-size: 12px; border: 1px solid var(--border); background: white; }
+    .artifact-chip.present { color: var(--ok); border-color: #a6f4c5; background: #ecfdf3; }
+    .artifact-chip.missing { color: var(--danger); border-color: #fda29b; background: #fef3f2; }
+    .artifact-meta { font-size: 12px; color: var(--muted); }
+    .artifact-gaps { margin: 12px 0 0; padding-left: 18px; }
+    .artifact-gaps li { margin: 4px 0; }
+    details.raw-json { margin-top: 14px; }
     @media (max-width: 900px) { main, .workspace { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -1794,7 +1931,7 @@ def _operator_console_html() -> str:
     </section>
     <div class="workspace">
       <section aria-label="Timeline"><h2>Timeline</h2><div id="timeline" class="panel-body">Loading…</div></section>
-      <section aria-label="Artifact Panel"><h2>Artifact Panel</h2><pre id="artifact-panel">Loading…</pre></section>
+      <section aria-label="Artifact Evidence Panel"><h2>Artifact Evidence Panel</h2><div id="artifact-panel" class="panel-body">Loading…</div></section>
       <section aria-label="Review Panel">
         <h2>Review Panel</h2>
         <pre id="review-panel">Loading…</pre>
@@ -2045,6 +2182,111 @@ def _operator_console_html() -> str:
       }
     }
 
+    function appendSummaryCell(container, label, value) {
+      const cell = document.createElement("div");
+      const title = document.createElement("strong");
+      title.textContent = label;
+      const content = document.createElement("span");
+      content.textContent = value;
+      cell.append(title, content);
+      container.appendChild(cell);
+    }
+
+    function renderArtifactGroup(container, title, items, emptyMessage) {
+      const section = document.createElement("div");
+      section.className = "artifact-group";
+      const heading = document.createElement("h3");
+      heading.textContent = title;
+      section.appendChild(heading);
+      if (!items || items.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = emptyMessage;
+        section.appendChild(empty);
+        container.appendChild(section);
+        return;
+      }
+      const list = document.createElement("div");
+      list.className = "artifact-list";
+      for (const item of items) {
+        const card = document.createElement("article");
+        card.className = "artifact-card";
+        const header = document.createElement("header");
+        const name = document.createElement("h4");
+        name.textContent = item.label || item.artifact_id || "artifact";
+        const chip = document.createElement("span");
+        chip.className = `artifact-chip ${item.present ? "present" : "missing"}`;
+        chip.textContent = item.present ? "present" : "missing";
+        header.append(name, chip);
+        const ref = document.createElement("div");
+        ref.className = "artifact-meta";
+        ref.textContent = `ref: ${item.ref || item.artifact_id || "n/a"}`;
+        const mtime = document.createElement("div");
+        mtime.className = "artifact-meta";
+        mtime.textContent = item.mtime ? `mtime: ${item.mtime}` : "mtime: unavailable";
+        card.append(header, ref, mtime);
+        list.appendChild(card);
+      }
+      section.appendChild(list);
+      container.appendChild(section);
+    }
+
+    function renderArtifactPanel(panel) {
+      const container = document.getElementById("artifact-panel");
+      container.innerHTML = "";
+      if (!panel) {
+        container.textContent = "Artifact evidence unavailable.";
+        container.className = "panel-body empty";
+        return;
+      }
+      if (panel.status === "no_run_selected") {
+        container.textContent = "Select a run to inspect evidence.";
+        container.className = "panel-body empty";
+        return;
+      }
+      container.className = "panel-body";
+      const summary = document.createElement("div");
+      summary.className = "artifact-summary";
+      appendSummaryCell(summary, "Manifest status", panel.present ? "present" : "missing");
+      appendSummaryCell(summary, "Artifact root", panel.artifact_root || "unavailable");
+      appendSummaryCell(summary, "Present artifacts", String((panel.freshness && panel.freshness.present_artifact_count) || 0));
+      appendSummaryCell(summary, "Latest mtime", (panel.freshness && panel.freshness.latest_mtime) || "unavailable");
+      container.appendChild(summary);
+
+      if (panel.status === "manifest_missing") {
+        const warning = document.createElement("div");
+        warning.className = "empty";
+        warning.textContent = "Run artifact root exists, but run_manifest.json is missing. Known evidence refs are still shown below.";
+        container.appendChild(warning);
+      }
+
+      if (panel.missing_expected_artifacts && panel.missing_expected_artifacts.length) {
+        const heading = document.createElement("h3");
+        heading.textContent = "Evidence Gaps";
+        const list = document.createElement("ul");
+        list.className = "artifact-gaps";
+        for (const artifactId of panel.missing_expected_artifacts) {
+          const item = document.createElement("li");
+          item.textContent = artifactId;
+          list.appendChild(item);
+        }
+        container.append(heading, list);
+      }
+
+      renderArtifactGroup(container, "Primary Evidence", panel.primary_artifact_refs, "No primary evidence refs available.");
+      renderArtifactGroup(container, "Review Evidence", panel.review_artifact_refs, "No review evidence refs available.");
+      renderArtifactGroup(container, "Decision / Export Evidence", panel.decision_artifact_refs, "No decision or report-export refs available.");
+
+      const rawDetails = document.createElement("details");
+      rawDetails.className = "raw-json";
+      const rawSummary = document.createElement("summary");
+      rawSummary.textContent = "Raw artifact panel JSON";
+      const rawPre = document.createElement("pre");
+      rawPre.textContent = JSON.stringify(panel, null, 2);
+      rawDetails.append(rawSummary, rawPre);
+      container.appendChild(rawDetails);
+    }
+
     async function loadConsole(runId, options = {}) {
       if (!options.preservePolling) stopPolling();
       const params = new URLSearchParams();
@@ -2067,7 +2309,7 @@ def _operator_console_html() -> str:
         renderRunQueue(state);
         renderReviewInbox(state.review_inbox || []);
         renderTimeline(state.timeline || []);
-        document.getElementById("artifact-panel").textContent = JSON.stringify(state.artifact_panel, null, 2);
+        renderArtifactPanel(state.artifact_panel);
         document.getElementById("review-panel").textContent = JSON.stringify(state.review_panel, null, 2);
         document.getElementById("review-id-input").value = state.review_panel && state.review_panel.review_id ? state.review_panel.review_id : "";
         document.getElementById("submit-review-decision").disabled = !(state.review_panel && state.review_panel.review_id);

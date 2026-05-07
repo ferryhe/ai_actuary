@@ -77,6 +77,34 @@ Current API payloads also keep the legacy `event_type` field for compatibility. 
 
 Artifact lists are derived from `run_manifest.json`. The manifest remains the source of truth for artifact paths.
 
+## Console Artifact Evidence Panel
+
+`GET /console/state` keeps the existing `artifact_panel` keys for backward compatibility:
+
+- `present`
+- `artifact_root`
+- `artifact_manifest`
+- `artifact_paths`
+- `artifacts`
+
+PR5 adds structured evidence fields so the console can render a readable evidence panel without changing the underlying runtime contract:
+
+- `status` — `ok`, `manifest_missing`, or `no_run_selected`
+- `primary_artifact_refs`
+- `review_artifact_refs`
+- `decision_artifact_refs`
+- `evidence_items`
+- `missing_expected_artifacts`
+- `freshness`
+
+The evidence panel is a thin derived view over `run_manifest.json`, known artifact filenames, and existing review/report files. It does not invent new artifact sources.
+
+Safe path behavior for the new evidence fields is frozen to:
+
+- keep legacy `artifact_manifest`, `artifact_paths`, and `artifacts` behavior unchanged for compatibility
+- expose new evidence refs through safe relative refs such as `run_manifest.json` or `step_validate/run_manifest.json`
+- avoid leaking new absolute local filesystem paths in the added console evidence fields when a relative ref or basename is sufficient
+
 ## Review Contract
 
 `Review.status` is frozen to:
