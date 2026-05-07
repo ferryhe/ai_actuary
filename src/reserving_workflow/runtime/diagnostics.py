@@ -81,11 +81,13 @@ def build_preflight_report(
                 "workspace_id": default_workspace_id,
             },
             "paths": {
-                "registry_path": str(Path(registry_path).expanduser().resolve()),
-                "artifact_root": str(Path(artifact_root).expanduser().resolve()),
-                "review_store_dir": str(Path(review_store_dir).expanduser().resolve()),
+                "registry_path": _path_target_metadata(registry_path, target_type="file"),
+                "artifact_root": _path_target_metadata(artifact_root, target_type="directory"),
+                "review_store_dir": _path_target_metadata(review_store_dir, target_type="directory"),
                 "review_delivery_dir": (
-                    str(Path(review_delivery_dir).expanduser().resolve()) if review_delivery_dir is not None else None
+                    _path_target_metadata(review_delivery_dir, target_type="directory")
+                    if review_delivery_dir is not None
+                    else {"configured": False, "target_type": "directory"}
                 ),
             },
             "catalog": {
@@ -98,8 +100,6 @@ def build_preflight_report(
         "runtime": {
             "python_version": platform.python_version(),
             "python_implementation": platform.python_implementation(),
-            "platform": platform.platform(),
-            "cwd": str(Path.cwd().resolve()),
             "service_version": version,
         },
         "checks": checks,
@@ -114,14 +114,14 @@ def _check_registry_path(path: str | Path) -> dict[str, Any]:
                 check_id="registry_path",
                 status="error",
                 summary="Registry path points to a directory.",
-                details={"path": str(target), "exists": True, "kind": "directory"},
+                details=_path_check_details(target, exists=True, kind="directory"),
             )
         writable = os.access(target, os.W_OK)
         return _check_result(
             check_id="registry_path",
             status="ok" if writable else "error",
             summary="Registry file is writable." if writable else "Registry file is not writable.",
-            details={"path": str(target), "exists": True, "kind": "file", "writable": writable},
+            details=_path_check_details(target, exists=True, kind="file", writable=writable),
         )
 
     parent = _nearest_existing_parent(target)
@@ -131,9 +131,8 @@ def _check_registry_path(path: str | Path) -> dict[str, Any]:
         status="ok" if writable else "error",
         summary="Registry file can be created." if writable else "Registry file cannot be created.",
         details={
-            "path": str(target),
             "exists": False,
-            "parent": str(parent),
+            "parent_exists": parent.exists(),
             "parent_writable": writable,
         },
     )
@@ -153,14 +152,14 @@ def _check_directory_root(
                 check_id=check_id,
                 status="error",
                 summary=f"{label} path points to a file.",
-                details={"path": str(target), "exists": True, "kind": "file"},
+                details=_path_check_details(target, exists=True, kind="file"),
             )
         writable = os.access(target, os.W_OK | os.X_OK)
         return _check_result(
             check_id=check_id,
             status="ok" if writable else "error",
             summary=f"{label} directory is writable." if writable else f"{label} directory is not writable.",
-            details={"path": str(target), "exists": True, "kind": "directory", "writable": writable},
+            details=_path_check_details(target, exists=True, kind="directory", writable=writable),
         )
 
     parent = _nearest_existing_parent(target)
@@ -170,9 +169,8 @@ def _check_directory_root(
         status="ok" if writable else "error",
         summary=missing_summary if writable else f"{label} cannot be created.",
         details={
-            "path": str(target),
             "exists": False,
-            "parent": str(parent),
+            "parent_exists": parent.exists(),
             "parent_writable": writable,
         },
     )
@@ -229,6 +227,24 @@ def _check_message(check: dict[str, Any]) -> dict[str, Any]:
         "status": check["status"],
         "summary": check["summary"],
     }
+
+
+def _path_target_metadata(path: str | Path, *, target_type: str) -> dict[str, Any]:
+    """Return non-sensitive path configuration metadata.
+
+    The preflight endpoint is designed for safe operator display. It should not
+    expose resolved local filesystem paths because those can include usernames,
+    home directories, or deployment-specific layout details.
+    """
+
+    return {"configured": True, "target_type": target_type, "name": Path(path).name}
+
+
+def _path_check_details(path: Path, *, exists: bool, kind: str, writable: bool | None = None) -> dict[str, Any]:
+    details: dict[str, Any] = {"exists": exists, "kind": kind, "name": path.name}
+    if writable is not None:
+        details["writable"] = writable
+    return details
 
 
 def _nearest_existing_parent(path: Path) -> Path:

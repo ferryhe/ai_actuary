@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import httpx
+from reserving_workflow.api import app as api_app
 
 from reserving_workflow.api.app import (
     ApiSettings,
@@ -275,7 +276,17 @@ def test_preflight_endpoint_reports_ready_runtime_when_paths_and_catalogs_are_co
     assert payload["configuration"]["catalog"]["workflow_ids"] == ["chainladder-basic", "chainladder-validated"]
     assert payload["configuration"]["defaults"]["operator_id"] == DEFAULT_OPERATOR_ID
     assert payload["configuration"]["defaults"]["workspace_id"] == DEFAULT_WORKSPACE_ID
-    assert payload["configuration"]["paths"]["review_delivery_dir"] == str((tmp_path / "review-outbox").resolve())
+    assert payload["configuration"]["paths"]["review_delivery_dir"] == {
+        "configured": True,
+        "target_type": "directory",
+        "name": "review-outbox",
+    }
+    assert payload["configuration"]["paths"]["registry_path"] == {
+        "configured": True,
+        "target_type": "file",
+        "name": "run-registry.json",
+    }
+    assert "cwd" not in payload["runtime"]
     assert {item["check_id"]: item["status"] for item in payload["checks"]} == {
         "registry_path": "ok",
         "artifact_root": "ok",
@@ -288,6 +299,7 @@ def test_preflight_endpoint_reports_ready_runtime_when_paths_and_catalogs_are_co
     assert payload["errors"] == []
     serialized = json.dumps(payload)
     assert "OPENAI_API_KEY" not in serialized
+    assert str(tmp_path) not in serialized
 
 
 def test_preflight_endpoint_reports_degraded_runtime_for_missing_delivery_and_empty_catalogs(tmp_path):
@@ -311,6 +323,20 @@ def test_preflight_endpoint_reports_degraded_runtime_for_missing_delivery_and_em
     assert checks["workflow_catalog"]["status"] == "warning"
     assert payload["configuration"]["catalog"]["tool_count"] == 0
     assert payload["configuration"]["catalog"]["workflow_count"] == 0
+
+
+def test_review_store_unavailable_response_does_not_expose_exception_details(tmp_path, monkeypatch):
+    class BrokenReviewStore:
+        def __init__(self, path):
+            raise OSError(f"cannot open sensitive path {tmp_path / 'reviews'}")
+
+    monkeypatch.setattr(api_app, "LocalReviewStore", BrokenReviewStore)
+    client = _client(tmp_path)
+
+    response = client.get("/reviews")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Review store unavailable."}
 
 
 def test_preflight_endpoint_reports_not_ready_when_runtime_paths_are_invalid(tmp_path):

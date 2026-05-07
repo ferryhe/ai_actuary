@@ -126,8 +126,8 @@ def create_app(
     def _get_review_store() -> LocalReviewStore:
         try:
             return LocalReviewStore(resolved_settings.review_store_dir)
-        except Exception as exc:  # pragma: no cover - exercised through API surface
-            raise HTTPException(status_code=503, detail=f"Review store unavailable: {exc}") from exc
+        except OSError as exc:  # pragma: no cover - exercised through API surface
+            raise HTTPException(status_code=503, detail="Review store unavailable.") from exc
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
