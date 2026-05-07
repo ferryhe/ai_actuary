@@ -237,9 +237,18 @@ python scripts/run_batch_benchmark.py \
   --artifact-root ./tmp/batch-run
 ```
 
+Or run the checked-in deterministic benchmark pack and emit a local run registry for later replay/report export:
+
+```bash
+python scripts/run_batch_benchmark.py \
+  --case-pack deterministic-v1 \
+  --artifact-root ./tmp/batch-run \
+  --registry-path ./tmp/batch-run/run-registry.json
+```
+
 **Step 3 — Agent system:** baseline and governed modes are executed and scored.
 
-**Step 4 — Human:** inspect `./tmp/batch-run/comparison_report.json`.
+**Step 4 — Human:** inspect `./tmp/batch-run/comparison_report.json`, `./tmp/batch-run/batch_manifest.json`, and the per-run manifests under each mode directory.
 
 ### D. Replay one saved run
 
