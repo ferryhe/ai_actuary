@@ -1,0 +1,39 @@
+{
+  "case_pack_id": "deterministic-v1",
+  "description": "Deterministic benchmark cases that do not require external services or credentials.",
+  "cases": [
+    {
+      "case_id": "simulated-steady-growth",
+      "simulation": {
+        "simulation_id": "steady-growth-v1",
+        "origin_year_start": 2018,
+        "origin_count": 5,
+        "development_count": 5,
+        "base_ultimate": 1200.0,
+        "origin_increment": 140.0,
+        "curvature": 10.0,
+        "claim_count_base": 2,
+        "cdf_pattern": [0.52, 0.76, 0.89, 0.96, 1.0]
+      }
+    },
+    {
+      "case_id": "simulated-review-threshold",
+      "review_threshold_origin_count": 4,
+      "simulation": {
+        "simulation_id": "review-threshold-v1",
+        "origin_year_start": 2019,
+        "origin_count": 6,
+        "development_count": 6,
+        "base_ultimate": 900.0,
+        "origin_increment": 95.0,
+        "curvature": 8.0,
+        "claim_count_base": 3,
+        "cdf_pattern": [0.4, 0.63, 0.8, 0.9, 0.97, 1.0]
+      }
+    },
+    {
+      "case_id": "sample-raa-control",
+      "sample_name": "RAA"
+    }
+  ]
+}

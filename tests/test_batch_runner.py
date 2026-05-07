@@ -8,6 +8,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BATCH_RUNNER_PATH = REPO_ROOT / "benchmarks" / "runners" / "batch_runner.py"
 COMPARISON_PATH = REPO_ROOT / "src" / "reserving_workflow" / "evaluation" / "comparison.py"
+CASE_PACKS_PATH = REPO_ROOT / "src" / "reserving_workflow" / "evaluation" / "case_packs.py"
+SIMULATION_PATH = REPO_ROOT / "src" / "reserving_workflow" / "evaluation" / "simulation.py"
+REPORT_EXPORT_PATH = REPO_ROOT / "src" / "reserving_workflow" / "reports" / "export.py"
 HERMES_WORKER_DIR = REPO_ROOT / "workflows" / "agent-runtimes" / "hermes-worker"
 
 
@@ -60,27 +63,22 @@ def test_score_batch_mode_results_counts_statuses_and_numeric_deltas():
 
 def test_run_batch_benchmark_generates_comparison_report(tmp_path):
     batch_runner = _load_module("batch_runner_module", BATCH_RUNNER_PATH)
+    case_worker_module = _load_module("batch_runner_case_worker", HERMES_WORKER_DIR / "case_worker.py")
 
     def fake_governed_runner(task, *, user_prompt=None):
+        worker_result = case_worker_module.run_case_worker(task)
         return {
             "route": {"mode": "governed"},
-            "worker_result": {
-                "case_id": task.case_ref,
-                "status": "completed",
-                "review_reasons": [],
-                "artifact_paths": {"run_manifest": str(Path(task.inputs["artifact_dir"]) / "run_manifest.json")},
-                "deterministic_result": {
-                    "reserve_summary": {"latest_diagonal": 160987.0, "ultimate": 213122.22826121017, "ibnr": 52135.228261210155},
-                },
-            },
+            "worker_result": worker_result.model_dump(mode="json"),
             "final_output": {
-                "case_id": task.case_ref,
-                "worker_status": "completed",
+                "case_id": worker_result.case_id,
+                "run_id": worker_result.run_id,
+                "worker_status": worker_result.status,
                 "deterministic_method": "chainladder",
-                "cited_values": {"latest_diagonal": 160987.0, "ultimate": 213122.22826121017, "ibnr": 52135.228261210155},
-                "review_reasons": [],
-                "artifact_manifest_path": str(Path(task.inputs["artifact_dir"]) / "run_manifest.json"),
-                "narrative_summary": f"governed summary for {task.case_ref}",
+                "cited_values": dict(worker_result.deterministic_result.get("reserve_summary", {})),
+                "review_reasons": list(worker_result.review_reasons),
+                "artifact_manifest_path": worker_result.artifact_paths["run_manifest"],
+                "narrative_summary": f"governed summary for {worker_result.case_id}",
             },
         }
 
@@ -103,6 +101,17 @@ def test_run_batch_benchmark_generates_comparison_report(tmp_path):
     assert "batch-case-1" in saved_report["case_comparisons"]
     assert Path(saved_report["mode_artifact_manifests"]["baseline_prompt"][0]).exists()
     assert Path(saved_report["mode_artifact_manifests"]["governed_workflow"][0]).parent.parent.name == "governed_workflow"
+    assert Path(saved_report["resolved_case_pack_path"]).exists()
+    assert Path(saved_report["batch_manifest_path"]).exists()
+    assert Path(saved_report["registry_path"]).exists()
+    run_ids = [
+        result["run_id"]
+        for mode_results in saved_report["mode_results"].values()
+        for result in mode_results
+    ]
+    assert len(run_ids) == len(set(run_ids))
+    assert "benchmark-baseline_prompt-batch-case-1" in run_ids
+    assert "benchmark-governed_workflow-batch-case-1" in run_ids
 
 
 def test_run_batch_benchmark_records_failed_mode_and_still_writes_report(tmp_path):
@@ -210,3 +219,137 @@ def test_run_batch_benchmark_script_emits_json(tmp_path):
     payload = json.loads(proc.stdout)
     assert payload["ok"] is True
     assert payload["case_count"] == 1
+
+
+def test_simulate_claim_triangle_returns_stable_rows_and_claims():
+    simulation = _load_module("simulation_module", SIMULATION_PATH)
+
+    payload = simulation.simulate_claim_triangle(
+        {
+            "simulation_id": "stable-v1",
+            "origin_year_start": 2020,
+            "origin_count": 3,
+            "development_count": 3,
+            "base_ultimate": 1000.0,
+            "origin_increment": 100.0,
+            "curvature": 10.0,
+            "claim_count_base": 2,
+            "cdf_pattern": [0.5, 0.8, 1.0],
+        }
+    )
+
+    assert payload["simulation_id"] == "stable-v1"
+    assert payload["triangle_rows"] == [
+        {"origin": 2020, "development": 2020, "paid": 500.0},
+        {"origin": 2020, "development": 2021, "paid": 800.0},
+        {"origin": 2020, "development": 2022, "paid": 1000.0},
+        {"origin": 2021, "development": 2021, "paid": 555.0},
+        {"origin": 2021, "development": 2022, "paid": 888.0},
+        {"origin": 2022, "development": 2022, "paid": 620.0},
+    ]
+    assert payload["claim_records"][0]["claim_id"] == "stable-v1-OY2020-DY2020-C01"
+    last_cell_total = sum(
+        record["paid_incremental"]
+        for record in payload["claim_records"]
+        if record["origin"] == 2022 and record["development"] == 2022
+    )
+    assert last_cell_total == 620.0
+
+
+def test_load_case_pack_resolves_deterministic_simulations():
+    case_packs = _load_module("case_packs_module", CASE_PACKS_PATH)
+
+    pack = case_packs.load_case_pack()
+
+    assert pack["case_pack_id"] == "deterministic-v1"
+    assert len(pack["cases"]) == 3
+    simulated_case = next(case for case in pack["cases"] if case["case_id"] == "simulated-steady-growth")
+    assert simulated_case["case_payload"]["metadata"]["simulation"]["simulation_id"] == "steady-growth-v1"
+    assert simulated_case["case_payload"]["run_config"]["required_artifacts"]
+    assert simulated_case["case_payload"]["metadata"]["triangle_rows"][0]["origin"] == 2018
+
+
+def test_load_case_pack_missing_file_error_is_actionable(monkeypatch, tmp_path):
+    case_packs = _load_module("case_packs_missing_file", CASE_PACKS_PATH)
+
+    missing_path = tmp_path / "missing_case_pack.json"
+    monkeypatch.setattr(case_packs, "_default_case_pack_path", lambda: missing_path)
+
+    try:
+        case_packs.load_case_pack()
+    except FileNotFoundError as exc:
+        message = str(exc)
+    else:  # pragma: no cover - defensive clarity for assertion failure
+        raise AssertionError("Expected FileNotFoundError for missing builtin case pack")
+
+    assert "Builtin benchmark case pack file is missing" in message
+    assert str(missing_path) in message
+
+
+def test_batch_benchmark_generated_run_can_be_replayed_and_exported(tmp_path):
+    batch_runner = _load_module("batch_runner_replay_export", BATCH_RUNNER_PATH)
+    case_packs = _load_module("case_packs_replay_export", CASE_PACKS_PATH)
+    replay_module = _load_module("replay_module_benchmark", REPO_ROOT / "src" / "reserving_workflow" / "artifacts" / "replay.py")
+    report_export = _load_module("report_export_benchmark", REPORT_EXPORT_PATH)
+    case_worker_module = _load_module("case_worker_benchmark", HERMES_WORKER_DIR / "case_worker.py")
+
+    def fake_governed_runner(task, *, user_prompt=None):
+        worker_result = case_worker_module.run_case_worker(task)
+        return {
+            "route": {"mode": "governed"},
+            "worker_result": worker_result.model_dump(mode="json"),
+            "final_output": {
+                "case_id": worker_result.case_id,
+                "run_id": worker_result.run_id,
+                "worker_status": worker_result.status,
+                "cited_values": dict(worker_result.deterministic_result.get("reserve_summary", {})),
+                "review_reasons": list(worker_result.review_reasons),
+                "artifact_manifest_path": worker_result.artifact_paths["run_manifest"],
+            },
+        }
+
+    pack = case_packs.load_case_pack()
+    report = batch_runner.run_batch_benchmark(
+        cases=pack["cases"][:1],
+        artifact_root=tmp_path / "batch",
+        governed_runner=fake_governed_runner,
+        case_pack_id=pack["case_pack_id"],
+    )
+
+    governed_result = report["mode_results"]["governed_workflow"][0]
+    replay = replay_module.replay_case_from_manifest(governed_result["artifact_manifest_path"])
+    export = report_export.export_run_report(
+        registry_path=report["registry_path"],
+        run_id=governed_result["run_id"],
+        review_store_root=tmp_path / "reviews",
+    )
+
+    assert replay["matches_saved_result"] is True
+    assert replay["saved_summary"] == replay["replayed_summary"]
+    assert export["run"]["run_id"] == governed_result["run_id"]
+    registry_payload = json.loads(Path(report["registry_path"]).read_text(encoding="utf-8"))
+    registry_entry = next(item for item in registry_payload["runs"] if item["run_id"] == governed_result["run_id"])
+    assert registry_entry["operator_params"]["case_pack_id"] == "deterministic-v1"
+    assert Path(export["exports"]["operator_handoff_markdown"]).exists()
+    assert Path(export["exports"]["reserve_summary_json"]).exists()
+
+
+def test_run_batch_benchmark_script_supports_builtin_case_pack(tmp_path):
+    script_path = REPO_ROOT / "scripts" / "run_batch_benchmark.py"
+    helper = tmp_path / "invoke_batch_pack_script.py"
+    helper.write_text(
+        "import importlib.util, types\n"
+        f"script_spec=importlib.util.spec_from_file_location('run_batch_benchmark', {str(script_path)!r})\n"
+        "script=importlib.util.module_from_spec(script_spec)\n"
+        "script_spec.loader.exec_module(script)\n"
+        "script._load_batch_runner_module=lambda: types.SimpleNamespace(run_batch_benchmark=lambda **kwargs: {'ok': True, 'case_count': len(kwargs['cases']), 'case_pack_id': kwargs['case_pack_id']})\n"
+        "script.main(['--case-pack', 'deterministic-v1', '--artifact-root', './tmp/batch-cli'])\n"
+    )
+
+    proc = __import__('subprocess').run([__import__('sys').executable, str(helper)], capture_output=True, text=True, check=False)
+
+    assert proc.returncode == 0
+    payload = json.loads(proc.stdout)
+    assert payload["ok"] is True
+    assert payload["case_count"] == 3
+    assert payload["case_pack_id"] == "deterministic-v1"
