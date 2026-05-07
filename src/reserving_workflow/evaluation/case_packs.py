@@ -16,7 +16,13 @@ DEFAULT_CASE_PACK_ID = "deterministic-v1"
 def load_case_pack(case_pack_id: str = DEFAULT_CASE_PACK_ID) -> dict[str, Any]:
     if case_pack_id != DEFAULT_CASE_PACK_ID:
         raise ValueError(f"Unknown benchmark case pack: {case_pack_id}")
-    payload = json.loads(_default_case_pack_path().read_text(encoding="utf-8"))
+    case_pack_path = _default_case_pack_path()
+    if not case_pack_path.exists():
+        raise FileNotFoundError(
+            "Builtin benchmark case pack file is missing: "
+            f"{case_pack_path}. Run from a repository checkout or include benchmarks/case_packs in the distribution."
+        )
+    payload = json.loads(case_pack_path.read_text(encoding="utf-8"))
     resolved_cases = [resolve_case_definition(case) for case in payload.get("cases", [])]
     return {
         "case_pack_id": payload.get("case_pack_id", case_pack_id),

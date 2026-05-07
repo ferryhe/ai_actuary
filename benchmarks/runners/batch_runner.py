@@ -79,6 +79,8 @@ def run_batch_benchmark(
                     review_threshold_origin_count=review_threshold_origin_count,
                     case_payload=case.get("case_payload"),
                 )
+                task.run_id = _benchmark_run_id(mode=mode, case_id=case_id)
+                task.task_id = f"benchmark-{mode}-{case_id}"
                 if mode == "baseline_prompt":
                     worker_result = case_worker_module.run_case_worker(task)
                     manifest_path = worker_result.artifact_paths.get("run_manifest")
@@ -134,6 +136,7 @@ def run_batch_benchmark(
                     mode=mode,
                     case=case,
                     result_summary=result_summary,
+                    case_pack_id=case_pack_id,
                 )
 
     scored = comparison_module.score_batch_mode_results(mode_results)
@@ -197,12 +200,17 @@ def _input_source(case: dict[str, Any]) -> str:
     return "sample_name"
 
 
+def _benchmark_run_id(*, mode: str, case_id: str) -> str:
+    return f"benchmark-{mode}-{case_id}"
+
+
 def _record_registry_entry(
     *,
     registry_path: Path,
     mode: str,
     case: dict[str, Any],
     result_summary: dict[str, Any],
+    case_pack_id: str | None = None,
 ) -> None:
     artifact_root = result_summary.get("artifact_root")
     run_id = result_summary.get("run_id")
@@ -222,7 +230,7 @@ def _record_registry_entry(
             "sample_name": case.get("sample_name"),
             "case_payload": case.get("case_payload"),
             "review_threshold_origin_count": case.get("review_threshold_origin_count"),
-            "case_pack_id": case.get("case_pack_id"),
+            "case_pack_id": case_pack_id or case.get("case_pack_id"),
         },
         created_by="batch-benchmark",
         review_required=str(result_summary.get("status")) == "needs_review",

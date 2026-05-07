@@ -104,6 +104,14 @@ def test_run_batch_benchmark_generates_comparison_report(tmp_path):
     assert Path(saved_report["resolved_case_pack_path"]).exists()
     assert Path(saved_report["batch_manifest_path"]).exists()
     assert Path(saved_report["registry_path"]).exists()
+    run_ids = [
+        result["run_id"]
+        for mode_results in saved_report["mode_results"].values()
+        for result in mode_results
+    ]
+    assert len(run_ids) == len(set(run_ids))
+    assert "benchmark-baseline_prompt-batch-case-1" in run_ids
+    assert "benchmark-governed_workflow-batch-case-1" in run_ids
 
 
 def test_run_batch_benchmark_records_failed_mode_and_still_writes_report(tmp_path):
@@ -261,6 +269,23 @@ def test_load_case_pack_resolves_deterministic_simulations():
     assert simulated_case["case_payload"]["metadata"]["triangle_rows"][0]["origin"] == 2018
 
 
+def test_load_case_pack_missing_file_error_is_actionable(monkeypatch, tmp_path):
+    case_packs = _load_module("case_packs_missing_file", CASE_PACKS_PATH)
+
+    missing_path = tmp_path / "missing_case_pack.json"
+    monkeypatch.setattr(case_packs, "_default_case_pack_path", lambda: missing_path)
+
+    try:
+        case_packs.load_case_pack()
+    except FileNotFoundError as exc:
+        message = str(exc)
+    else:  # pragma: no cover - defensive clarity for assertion failure
+        raise AssertionError("Expected FileNotFoundError for missing builtin case pack")
+
+    assert "Builtin benchmark case pack file is missing" in message
+    assert str(missing_path) in message
+
+
 def test_batch_benchmark_generated_run_can_be_replayed_and_exported(tmp_path):
     batch_runner = _load_module("batch_runner_replay_export", BATCH_RUNNER_PATH)
     case_packs = _load_module("case_packs_replay_export", CASE_PACKS_PATH)
@@ -302,6 +327,9 @@ def test_batch_benchmark_generated_run_can_be_replayed_and_exported(tmp_path):
     assert replay["matches_saved_result"] is True
     assert replay["saved_summary"] == replay["replayed_summary"]
     assert export["run"]["run_id"] == governed_result["run_id"]
+    registry_payload = json.loads(Path(report["registry_path"]).read_text(encoding="utf-8"))
+    registry_entry = next(item for item in registry_payload["runs"] if item["run_id"] == governed_result["run_id"])
+    assert registry_entry["operator_params"]["case_pack_id"] == "deterministic-v1"
     assert Path(export["exports"]["operator_handoff_markdown"]).exists()
     assert Path(export["exports"]["reserve_summary_json"]).exists()
 
