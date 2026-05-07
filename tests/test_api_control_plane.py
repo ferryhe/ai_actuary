@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import httpx
+from reserving_workflow.api import app as api_app
 
 from reserving_workflow.api.app import (
     ApiSettings,
@@ -14,6 +15,7 @@ from reserving_workflow.api.app import (
     create_app,
 )
 from reserving_workflow.schemas import RunArtifactManifest
+from reserving_workflow.tools import ToolRegistry
 from reserving_workflow.workflows import WorkflowCatalog, WorkflowCatalogEntry, WorkflowStepEntry
 
 
@@ -218,19 +220,22 @@ def _client(
     replay_module=FakeReplayModule,
     batch_runner_module=FakeBatchRunnerModule,
     background_task_runner=None,
+    tool_registry=None,
     workflow_catalog=None,
+    settings=None,
 ):
-    settings = ApiSettings(
+    resolved_settings = settings or ApiSettings(
         registry_path=tmp_path / "run-registry.json",
         artifact_root=tmp_path / "artifacts",
     )
     app = create_app(
-        settings=settings,
+        settings=resolved_settings,
         runner_module=runner_module,
         task_contracts_module=FakeTaskContractsModule,
         replay_module=replay_module,
         batch_runner_module=batch_runner_module,
         background_task_runner=background_task_runner,
+        tool_registry=tool_registry,
         workflow_catalog=workflow_catalog,
     )
     return LocalApiClient(app)
@@ -238,6 +243,133 @@ def _client(
 
 def _reset_fake_runner_calls():
     FakeRunnerModule.calls.clear()
+
+
+def test_health_endpoint_remains_backward_compatible(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "service": "ai-actuary-control-plane"}
+
+
+def test_preflight_endpoint_reports_ready_runtime_when_paths_and_catalogs_are_configured(tmp_path):
+    settings = ApiSettings(
+        registry_path=tmp_path / "run-registry.json",
+        artifact_root=tmp_path / "artifacts",
+        review_store_dir=tmp_path / "reviews",
+        review_delivery_dir=tmp_path / "review-outbox",
+    )
+    client = _client(tmp_path, settings=settings)
+
+    response = client.get("/health/preflight")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["status"] == "ok"
+    assert payload["readiness"] == "ready"
+    assert payload["summary"]["warning_count"] == 0
+    assert payload["summary"]["error_count"] == 0
+    assert payload["configuration"]["catalog"]["tool_ids"] == ["chainladder"]
+    assert payload["configuration"]["catalog"]["workflow_ids"] == ["chainladder-basic", "chainladder-validated"]
+    assert payload["configuration"]["defaults"]["operator_id"] == DEFAULT_OPERATOR_ID
+    assert payload["configuration"]["defaults"]["workspace_id"] == DEFAULT_WORKSPACE_ID
+    assert payload["configuration"]["paths"]["review_delivery_dir"] == {
+        "configured": True,
+        "target_type": "directory",
+        "name": "review-outbox",
+    }
+    assert payload["configuration"]["paths"]["registry_path"] == {
+        "configured": True,
+        "target_type": "file",
+        "name": "run-registry.json",
+    }
+    assert "cwd" not in payload["runtime"]
+    assert {item["check_id"]: item["status"] for item in payload["checks"]} == {
+        "registry_path": "ok",
+        "artifact_root": "ok",
+        "review_store": "ok",
+        "review_delivery": "ok",
+        "tool_catalog": "ok",
+        "workflow_catalog": "ok",
+    }
+    assert payload["warnings"] == []
+    assert payload["errors"] == []
+    serialized = json.dumps(payload)
+    assert "OPENAI_API_KEY" not in serialized
+    assert str(tmp_path) not in serialized
+
+
+def test_preflight_endpoint_reports_degraded_runtime_for_missing_delivery_and_empty_catalogs(tmp_path):
+    client = _client(
+        tmp_path,
+        tool_registry=ToolRegistry(entries=[]),
+        workflow_catalog=WorkflowCatalog(entries=[]),
+    )
+
+    response = client.get("/health/preflight")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["status"] == "degraded"
+    assert payload["readiness"] == "degraded"
+    assert payload["summary"]["warning_count"] == 3
+    checks = {item["check_id"]: item for item in payload["checks"]}
+    assert checks["review_delivery"]["status"] == "warning"
+    assert checks["tool_catalog"]["status"] == "warning"
+    assert checks["workflow_catalog"]["status"] == "warning"
+    assert payload["configuration"]["catalog"]["tool_count"] == 0
+    assert payload["configuration"]["catalog"]["workflow_count"] == 0
+
+
+def test_review_store_unavailable_response_does_not_expose_exception_details(tmp_path, monkeypatch):
+    class BrokenReviewStore:
+        def __init__(self, path):
+            raise OSError(f"cannot open sensitive path {tmp_path / 'reviews'}")
+
+    monkeypatch.setattr(api_app, "LocalReviewStore", BrokenReviewStore)
+    client = _client(tmp_path)
+
+    response = client.get("/reviews")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Review store unavailable."}
+
+
+def test_preflight_endpoint_reports_not_ready_when_runtime_paths_are_invalid(tmp_path):
+    artifact_file = tmp_path / "artifact-file.txt"
+    artifact_file.write_text("not-a-directory", encoding="utf-8")
+    reviews_file = tmp_path / "reviews-file.txt"
+    reviews_file.write_text("not-a-directory", encoding="utf-8")
+    registry_parent_file = tmp_path / "registry-parent.txt"
+    registry_parent_file.write_text("not-a-directory", encoding="utf-8")
+    outbox_parent_file = tmp_path / "outbox-parent.txt"
+    outbox_parent_file.write_text("not-a-directory", encoding="utf-8")
+
+    settings = ApiSettings(
+        registry_path=registry_parent_file / "run-registry.json",
+        artifact_root=artifact_file,
+        review_store_dir=reviews_file,
+        review_delivery_dir=outbox_parent_file / "review-outbox",
+    )
+    client = _client(tmp_path, settings=settings)
+
+    response = client.get("/health/preflight")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["status"] == "error"
+    assert payload["readiness"] == "not_ready"
+    assert payload["summary"]["error_count"] == 4
+    checks = {item["check_id"]: item for item in payload["checks"]}
+    assert checks["registry_path"]["status"] == "error"
+    assert checks["artifact_root"]["status"] == "error"
+    assert checks["review_store"]["status"] == "error"
+    assert checks["review_delivery"]["status"] == "error"
 
 
 def test_post_run_records_registry_and_returns_operator_contract(tmp_path):

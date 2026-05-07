@@ -101,6 +101,8 @@ All current operator-facing entry points are machine-readable JSON CLIs.
 
 The local FastAPI wrapper also exposes:
 
+- `GET /health`
+- `GET /health/preflight`
 - `GET /tools`
 - `GET /tools/{tool_id}`
 - `GET /workflows`
@@ -117,6 +119,38 @@ Builtin workflow notes:
 
 - `chainladder-basic` preserves the legacy single-step execution path.
 - `chainladder-validated` is a two-step path that validates tool/case inputs first, then executes the deterministic reserving run only after validation passes.
+
+### Runtime preflight
+
+Use `GET /health` for a lightweight liveness probe. It remains backward-compatible and returns at least:
+
+```json
+{"ok": true, "service": "ai-actuary-control-plane"}
+```
+
+Use `GET /health/preflight` for operator-facing local readiness before starting runs. The response is machine-readable and intentionally safe: it reports status, readiness, checks, configured path targets, default operator/workspace identifiers, and builtin tool/workflow ids, but it does not expose secrets, tokens, API keys, raw environment values, or arbitrary user identifiers.
+
+Typical preflight fields:
+
+- `ok` — `false` only when one or more required checks failed
+- `status` — `ok`, `degraded`, or `error`
+- `readiness` — `ready`, `degraded`, or `not_ready`
+- `checks` — ordered per-check results for registry path, artifact root, review store, review delivery, tool catalog, and workflow catalog
+- `warnings` / `errors` — compact summaries callers can surface directly
+
+Example smoke flow:
+
+```bash
+python -m uvicorn reserving_workflow.api.app:create_app --factory --host 127.0.0.1 --port 8000
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/health/preflight
+```
+
+Interpretation:
+
+- `status=ok` means the local runtime is ready for runs.
+- `status=degraded` means runs are still possible, but an operator should inspect warnings such as missing optional review delivery configuration.
+- `status=error` means one or more required local runtime paths or catalogs are not usable and runs should not be started until corrected.
 
 ---
 
