@@ -1763,7 +1763,10 @@ def _console_artifact_path(
         candidate = Path(str(manifest_path)).expanduser()
         if not candidate.is_absolute() and artifact_root is not None:
             candidate = artifact_root / candidate
-        return candidate.resolve()
+        resolved = candidate.resolve()
+        if artifact_root is not None and not resolved.is_relative_to(artifact_root):
+            return None
+        return resolved
     if artifact_root is None:
         return None
     return (artifact_root / fallback_filename).resolve()

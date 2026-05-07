@@ -964,6 +964,34 @@ def test_console_state_artifact_panel_exposes_structured_evidence_refs(tmp_path)
     assert decision_refs["operator_handoff"]["present"] is True
 
 
+def test_console_state_artifact_panel_clamps_manifest_paths_to_artifact_root(tmp_path):
+    client = _client(tmp_path, runner_module=EvidenceRunnerModule)
+    run = client.post("/runs", json={"case_id": "clamped-evidence-case"}).json()
+    registry = json.loads((tmp_path / "run-registry.json").read_text(encoding="utf-8"))
+    entry = next(item for item in registry["runs"] if item["run_id"] == run["run_id"])
+    artifact_root = Path(entry["artifact_root"])
+    manifest_path = artifact_root / "run_manifest.json"
+    outside_absolute = tmp_path / "outside-absolute.json"
+    outside_relative = artifact_root.parent / "outside-relative.json"
+    outside_absolute.write_text('{"outside": true}', encoding="utf-8")
+    outside_relative.write_text('{"outside": true}', encoding="utf-8")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifact_paths"]["validated_input"] = str(outside_absolute)
+    manifest["artifact_paths"]["deterministic_result"] = "../outside-relative.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    response = client.get(f"/console/state?run_id={run['run_id']}")
+
+    assert response.status_code == 200
+    primary_refs = {item["artifact_id"]: item for item in response.json()["artifact_panel"]["primary_artifact_refs"]}
+    assert primary_refs["validated_input"]["present"] is False
+    assert primary_refs["validated_input"]["ref"] is None
+    assert primary_refs["validated_input"]["mtime"] is None
+    assert primary_refs["deterministic_result"]["present"] is False
+    assert primary_refs["deterministic_result"]["ref"] is None
+    assert primary_refs["deterministic_result"]["mtime"] is None
+
+
 def test_console_state_artifact_panel_surfaces_manifest_missing_and_evidence_gaps(tmp_path):
     client = _client(tmp_path, runner_module=ReviewRunnerModule)
     run = client.post("/runs", json={"case_id": "review-only-case"}).json()
