@@ -1157,10 +1157,7 @@ def _run_validation_step(
             "validation_result": str(validation_result_path),
         },
     }
-    run_manifest_path = write_json_artifact(
-        resolve_artifact_path(artifact_root, "run_manifest.json"),
-        manifest_payload,
-    )
+    run_manifest_path = resolve_artifact_path(artifact_root, "run_manifest.json")
     manifest_payload["artifact_paths"]["run_manifest"] = str(run_manifest_path)
     write_json_artifact(run_manifest_path, manifest_payload)
     return {

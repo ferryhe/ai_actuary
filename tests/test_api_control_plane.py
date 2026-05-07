@@ -1009,6 +1009,7 @@ def test_post_run_with_validation_workflow_records_validation_then_execution(tmp
     validate_manifest = Path(payload["worker_result"]["artifact_paths"]["step_validate_run_manifest"])
     validate_manifest_payload = json.loads(validate_manifest.read_text(encoding="utf-8"))
     assert validate_manifest_payload["artifact_paths"]["validation_result"].endswith("validation_result.json")
+    assert validate_manifest_payload["artifact_paths"]["run_manifest"] == str(validate_manifest.resolve())
 
     events = client.get(f"/runs/{payload['run_id']}/events").json()["events"]
     assert [event["event_type"] for event in events] == [
@@ -1024,6 +1025,41 @@ def test_post_run_with_validation_workflow_records_validation_then_execution(tmp
     ]
     assert events[3]["payload"]["step_kind"] == "validate"
     assert events[5]["payload"]["step_kind"] == "execute"
+
+
+def test_rerun_endpoint_preserves_explicit_triangle_case_payload_from_registry(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path)
+
+    original = client.post(
+        "/runs",
+        json={
+            "case_id": "triangle-rerun-case",
+            "tool_id": "chainladder",
+            "inputs": {
+                "triangle_rows": [
+                    {"origin": 1981, "development": 1981, "value": 100.0},
+                    {"origin": 1981, "development": 1982, "value": 150.0},
+                    {"origin": 1982, "development": 1982, "value": 120.0},
+                ],
+                "review_threshold_origin_count": 2,
+            },
+        },
+    ).json()
+
+    registry = json.loads((tmp_path / "run-registry.json").read_text(encoding="utf-8"))
+    original_entry = next(item for item in registry["runs"] if item["run_id"] == original["run_id"])
+
+    rerun = client.post(f"/runs/{original['run_id']}/rerun", json={}).json()
+
+    rerun_registry = json.loads((tmp_path / "run-registry.json").read_text(encoding="utf-8"))
+    rerun_entry = next(item for item in rerun_registry["runs"] if item["run_id"] == rerun["run_id"])
+    assert original_entry["operator_params"]["case_payload"]["metadata"]["triangle_rows"] == [
+        {"origin": 1981, "development": 1981, "value": 100.0},
+        {"origin": 1981, "development": 1982, "value": 150.0},
+        {"origin": 1982, "development": 1982, "value": 120.0},
+    ]
+    assert rerun_entry["operator_params"]["case_payload"] == original_entry["operator_params"]["case_payload"]
 
 
 def test_validation_workflow_stops_before_execution_when_validation_fails(tmp_path):

@@ -39,6 +39,7 @@ def build_chainladder_case_payload(
     case_id: str,
     tool_inputs: Mapping[str, Any],
 ) -> dict[str, Any]:
+    normalized_case_id = str(case_id).strip()
     metadata: dict[str, Any] = {}
     if tool_inputs.get("triangle_rows") is not None:
         metadata["triangle_rows"] = list(tool_inputs["triangle_rows"])
@@ -58,7 +59,7 @@ def build_chainladder_case_payload(
     if review_threshold is not None:
         run_config["review_thresholds"] = {"origin_count": review_threshold}
     return {
-        "case_id": case_id,
+        "case_id": normalized_case_id,
         "metadata": metadata,
         "run_config": run_config,
     }
@@ -237,7 +238,7 @@ def _triangle_from_rows(triangle_rows: Any, metadata: Mapping[str, Any]):
         return cl.Triangle(**triangle_kwargs)
     except Exception as exc:
         raise ReservingValidationError(
-            f"metadata.triangle_rows could not be converted into a chainladder Triangle: {exc}"
+            "metadata.triangle_rows could not be converted into a chainladder Triangle."
         ) from exc
 
 

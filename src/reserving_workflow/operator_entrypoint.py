@@ -120,6 +120,7 @@ def run_operator_flow(
             review_threshold_origin_count=review_threshold_origin_count,
             user_prompt=user_prompt,
             review_delivery_dir=review_delivery_dir,
+            case_payload=case_payload,
             validated_input=normalized_validated_input,
             created_by=created_by,
             operator_id=operator_id,
@@ -138,6 +139,7 @@ def run_operator_flow(
             review_threshold_origin_count=review_threshold_origin_count,
             user_prompt=user_prompt,
             review_delivery_dir=review_delivery_dir,
+            case_payload=case_payload,
             validated_input=normalized_validated_input,
             created_by=created_by,
             operator_id=operator_id,
@@ -419,6 +421,7 @@ def _record_registry_event(
     review_threshold_origin_count: int | None,
     user_prompt: str | None,
     review_delivery_dir: str | Path | None,
+    case_payload: dict[str, Any] | None,
     validated_input: dict[str, Any] | None,
     created_by: str | None,
     operator_id: str | None,
@@ -439,6 +442,8 @@ def _record_registry_event(
         "operator_id": operator_id,
         "workspace_id": workspace_id,
     }
+    if case_payload is not None:
+        operator_params["case_payload"] = case_payload
     if validated_input is not None:
         operator_params["validated_input"] = validated_input
     return registry_module.record_run_event(
