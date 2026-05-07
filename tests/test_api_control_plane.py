@@ -169,6 +169,69 @@ class ReviewRunnerModule:
         }
 
 
+class EvidenceRunnerModule:
+    @staticmethod
+    def run_openai_governed_workflow(task, *, user_prompt=None):
+        artifact_dir = Path(task.inputs["artifact_dir"])
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        validated_input = artifact_dir / "validated_input.json"
+        deterministic_result = artifact_dir / "deterministic_result.json"
+        constitution_check = artifact_dir / "constitution_check.json"
+        review_packet = artifact_dir / "review_packet.json"
+        operator_handoff = artifact_dir / "operator_handoff.md"
+        for path, payload in (
+            (validated_input, {"case_id": task.case_ref, "tool_id": "chainladder"}),
+            (deterministic_result, {"ibnr": 1.0}),
+            (constitution_check, {"status": "ok"}),
+            (review_packet, {"status": "review_required"}),
+        ):
+            path.write_text(json.dumps(payload), encoding="utf-8")
+        operator_handoff.write_text("# Operator Handoff\n", encoding="utf-8")
+        run_manifest = artifact_dir / "run_manifest.json"
+        run_manifest.write_text(
+            json.dumps(
+                {
+                    "case_id": task.case_ref,
+                    "run_id": task.run_id,
+                    "artifact_root": str(artifact_dir),
+                    "artifact_paths": {
+                        "run_manifest": str(run_manifest),
+                        "validated_input": "validated_input.json",
+                        "deterministic_result": "deterministic_result.json",
+                        "constitution_check": "constitution_check.json",
+                        "review_packet": "review_packet.json",
+                        "operator_handoff": "operator_handoff.md",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return {
+            "route": {"mode": "governed"},
+            "trace": {"workflow_name": "test-workflow"},
+            "worker_result": {
+                "status": "needs_review",
+                "case_id": task.case_ref,
+                "run_id": task.run_id,
+                "summary": "evidence ready",
+                "artifact_paths": {"run_manifest": str(run_manifest)},
+                "metrics": {},
+                "review_reasons": ["threshold"],
+                "errors": [],
+                "worker_metadata": {"adapter": "fake"},
+            },
+            "final_output": {
+                "case_id": task.case_ref,
+                "worker_status": "needs_review",
+                "deterministic_method": "chainladder",
+                "cited_values": {"ibnr": 1.0},
+                "review_reasons": ["threshold"],
+                "artifact_manifest_path": str(run_manifest),
+                "narrative_summary": "evidence ready",
+            },
+        }
+
+
 class FakeReplayModule:
     @staticmethod
     def replay_case_from_manifest(manifest_path):
@@ -758,7 +821,7 @@ def test_console_shell_serves_operator_console_html(tmp_path):
     assert "AI Actuary Operator Console" in html
     assert "Run Queue" in html
     assert "Timeline" in html
-    assert "Artifact Panel" in html
+    assert "Artifact Evidence Panel" in html
     assert "Review Panel" in html
     assert "Review Inbox" in html
     assert "Action Panel" in html
@@ -777,6 +840,8 @@ def test_console_shell_serves_operator_console_html(tmp_path):
     assert "runConsoleAction(" in html
     assert "submitReviewDecision(" in html
     assert "loadToolCatalog()" in html
+    assert "renderArtifactPanel(" in html
+    assert "Evidence Gaps" in html
     assert "fetch(\"/tools\")" in html
     assert "fetch(`/reviews/${encodeURIComponent(reviewId)}/decision`" in html
     assert "/report-export" in html
@@ -825,6 +890,8 @@ def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path)
     assert "await loadConsole(runId, { preservePolling: true, ...filterOptions })" in html
     assert "No review selected for decision submission." in html
     assert "Export handoff report" in html
+    assert "Decision / Export Evidence" in html
+    assert "Raw artifact panel JSON" in html
 
 
 def test_console_state_exposes_symphony_style_panels(tmp_path):
@@ -869,6 +936,52 @@ def test_console_state_exposes_symphony_style_panels(tmp_path):
     assert state["review_panel"]["status"] == "review_required"
     assert [action["action_id"] for action in state["action_panel"]["actions"]] == ["rerun", "report_export"]
     assert state["action_panel"]["actions"][0]["semantics"]["creates_distinct_run"] is True
+
+
+def test_console_state_artifact_panel_exposes_structured_evidence_refs(tmp_path):
+    client = _client(tmp_path, runner_module=EvidenceRunnerModule)
+    run = client.post("/runs", json={"case_id": "evidence-case"}).json()
+
+    response = client.get(f"/console/state?run_id={run['run_id']}")
+
+    assert response.status_code == 200
+    panel = response.json()["artifact_panel"]
+    assert panel["present"] is True
+    assert panel["status"] == "ok"
+    assert panel["freshness"]["present_artifact_count"] >= 5
+    assert "narrative_draft" in panel["missing_expected_artifacts"]
+    primary_refs = {item["artifact_id"]: item for item in panel["primary_artifact_refs"]}
+    assert primary_refs["run_manifest"]["present"] is True
+    assert primary_refs["run_manifest"]["ref"] == "run_manifest.json"
+    assert primary_refs["validated_input"]["present"] is True
+    assert primary_refs["validated_input"]["ref"] == "validated_input.json"
+    assert primary_refs["deterministic_result"]["present"] is True
+    assert primary_refs["constitution_check"]["present"] is True
+    assert not primary_refs["validated_input"]["ref"].startswith("/")
+    review_refs = {item["artifact_id"]: item for item in panel["review_artifact_refs"]}
+    assert review_refs["review_packet"]["present"] is True
+    decision_refs = {item["artifact_id"]: item for item in panel["decision_artifact_refs"]}
+    assert decision_refs["operator_handoff"]["present"] is True
+
+
+def test_console_state_artifact_panel_surfaces_manifest_missing_and_evidence_gaps(tmp_path):
+    client = _client(tmp_path, runner_module=ReviewRunnerModule)
+    run = client.post("/runs", json={"case_id": "review-only-case"}).json()
+
+    response = client.get(f"/console/state?run_id={run['run_id']}")
+
+    assert response.status_code == 200
+    panel = response.json()["artifact_panel"]
+    assert panel["present"] is False
+    assert panel["status"] == "manifest_missing"
+    assert "run_manifest" in panel["missing_expected_artifacts"]
+    assert "deterministic_result" in panel["missing_expected_artifacts"]
+    review_refs = {item["artifact_id"]: item for item in panel["review_artifact_refs"]}
+    assert review_refs["review_packet"]["present"] is True
+    assert review_refs["review_packet"]["ref"] == "review_packet.json"
+    primary_refs = {item["artifact_id"]: item for item in panel["primary_artifact_refs"]}
+    assert primary_refs["validated_input"]["present"] is True
+    assert panel["freshness"]["present_artifact_count"] == 3
 
 
 def test_console_state_defaults_to_latest_run(tmp_path):
