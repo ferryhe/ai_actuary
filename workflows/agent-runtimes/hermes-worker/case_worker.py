@@ -10,7 +10,8 @@ from pydantic import ValidationError
 
 from reserving_workflow.calculators import ChainladderAdapter, ChainladderAdapterError
 from reserving_workflow.constitution import evaluate_case_constitution
-from reserving_workflow.schemas import NarrativeDraft, ReservingCaseInput
+from reserving_workflow.narrative import build_narrative_draft
+from reserving_workflow.schemas import ReservingCaseInput
 
 SUPPORTED_TASK = "run_case"
 DEFAULT_RUN_ID_SUFFIX = "local"
@@ -49,7 +50,7 @@ def run_case_worker(task: Any):
             },
         )
         deterministic_result = ChainladderAdapter().calculate(case_input)
-        narrative_draft = _build_narrative_draft(case_input, deterministic_result)
+        narrative_draft = build_narrative_draft(case_input, deterministic_result)
         constitution_check = evaluate_case_constitution(
             case_input,
             deterministic_result,
@@ -148,35 +149,6 @@ def _merge_required_artifacts(*, task: Any, case_input: ReservingCaseInput) -> l
         if name not in artifact_names:
             artifact_names.append(name)
     return artifact_names
-
-
-def _build_narrative_draft(case_input: ReservingCaseInput, deterministic_result) -> NarrativeDraft:
-    reserve_summary = deterministic_result.reserve_summary or {}
-    method = deterministic_result.method
-    ultimate = reserve_summary.get("ultimate")
-    ibnr = reserve_summary.get("ibnr")
-    latest_diagonal = reserve_summary.get("latest_diagonal")
-
-    key_points = [
-        f"Deterministic method: {method}",
-        f"Case id: {case_input.case_id}",
-    ]
-    diagnostics = deterministic_result.diagnostics or {}
-    if "origin_count" in diagnostics:
-        key_points.append(f"Origin periods: {diagnostics['origin_count']}")
-    if "development_count" in diagnostics:
-        key_points.append(f"Development periods: {diagnostics['development_count']}")
-
-    summary = (
-        f"Deterministic {method} run completed for {case_input.case_id}. "
-        f"Latest diagonal={latest_diagonal}, ultimate={ultimate}, ibnr={ibnr}."
-    )
-    return NarrativeDraft(
-        case_id=case_input.case_id,
-        summary=summary,
-        key_points=key_points,
-        cited_values={name: float(value) for name, value in reserve_summary.items()},
-    )
 
 
 def _map_worker_status(constitution_status: str) -> str:
