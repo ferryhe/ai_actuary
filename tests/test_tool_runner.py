@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from reserving_workflow.tool_runner.contracts import PipelineStepSpec
-from reserving_workflow.tool_runner.runner import ToolPipelineRunner, ToolRunnerError
+from reserving_workflow.tool_runner.runner import ToolPipelineRunner, ToolRunnerError, load_pipeline_spec
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -237,6 +237,57 @@ def test_tool_pipeline_runner_rejects_missing_required_output_refs(tmp_path: Pat
 
     assert exc_info.value.category == "execution_error"
     assert exc_info.value.details["missing_outputs"] == ["deterministic_result"]
+
+
+def test_tool_pipeline_runner_uses_platform_pythonpath_separator() -> None:
+    runner = ToolPipelineRunner(repo_root=REPO_ROOT, env={"PYTHONPATH": "existing-path"})
+
+    assert runner.env["PYTHONPATH"] == os.pathsep.join([str(SRC_ROOT), "existing-path"])
+
+
+def test_tool_pipeline_runner_preserves_logs_for_non_json_stdout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runner = ToolPipelineRunner(repo_root=REPO_ROOT)
+    logs_root = tmp_path / "logs"
+    logs_root.mkdir()
+    monkeypatch.setattr(runner.catalog, "build_command", lambda **_: ["fake-tool"])
+
+    class Completed:
+        returncode = 1
+        stdout = "not-json"
+        stderr = "boom"
+
+    monkeypatch.setattr("reserving_workflow.tool_runner.runner.subprocess.run", lambda *_, **__: Completed())
+
+    with pytest.raises(ToolRunnerError) as exc_info:
+        runner._run_step(
+            step=PipelineStepSpec(id="fake", toolId="fake-tool"),
+            artifact_root=tmp_path,
+            logs_root=logs_root,
+            manifest_path=tmp_path / "run_manifest.json",
+            registry_path=tmp_path / "run-registry.json",
+            review_store_dir=tmp_path / "reviews",
+            run_id="non-json-run",
+            prior_steps=[],
+        )
+
+    details = exc_info.value.details
+    assert exc_info.value.category == "execution_error"
+    assert details["command"] == ["fake-tool"]
+    assert details["exit_code"] == 1
+    assert Path(details["stdout_log_path"]).read_text(encoding="utf-8") == "not-json"
+    assert Path(details["stderr_log_path"]).read_text(encoding="utf-8") == "boom"
+
+
+def test_load_pipeline_spec_wraps_schema_errors_as_validation_error(tmp_path: Path) -> None:
+    pipeline_path = tmp_path / "invalid-pipeline.yaml"
+    pipeline_path.write_text("pipelineId: missing-required-fields\n", encoding="utf-8")
+
+    with pytest.raises(ToolRunnerError) as exc_info:
+        load_pipeline_spec(pipeline_path)
+
+    assert exc_info.value.category == "validation_error"
+    assert exc_info.value.details["path"] == str(pipeline_path)
+    assert exc_info.value.details["validation_errors"]
 
 
 def test_tool_pipeline_cli_returns_stable_json_for_setup_errors(tmp_path: Path) -> None:

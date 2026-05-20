@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import ValidationError
 
 from reserving_workflow.runtime import run_registry
 from reserving_workflow.schemas import ReservingCaseInput, RunArtifactManifest
@@ -44,7 +45,9 @@ class ToolPipelineRunner:
         if env:
             base_env.update(env)
         existing_pythonpath = base_env.get("PYTHONPATH")
-        base_env["PYTHONPATH"] = str(self.src_root) if not existing_pythonpath else f"{self.src_root}:{existing_pythonpath}"
+        base_env["PYTHONPATH"] = (
+            str(self.src_root) if not existing_pythonpath else os.pathsep.join([str(self.src_root), existing_pythonpath])
+        )
         self.env = base_env
 
     def run(
@@ -293,7 +296,19 @@ class ToolPipelineRunner:
             when=step.when,
         )
 
-        payload = _parse_json_payload(completed.stdout)
+        try:
+            payload = _parse_json_payload(completed.stdout)
+        except ToolRunnerError as exc:
+            details = {
+                "step_id": step.id,
+                "tool_id": step.toolId,
+                "command": command,
+                "exit_code": completed.returncode,
+                "stdout_log_path": str(stdout_log),
+                "stderr_log_path": str(stderr_log),
+                **exc.details,
+            }
+            raise ToolRunnerError(str(exc), category=exc.category, details=details) from exc
         if completed.returncode != 0:
             result.error = {
                 "category": payload.get("error_category") if isinstance(payload, dict) else "execution_error",
@@ -479,10 +494,24 @@ class ToolPipelineRunner:
 
 
 def load_pipeline_spec(path: str | Path) -> ToolPipelineSpec:
-    payload = yaml.safe_load(Path(path).expanduser().resolve().read_text(encoding="utf-8"))
+    try:
+        payload = yaml.safe_load(Path(path).expanduser().resolve().read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ToolRunnerError(
+            "Pipeline YAML was not valid.",
+            category="validation_error",
+            details={"path": str(path), "yaml_error": str(exc)},
+        ) from exc
     if not isinstance(payload, dict):
         raise ToolRunnerError("Pipeline YAML must decode to an object.", category="validation_error")
-    return ToolPipelineSpec.model_validate(payload)
+    try:
+        return ToolPipelineSpec.model_validate(payload)
+    except ValidationError as exc:
+        raise ToolRunnerError(
+            "Pipeline YAML failed schema validation.",
+            category="validation_error",
+            details={"path": str(path), "validation_errors": exc.errors()},
+        ) from exc
 
 
 
