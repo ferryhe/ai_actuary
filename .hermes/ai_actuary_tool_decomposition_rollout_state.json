@@ -26,8 +26,8 @@
       "status": "open_waiting_remote_review",
       "number": 28,
       "url": "https://github.com/ferryhe/ai_actuary/pull/28",
-      "last_commit": "pending-follow-up-push",
-      "last_push_at": "2026-05-20T06:13:31Z",
+      "last_commit": "f525d73",
+      "last_push_at": "2026-05-20T06:14:58Z",
       "review_gate": "Codex blocked; independent delegate reviewers used. Remote Copilot comments accepted and fixed; delegate re-review reported no blocking issues.",
       "last_remote_review_action": "Accepted PR #28 Copilot comments: review packet relative artifact-root output resolution, remove unreachable repeatability validation, keep replay matches_saved_result boolean with saved_result_present flag."
     },
@@ -83,8 +83,8 @@
   ],
   "current_pr_number": 28,
   "current_pr_url": "https://github.com/ferryhe/ai_actuary/pull/28",
-  "last_push_at": "2026-05-20T06:13:31Z",
+  "last_push_at": "2026-05-20T06:14:58Z",
   "next_action": "At next 15-minute tick, inspect PR #28 checks, reviews, and inline comments; if no actionable comments and mergeability remains clean, squash merge PR2, sync main, then start PR3.",
   "codex_review_gate": "Attempted for PR2; blocked because ChatGPT account does not support gpt-5.2-codex in Codex CLI. Substituted independent delegate reviewers; accepted findings were fixed before PR creation and again for remote Copilot follow-up.",
-  "pending_remote_comments_addressed_at": "2026-05-20T06:13:31Z"
+  "pending_remote_comments_addressed_at": "2026-05-20T06:14:58Z"
 }
