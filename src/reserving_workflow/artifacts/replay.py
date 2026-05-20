@@ -22,8 +22,8 @@ def replay_case_from_manifest(manifest_path: str | Path) -> dict[str, Any]:
     manifest_file = Path(manifest_path).expanduser().resolve()
     manifest = load_manifest(manifest_file)
     case_input_payload = _read_artifact_json(manifest, manifest_file, "case_input")
-    saved_result_payload = _read_artifact_json(manifest, manifest_file, "deterministic_result")
-    saved_constitution_payload = _read_artifact_json(manifest, manifest_file, "constitution_check")
+    saved_result_payload = _read_optional_artifact_json(manifest, manifest_file, "deterministic_result")
+    saved_constitution_payload = _read_optional_artifact_json(manifest, manifest_file, "constitution_check")
 
     case_input = ReservingCaseInput.model_validate(case_input_payload)
     replayed_result = calculate_deterministic_reserve(case_input_payload).model_dump(mode="json")
@@ -32,10 +32,12 @@ def replay_case_from_manifest(manifest_path: str | Path) -> dict[str, Any]:
         "case_id": manifest.case_id,
         "run_id": manifest.run_id,
         "artifact_root": manifest.artifact_root,
-        "saved_summary": dict(saved_result_payload.get("reserve_summary", {})),
+        "saved_summary": dict((saved_result_payload or {}).get("reserve_summary", {})),
         "replayed_summary": dict(replayed_result.get("reserve_summary", {})),
-        "saved_constitution_status": saved_constitution_payload.get("status"),
-        "matches_saved_result": _normalize_summary(saved_result_payload.get("reserve_summary", {}))
+        "saved_constitution_status": (saved_constitution_payload or {}).get("status"),
+        "matches_saved_result": None
+        if saved_result_payload is None
+        else _normalize_summary(saved_result_payload.get("reserve_summary", {}))
         == _normalize_summary(replayed_result.get("reserve_summary", {})),
         "method": case_input.run_config.get("method", replayed_result.get("method")),
     }
@@ -88,13 +90,29 @@ def _read_artifact_json(manifest: RunArtifactManifest, manifest_path: Path, arti
     return _read_json(artifact_path)
 
 
+def _read_optional_artifact_json(
+    manifest: RunArtifactManifest,
+    manifest_path: Path,
+    artifact_name: str,
+) -> dict[str, Any] | None:
+    artifact_path = manifest.artifact_paths.get(artifact_name)
+    if not artifact_path:
+        return None
+    return _read_json(_resolve_artifact_path(manifest, manifest_path, artifact_path))
+
+
 
 def _resolve_artifact_path(manifest: RunArtifactManifest, manifest_path: Path, artifact_path: str | Path) -> Path:
     path = Path(artifact_path).expanduser()
     if path.is_absolute():
         return path.resolve()
     if manifest.artifact_root:
-        return (Path(manifest.artifact_root).expanduser().resolve() / path).resolve()
+        artifact_root = Path(manifest.artifact_root).expanduser()
+        if not artifact_root.is_absolute():
+            artifact_root = (manifest_path.resolve().parent / artifact_root).resolve()
+        else:
+            artifact_root = artifact_root.resolve()
+        return (artifact_root / path).resolve()
     return (manifest_path.resolve().parent / path).resolve()
 
 

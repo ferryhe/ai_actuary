@@ -18,12 +18,11 @@ This document defines the **PR1 contract-only** tool surface for actuarial reser
 - Execution style: `cli`
 - Artifact transport: local files, JSON payloads, markdown reports where declared
 
-## Implementation status in PR1
+## Implementation status
 
-- PR1 documents the **contract surface only** for most tool entrypoints.
-- Commands shown as `python -m reserving_workflow.tools_cli.*` are **target PR2 CLI module names**, not implemented PR1 commands.
-- The only already-implemented runtime CLI described here is `report-export` via `python scripts/export_run_report.py`.
-- Until PR2 lands, treat the other CLI command strings as planned execution identifiers for orchestration and documentation, not runnable guarantees.
+- PR1 documented the **contract surface** for these entrypoints.
+- PR2 adds runnable Python module entrypoints under `reserving_workflow.tools_cli` for all seven tools in this manifest.
+- `python scripts/export_run_report.py` remains available as a compatibility wrapper for the legacy report-export CLI.
 
 ## Review contract boundary in v1
 
@@ -170,7 +169,7 @@ inputs:
     schemaRef: schemas/actuarial-reserving/v1/RunArtifactManifest.schema.json
     artifact: run_manifest.json
 outputs:
-  review_packet_json:
+  review_packet:
     artifact: review_packet.json
   review_packet_markdown:
     artifact: review_packet.md
@@ -228,7 +227,7 @@ version: actuarial-reserving.v1
 runtime: python
 execution:
   kind: cli
-  command: python scripts/export_run_report.py
+  command: python -m reserving_workflow.tools_cli.report_export
 inputs:
   registry_path:
     type: local_json_file_path
@@ -262,7 +261,7 @@ inputs:
     provenance: derived_from_review_store_plus_run_entry
     description: Control-plane review record materialized from review-store state and run evidence when present.
 outputs:
-  operator_handoff_markdown:
+  operator_handoff:
     artifact: operator_handoff.md
   reserve_summary_json:
     artifact: reserve_summary.json

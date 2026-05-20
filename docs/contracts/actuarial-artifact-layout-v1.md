@@ -139,7 +139,10 @@ Outputs:
 
 ### `report-export`
 
-CLI in current PR1 runtime:
+Primary PR2 module CLI:
+- `python -m reserving_workflow.tools_cli.report_export --registry-path <run-registry.json> --run-id <run-id> --review-store-dir <review-store-dir> [--output-dir <dir>]`
+
+Compatibility script:
 - `python scripts/export_run_report.py --registry-path <run-registry.json> --run-id <run-id> --review-store-dir <review-store-dir> [--output-dir <dir>]`
 
 Inputs:
