@@ -1,0 +1,22 @@
+{
+  "case_id": "golden-raa",
+  "triangles": {
+    "paid": [
+      120.0,
+      180.0,
+      240.0,
+      300.0,
+      360.0,
+      400.0
+    ]
+  },
+  "metadata": {
+    "chainladder_sample": "RAA",
+    "currency": "USD",
+    "lob": "commercial_auto"
+  },
+  "run_config": {
+    "method_variant": "chainladder",
+    "review_threshold_origin_count": 10
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "case_id": {
+      "title": "Case Id",
+      "type": "string"
+    },
+    "hard_constraints": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Hard Constraints",
+      "type": "array"
+    },
+    "review_triggers": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Review Triggers",
+      "type": "array"
+    },
+    "soft_guidance": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Soft Guidance",
+      "type": "array"
+    },
+    "status": {
+      "enum": [
+        "pass",
+        "fail",
+        "review_required"
+      ],
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "case_id",
+    "status"
+  ],
+  "title": "ConstitutionCheckResult",
+  "type": "object"
+}

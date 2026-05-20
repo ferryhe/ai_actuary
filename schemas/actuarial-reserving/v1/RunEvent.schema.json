@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "payload": {
+      "additionalProperties": true,
+      "title": "Payload",
+      "type": "object"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "accepted",
+        "queued",
+        "running",
+        "completed",
+        "needs_review",
+        "failed"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "summary": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Summary"
+    },
+    "timestamp": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Timestamp"
+    },
+    "type": {
+      "enum": [
+        "run.accepted",
+        "run.queued",
+        "run.running",
+        "run.completed",
+        "run.needs_review",
+        "run.failed",
+        "workflow.started",
+        "workflow.completed",
+        "workflow.needs_review",
+        "workflow.failed",
+        "workflow.step.started",
+        "workflow.step.running",
+        "workflow.step.completed",
+        "workflow.step.needs_review",
+        "workflow.step.failed"
+      ],
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "required": [
+    "type",
+    "run_id",
+    "status"
+  ],
+  "title": "RunEvent",
+  "type": "object"
+}

@@ -1,0 +1,10 @@
+{
+  "values": {
+    "ibnr": 350.0,
+    "ultimate": 1950.0,
+    "latest_diagonal": 1600.0
+  },
+  "missing_metrics": [],
+  "deterministic_method": "chainladder",
+  "source": "deterministic_result.reserve_summary"
+}

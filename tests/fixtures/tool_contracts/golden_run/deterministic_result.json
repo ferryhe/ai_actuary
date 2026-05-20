@@ -1,0 +1,18 @@
+{
+  "case_id": "golden-raa",
+  "method": "chainladder",
+  "reserve_summary": {
+    "latest_diagonal": 1600.0,
+    "ultimate": 1950.0,
+    "ibnr": 350.0
+  },
+  "diagnostics": {
+    "origin_count": 7,
+    "development_count": 10,
+    "link_ratio_tail": 1.02
+  },
+  "metadata": {
+    "sample_name": "RAA",
+    "contract_version": "actuarial-reserving.v1"
+  }
+}
