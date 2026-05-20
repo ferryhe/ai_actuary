@@ -37,9 +37,10 @@ def _load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_export_contract_schemas_script_writes_expected_files_and_shapes():
+def test_export_contract_schemas_script_writes_expected_files_and_shapes(tmp_path: Path):
+    output_dir = tmp_path / "schemas"
     completed = subprocess.run(
-        [sys.executable, str(SCRIPT_PATH)],
+        [sys.executable, str(SCRIPT_PATH), "--output-dir", str(output_dir)],
         check=True,
         capture_output=True,
         text=True,
@@ -48,13 +49,17 @@ def test_export_contract_schemas_script_writes_expected_files_and_shapes():
 
     payload = json.loads(completed.stdout)
     assert payload["ok"] is True
-    assert payload["output_dir"] == str(SCHEMA_DIR)
+    assert payload["output_dir"] == str(output_dir)
     assert payload["count"] == len(EXPECTED_SCHEMA_FILES)
 
-    missing = [name for name in EXPECTED_SCHEMA_FILES if not (SCHEMA_DIR / name).exists()]
+    missing = [name for name in EXPECTED_SCHEMA_FILES if not (output_dir / name).exists()]
     assert missing == []
+    assert sorted(payload["files"]) == sorted(EXPECTED_SCHEMA_FILES)
+    assert {
+        name: _load_json(output_dir / name) for name in EXPECTED_SCHEMA_FILES
+    } == {name: _load_json(SCHEMA_DIR / name) for name in EXPECTED_SCHEMA_FILES}
 
-    case_schema = _load_json(SCHEMA_DIR / "ReservingCaseInput.schema.json")
+    case_schema = _load_json(output_dir / "ReservingCaseInput.schema.json")
     assert case_schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     assert case_schema["title"] == "ReservingCaseInput"
     assert set(case_schema["required"]) == {"case_id"}
@@ -62,39 +67,39 @@ def test_export_contract_schemas_script_writes_expected_files_and_shapes():
     assert "metadata" in case_schema["properties"]
     assert "run_config" in case_schema["properties"]
 
-    result_schema = _load_json(SCHEMA_DIR / "DeterministicReserveResult.schema.json")
+    result_schema = _load_json(output_dir / "DeterministicReserveResult.schema.json")
     assert set(result_schema["required"]) == {"case_id", "method"}
     assert "reserve_summary" in result_schema["properties"]
     assert "diagnostics" in result_schema["properties"]
 
-    draft_schema = _load_json(SCHEMA_DIR / "NarrativeDraft.schema.json")
+    draft_schema = _load_json(output_dir / "NarrativeDraft.schema.json")
     assert set(draft_schema["required"]) == {"case_id", "summary"}
     assert "key_points" in draft_schema["properties"]
     assert "cited_values" in draft_schema["properties"]
 
-    constitution_schema = _load_json(SCHEMA_DIR / "ConstitutionCheckResult.schema.json")
+    constitution_schema = _load_json(output_dir / "ConstitutionCheckResult.schema.json")
     assert "status" in constitution_schema["properties"]
     assert constitution_schema["properties"]["status"]["enum"] == ["pass", "fail", "review_required"]
 
-    manifest_schema = _load_json(SCHEMA_DIR / "RunArtifactManifest.schema.json")
+    manifest_schema = _load_json(output_dir / "RunArtifactManifest.schema.json")
     assert set(manifest_schema["required"]) == {"case_id", "run_id"}
     assert "artifact_paths" in manifest_schema["properties"]
 
-    tool_invocation_schema = _load_json(SCHEMA_DIR / "ToolInvocation.schema.json")
+    tool_invocation_schema = _load_json(output_dir / "ToolInvocation.schema.json")
     assert "tool_id" in tool_invocation_schema["properties"]
     assert "inputs" in tool_invocation_schema["properties"]
 
-    workflow_schema = _load_json(SCHEMA_DIR / "Workflow.schema.json")
+    workflow_schema = _load_json(output_dir / "Workflow.schema.json")
     assert {"workflow_id", "title", "description", "step_count", "steps"}.issubset(workflow_schema["properties"])
     assert "$defs" in workflow_schema
 
-    run_schema = _load_json(SCHEMA_DIR / "Run.schema.json")
+    run_schema = _load_json(output_dir / "Run.schema.json")
     assert {"run_id", "status", "artifact_root", "workflow_id"}.issubset(run_schema["properties"])
 
-    event_schema = _load_json(SCHEMA_DIR / "RunEvent.schema.json")
+    event_schema = _load_json(output_dir / "RunEvent.schema.json")
     assert {"type", "run_id", "status", "payload"}.issubset(event_schema["properties"])
 
-    review_schema = _load_json(SCHEMA_DIR / "Review.schema.json")
+    review_schema = _load_json(output_dir / "Review.schema.json")
     assert {"status", "review_id", "run_id", "packet", "decision"}.issubset(review_schema["properties"])
     assert "$defs" in review_schema
 

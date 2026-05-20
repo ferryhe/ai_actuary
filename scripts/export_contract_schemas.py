@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+from argparse import ArgumentParser
 from pathlib import Path
 from typing import Iterable
 
@@ -60,11 +61,24 @@ def export_models(models: Iterable[type] = MODELS, output_dir: Path = OUTPUT_DIR
     return written
 
 
+def _parse_args() -> Path:
+    parser = ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=OUTPUT_DIR,
+        help="Directory for exported schema files (default: schemas/actuarial-reserving/v1).",
+    )
+    args = parser.parse_args()
+    return args.output_dir
+
+
 def main() -> int:
-    written = export_models()
+    output_dir = _parse_args()
+    written = export_models(output_dir=output_dir)
     summary = {
         "ok": True,
-        "output_dir": str(OUTPUT_DIR),
+        "output_dir": str(output_dir),
         "files": [path.name for path in written],
         "count": len(written),
     }
