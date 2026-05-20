@@ -1,6 +1,6 @@
 # ai_actuary Project Status
 
-Last updated: 2026-05-20T19:02:18Z
+Last updated: 2026-05-20T19:14:28Z
 
 ## Identity
 
@@ -43,6 +43,7 @@ Last updated: 2026-05-20T19:02:18Z
 - Full test suite ✅: `PYTHONPATH=src python -m pytest tests -q` passed (`192 passed`).
 - Pre-PR review gate: Codex CLI blocked because `gpt-5.2-codex` is not supported with the current ChatGPT account; substitute delegate review found generated `tmp/` artifacts and scope risk in `.hermes/` state. `tmp/` artifacts were removed; `.hermes/` updates are intentionally retained as tracked project status/rollout metadata.
 - PR #31 remote comment follow-up ✅ (2026-05-20T19:02:18Z): Copilot's inline comment about stale `PR1 exports...` wording in `docs/contracts/actuarial-tool-manifest-v1.md` was valid and fixed with PR-agnostic wording. Validation: `git diff --check` passed; contract wording assertion passed; `PYTHONPATH=src python -m pytest tests/test_contract_schema_export.py tests/test_tool_contract_compat_manifest.py -q` passed (`8 passed`). Codex CLI review gate was attempted with ChatGPT 5.5 via `codex -c 'model="gpt-5.5"' review --uncommitted`, but the installed Codex CLI reported that gpt-5.5 requires a newer CLI version.
+- Codex CLI upgrade/review follow-up ✅ (2026-05-20T19:14:28Z): upgraded global `@openai/codex` from `0.121.0` to `0.132.0`; `codex -c 'model="gpt-5.5"' review --base origin/main` now runs. Accepted one valid review finding: the v1 contract boundary text still said there were no runtime/CLI implementation changes, contradicting the current file-artifact CLI tool surface. Rephrased the section as v1 boundaries and clarified that CLI file-artifact entrypoints plus exported schemas are in scope while HTTP/MCP/ai_interface expansion remains out of scope.
 
 ## Dirty / Untracked State Noticed
 

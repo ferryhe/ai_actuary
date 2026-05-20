@@ -289,10 +289,9 @@ The repository exports versioned JSON Schema for these existing Pydantic/control
 
 These schemas are exported by `scripts/export_contract_schemas.py` into `schemas/actuarial-reserving/v1/`.
 
-## Non-goals for v1
+## Boundaries for v1
 
-- No runtime entrypoint changes
-- No CLI implementation changes beyond schema export
+- File-artifact CLI tool entrypoints and exported JSON Schemas are in scope for the v1 contract surface.
 - No FastAPI/HTTP contract expansion for these tools
 - No MCP tool adapter
 - No `ai_interface` integration changes
