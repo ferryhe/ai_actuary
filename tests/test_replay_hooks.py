@@ -147,7 +147,28 @@ def test_replay_case_from_manifest_resolves_relative_artifact_paths(tmp_path):
     assert proc.returncode == 0
     payload = json.loads(proc.stdout)
     assert payload["case_id"] == "replay-relative-case"
+    assert payload["saved_result_present"] is True
     assert payload["matches_saved_result"] is True
+
+
+
+def test_replay_case_from_manifest_keeps_boolean_match_when_saved_result_missing(tmp_path):
+    replay_module = _load_module("replay_missing_saved_result_module", REPLAY_PATH)
+    run_root = tmp_path / "run"
+    artifact_root = run_root / "artifacts"
+    artifact_root.mkdir(parents=True)
+    fixture_root = REPO_ROOT / "tests" / "fixtures" / "tool_contracts" / "golden_run"
+    (artifact_root / "case_input.json").write_text((fixture_root / "case_input.json").read_text(encoding="utf-8"), encoding="utf-8")
+    manifest_payload = json.loads((fixture_root / "run_manifest.json").read_text(encoding="utf-8"))
+    manifest_payload["artifact_root"] = "artifacts"
+    manifest_payload["artifact_paths"] = {"case_input": "case_input.json"}
+    manifest_path = run_root / "run_manifest.json"
+    manifest_path.write_text(json.dumps(manifest_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    payload = replay_module.replay_case_from_manifest(manifest_path)
+
+    assert payload["saved_result_present"] is False
+    assert payload["matches_saved_result"] is False
 
 
 

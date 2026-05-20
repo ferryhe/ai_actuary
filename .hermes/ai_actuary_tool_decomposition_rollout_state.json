@@ -1,0 +1,90 @@
+{
+  "rollout": "ai_actuary_tool_decomposition",
+  "authorized_by_user": true,
+  "created_at": "2026-05-20T04:20:36.159561+00:00",
+  "plan_path": "docs/plans/2026-05-20-ai-actuary-tool-decomposition-pr-plan.md",
+  "current_pr_index": 2,
+  "current_branch": "feat/tool-cli-entrypoints",
+  "stage": "pr2_open_waiting_remote_review",
+  "prs": [
+    {
+      "index": 1,
+      "branch": "docs/tool-contract-manifest-v1",
+      "title": "docs: define actuarial tool contract manifest v1",
+      "status": "merged",
+      "number": 27,
+      "url": "https://github.com/ferryhe/ai_actuary/pull/27",
+      "last_commit": "a742a37",
+      "last_remote_review_action": "Accepted Copilot hermetic test/output-dir comments; added --output-dir exporter flag and tmp_path schema export test.",
+      "last_push_at": "2026-05-20T04:59:18.569711+00:00",
+      "merged_at": "2026-05-20T05:45:41Z"
+    },
+    {
+      "index": 2,
+      "branch": "feat/tool-cli-entrypoints",
+      "title": "feat: add actuarial tool CLI entrypoints",
+      "status": "open_waiting_remote_review",
+      "number": 28,
+      "url": "https://github.com/ferryhe/ai_actuary/pull/28",
+      "last_commit": "pending-follow-up-push",
+      "last_push_at": "2026-05-20T06:13:31Z",
+      "review_gate": "Codex blocked; independent delegate reviewers used. Remote Copilot comments accepted and fixed; delegate re-review reported no blocking issues.",
+      "last_remote_review_action": "Accepted PR #28 Copilot comments: review packet relative artifact-root output resolution, remove unreachable repeatability validation, keep replay matches_saved_result boolean with saved_result_present flag."
+    },
+    {
+      "index": 3,
+      "branch": "feat/tool-artifact-runner",
+      "title": "feat: add local tool artifact runner",
+      "status": "pending"
+    },
+    {
+      "index": 4,
+      "repo": "ai_interface",
+      "branch": "feat/skill-manifest-cli-executor",
+      "title": "feat: add skill manifest CLI executor",
+      "status": "pending"
+    },
+    {
+      "index": 5,
+      "repo": "ai_interface",
+      "branch": "feat/actuarial-pipeline-runner",
+      "title": "feat: add actuarial pipeline runner",
+      "status": "pending"
+    },
+    {
+      "index": 6,
+      "branch": "feat/tool-contract-compat-suite",
+      "title": "test: add tool contract compatibility suite",
+      "status": "pending"
+    },
+    {
+      "index": 7,
+      "branch": "feat/optional-chainladder-http-adapter",
+      "title": "feat: add optional chainladder HTTP adapter",
+      "status": "optional_pending_decision"
+    },
+    {
+      "index": 8,
+      "branch": "feat/optional-mcp-tools-adapter",
+      "title": "feat: add optional MCP tools adapter",
+      "status": "optional_pending_decision"
+    }
+  ],
+  "rules": [
+    "one PR at a time",
+    "implementer agent develops",
+    "reviewer agent reviews",
+    "implementer fixes accepted findings",
+    "controller commits/pushes/opens PR",
+    "wait 15m for remote comments",
+    "fix valid comments",
+    "merge and delete branch",
+    "sync main then next PR"
+  ],
+  "current_pr_number": 28,
+  "current_pr_url": "https://github.com/ferryhe/ai_actuary/pull/28",
+  "last_push_at": "2026-05-20T06:13:31Z",
+  "next_action": "At next 15-minute tick, inspect PR #28 checks, reviews, and inline comments; if no actionable comments and mergeability remains clean, squash merge PR2, sync main, then start PR3.",
+  "codex_review_gate": "Attempted for PR2; blocked because ChatGPT account does not support gpt-5.2-codex in Codex CLI. Substituted independent delegate reviewers; accepted findings were fixed before PR creation and again for remote Copilot follow-up.",
+  "pending_remote_comments_addressed_at": "2026-05-20T06:13:31Z"
+}

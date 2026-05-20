@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from reserving_workflow.artifacts.replay import compare_repeatability, load_manifest
-from reserving_workflow.tools_cli._common import ToolArgumentParser, ToolCliError, manifest_artifact_dir, parse_args, resolve_output_path, run_tool, write_json
+from reserving_workflow.tools_cli._common import ToolArgumentParser, manifest_artifact_dir, parse_args, resolve_output_path, run_tool, write_json
 
 TOOL_ID = "repeatability-check"
 
@@ -18,8 +18,6 @@ def main(argv: list[str] | None = None) -> int:
 
     def _action():
         manifest_paths = list(args.run_manifest)
-        if not manifest_paths:
-            raise ToolCliError("At least one --run-manifest path is required.", category="validation_error")
         first_manifest = load_manifest(manifest_paths[0])
         output_path = resolve_output_path(
             args.output,

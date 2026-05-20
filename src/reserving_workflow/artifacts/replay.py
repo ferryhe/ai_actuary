@@ -35,7 +35,8 @@ def replay_case_from_manifest(manifest_path: str | Path) -> dict[str, Any]:
         "saved_summary": dict((saved_result_payload or {}).get("reserve_summary", {})),
         "replayed_summary": dict(replayed_result.get("reserve_summary", {})),
         "saved_constitution_status": (saved_constitution_payload or {}).get("status"),
-        "matches_saved_result": None
+        "saved_result_present": saved_result_payload is not None,
+        "matches_saved_result": False
         if saved_result_payload is None
         else _normalize_summary(saved_result_payload.get("reserve_summary", {}))
         == _normalize_summary(replayed_result.get("reserve_summary", {})),

@@ -234,6 +234,61 @@ def test_replay_run_defaults_output_to_manifest_artifact_root_and_needs_only_cas
     assert (artifact_root / "replayed_result.json").exists()
 
 
+def test_review_generator_defaults_output_to_manifest_artifact_root_for_relative_paths(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    artifact_root = run_root / "artifacts"
+    artifact_root.mkdir(parents=True)
+    for name in ["deterministic_result.json", "constitution_check.json", "narrative_draft.json"]:
+        shutil.copy2(GOLDEN_RUN_DIR / name, artifact_root / name)
+    manifest = json.loads((GOLDEN_RUN_DIR / "run_manifest.json").read_text(encoding="utf-8"))
+    manifest["artifact_root"] = "artifacts"
+    manifest_path = run_root / "run_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    completed = _run_cli(
+        "reserving_workflow.tools_cli.review_generator",
+        "--constitution-check",
+        str(artifact_root / "constitution_check.json"),
+        "--deterministic-result",
+        str(artifact_root / "deterministic_result.json"),
+        "--narrative-draft",
+        str(artifact_root / "narrative_draft.json"),
+        "--run-manifest",
+        str(manifest_path),
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    payload = json.loads(completed.stdout)
+    assert Path(payload["outputs"]["review_packet"]) == artifact_root.resolve() / "review_packet.json"
+    assert Path(payload["outputs"]["review_packet_markdown"]) == artifact_root.resolve() / "review_packet.md"
+
+
+def test_review_packet_helper_resolves_relative_manifest_artifact_root(tmp_path: Path) -> None:
+    from reserving_workflow.review.generator import build_review_packet_from_artifacts
+
+    run_root = tmp_path / "run"
+    artifact_root = run_root / "artifacts"
+    artifact_root.mkdir(parents=True)
+    manifest = json.loads((GOLDEN_RUN_DIR / "run_manifest.json").read_text(encoding="utf-8"))
+    manifest["artifact_root"] = "artifacts"
+    manifest_path = run_root / "run_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    constitution_check = json.loads((GOLDEN_RUN_DIR / "constitution_check.json").read_text(encoding="utf-8"))
+    deterministic_result = json.loads((GOLDEN_RUN_DIR / "deterministic_result.json").read_text(encoding="utf-8"))
+    narrative_draft = json.loads((GOLDEN_RUN_DIR / "narrative_draft.json").read_text(encoding="utf-8"))
+
+    packet = build_review_packet_from_artifacts(
+        constitution_check=constitution_check,
+        deterministic_result=deterministic_result,
+        narrative_draft=narrative_draft,
+        run_manifest=manifest,
+        run_manifest_path=manifest_path,
+    )
+
+    assert Path(packet["packet_paths"]["json"]) == artifact_root.resolve() / "review_packet.json"
+    assert Path(packet["packet_paths"]["markdown"]) == artifact_root.resolve() / "review_packet.md"
+
+
 def test_repeatability_defaults_output_to_first_manifest_artifact_root(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     artifact_root = run_root / "artifacts"

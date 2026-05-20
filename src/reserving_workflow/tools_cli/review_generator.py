@@ -31,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
             deterministic_result=deterministic_result.model_dump(mode="json"),
             narrative_draft=narrative_draft.model_dump(mode="json"),
             run_manifest=run_manifest.model_dump(mode="json"),
+            run_manifest_path=args.run_manifest,
             output_dir=output_dir,
         )
         return {
