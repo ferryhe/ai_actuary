@@ -1,0 +1,15 @@
+{
+  "case_id": "golden-raa",
+  "summary": "Deterministic chainladder run completed for golden-raa. Latest diagonal=1600.0, ultimate=1950.0, ibnr=350.0.",
+  "key_points": [
+    "Deterministic method: chainladder",
+    "Case id: golden-raa",
+    "Origin periods: 7",
+    "Development periods: 10"
+  ],
+  "cited_values": {
+    "latest_diagonal": 1600.0,
+    "ultimate": 1950.0,
+    "ibnr": 350.0
+  }
+}

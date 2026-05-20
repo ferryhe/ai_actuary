@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "case_id": {
+      "title": "Case Id",
+      "type": "string"
+    },
+    "cited_values": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "title": "Cited Values",
+      "type": "object"
+    },
+    "key_points": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Key Points",
+      "type": "array"
+    },
+    "summary": {
+      "title": "Summary",
+      "type": "string"
+    }
+  },
+  "required": [
+    "case_id",
+    "summary"
+  ],
+  "title": "NarrativeDraft",
+  "type": "object"
+}

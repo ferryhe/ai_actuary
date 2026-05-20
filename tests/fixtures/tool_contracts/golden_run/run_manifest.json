@@ -1,0 +1,22 @@
+{
+  "case_id": "golden-raa",
+  "run_id": "golden-raa-20260520T120000Z",
+  "artifact_root": ".",
+  "artifact_paths": {
+    "case_input": "case_input.json",
+    "deterministic_result": "deterministic_result.json",
+    "narrative_draft": "narrative_draft.json",
+    "constitution_check": "constitution_check.json",
+    "review_packet": "review_packet.json",
+    "review_packet_markdown": "review_packet.md",
+    "operator_handoff": "operator_handoff.md",
+    "reserve_summary_json": "reserve_summary.json",
+    "reserve_summary_markdown": "reserve_summary.md",
+    "run_manifest": "run_manifest.json"
+  },
+  "created_by": "contract-fixture",
+  "metadata": {
+    "contract_version": "actuarial-reserving.v1",
+    "sample_name": "RAA"
+  }
+}

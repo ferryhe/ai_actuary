@@ -1,0 +1,11 @@
+{
+  "case_id": "golden-raa",
+  "status": "review_required",
+  "hard_constraints": [],
+  "soft_guidance": [
+    "Narrative and deterministic values are internally consistent."
+  ],
+  "review_triggers": [
+    "origin_count_below_review_threshold"
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "case_id": {
+      "title": "Case Id",
+      "type": "string"
+    },
+    "diagnostics": {
+      "additionalProperties": true,
+      "title": "Diagnostics",
+      "type": "object"
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "title": "Metadata",
+      "type": "object"
+    },
+    "method": {
+      "title": "Method",
+      "type": "string"
+    },
+    "reserve_summary": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "title": "Reserve Summary",
+      "type": "object"
+    }
+  },
+  "required": [
+    "case_id",
+    "method"
+  ],
+  "title": "DeterministicReserveResult",
+  "type": "object"
+}

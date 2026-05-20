@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "artifact_paths": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Artifact Paths",
+      "type": "object"
+    },
+    "artifact_root": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Artifact Root"
+    },
+    "case_id": {
+      "title": "Case Id",
+      "type": "string"
+    },
+    "created_by": {
+      "default": "skeleton",
+      "title": "Created By",
+      "type": "string"
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "title": "Metadata",
+      "type": "object"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "case_id",
+    "run_id"
+  ],
+  "title": "RunArtifactManifest",
+  "type": "object"
+}

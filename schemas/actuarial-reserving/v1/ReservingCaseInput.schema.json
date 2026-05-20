@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "case_id": {
+      "title": "Case Id",
+      "type": "string"
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "title": "Metadata",
+      "type": "object"
+    },
+    "run_config": {
+      "additionalProperties": true,
+      "title": "Run Config",
+      "type": "object"
+    },
+    "triangles": {
+      "additionalProperties": {
+        "items": {
+          "type": "number"
+        },
+        "type": "array"
+      },
+      "title": "Triangles",
+      "type": "object"
+    }
+  },
+  "required": [
+    "case_id"
+  ],
+  "title": "ReservingCaseInput",
+  "type": "object"
+}
