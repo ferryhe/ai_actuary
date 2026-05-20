@@ -274,7 +274,7 @@ errors:
 
 ## Source-of-truth schemas
 
-PR1 exports versioned JSON Schema for these existing Pydantic/control-plane models:
+The repository exports versioned JSON Schema for these existing Pydantic/control-plane models:
 
 - `ReservingCaseInput`
 - `DeterministicReserveResult`
