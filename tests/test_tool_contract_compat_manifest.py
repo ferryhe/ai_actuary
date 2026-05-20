@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -89,6 +90,8 @@ def test_compat_manifest_is_reproducible_and_checksum_pinned() -> None:
     output_dir = REPO_ROOT / "tmp" / "contract-compat-test"
     output = output_dir / "compat-manifest.json"
     shutil.rmtree(output_dir, ignore_errors=True)
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
     try:
         completed = subprocess.run(
             [sys.executable, str(SCRIPT_PATH), "--output", str(output.relative_to(REPO_ROOT))],
@@ -96,6 +99,7 @@ def test_compat_manifest_is_reproducible_and_checksum_pinned() -> None:
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=env,
         )
     finally:
         if output.exists():
@@ -123,7 +127,20 @@ def test_compat_manifest_export_rejects_paths_outside_repo(tmp_path: Path) -> No
     )
 
     assert completed.returncode != 0
-    assert "--output must resolve inside repository root" in completed.stderr
+    assert "--output must resolve to a file inside repository root" in completed.stderr
+
+
+def test_compat_manifest_export_rejects_directory_output() -> None:
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT_PATH), "--output", "tests"],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+    )
+
+    assert completed.returncode != 0
+    assert "--output must be a file path, not a directory" in completed.stderr
 
 
 def test_compat_manifest_declares_contract_significant_schema_fixture_and_artifact_sets() -> None:

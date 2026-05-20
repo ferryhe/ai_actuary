@@ -4,10 +4,16 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 from reserving_workflow.tools_cli import (
     chainladder_calc,
@@ -19,7 +25,6 @@ from reserving_workflow.tools_cli import (
     review_generator,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_VERSION = "actuarial-reserving.v1"
 SCHEMA_DIR = Path("schemas/actuarial-reserving/v1")
 FIXTURE_DIR = Path("tests/fixtures/tool_contracts/golden_run")
@@ -132,8 +137,10 @@ def main() -> None:
     manifest = build_manifest()
     output_path = args.output if args.output.is_absolute() else REPO_ROOT / args.output
     output_path = output_path.resolve()
-    if output_path != REPO_ROOT and REPO_ROOT not in output_path.parents:
-        raise SystemExit(f"--output must resolve inside repository root: {REPO_ROOT}")
+    if output_path == REPO_ROOT or REPO_ROOT not in output_path.parents:
+        raise SystemExit(f"--output must resolve to a file inside repository root: {REPO_ROOT}")
+    if output_path.exists() and output_path.is_dir():
+        raise SystemExit(f"--output must be a file path, not a directory: {output_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps({"ok": True, "output": str(output_path), "contractVersion": CONTRACT_VERSION}, sort_keys=True))
