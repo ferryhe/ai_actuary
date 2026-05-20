@@ -82,8 +82,8 @@
       "status": "open_waiting_remote_review",
       "number": 30,
       "url": "https://github.com/ferryhe/ai_actuary/pull/30",
-      "last_commit": "3397b7a",
-      "last_push_at": "2026-05-20T13:10:40Z",
+      "last_commit": "61b243d",
+      "last_push_at": "2026-05-20T13:11:47Z",
       "review_gate": "Codex blocked because ChatGPT account does not support gpt-5.2-codex; independent delegate reviewers used. Accepted/fixed review findings around hermetic output, tool ID source of truth, narrower pipeline contract, and set comparisons; final delegate re-reviews found no blockers.",
       "last_remote_review_action": "Accepted and fixed two Copilot inline comments: exporter now bootstraps src on sys.path when PYTHONPATH is unset and --output now rejects repo-root/directory targets cleanly; focused validation passed."
     },
@@ -112,8 +112,8 @@
   ],
   "current_pr_number": 30,
   "current_pr_url": "https://github.com/ferryhe/ai_actuary/pull/30",
-  "last_push_at": "2026-05-20T13:10:40Z",
+  "last_push_at": "2026-05-20T13:11:47Z",
   "next_action": "At next 15-minute tick, inspect ai_actuary PR #30 checks, reviews, issue comments, and inline comments after the Copilot follow-up fix commit; fix only confirmed in-scope issues, otherwise squash-merge if clean and proceed to optional PR7 decision.",
   "codex_review_gate": "Codex blocked for PR6 because ChatGPT account does not support gpt-5.2-codex in Codex CLI; independent delegate reviewers used. Initial findings were fixed (repo-contained output, implementation-sourced tool IDs, narrower pipeline contract, set comparisons) and final re-reviews reported no blockers.",
-  "updated_at": "2026-05-20T13:10:40Z"
+  "updated_at": "2026-05-20T13:11:47Z"
 }
