@@ -1,0 +1,179 @@
+{
+  "canonicalPipeline": {
+    "path": "tests/fixtures/tool_pipelines/actuarial_reserving_review.yaml",
+    "pipelineId": "actuarial-reserving-review",
+    "stepArtifactOutputs": {
+      "calc": {
+        "deterministic_result": "deterministic_result.json"
+      },
+      "export": {
+        "operator_handoff": "operator_handoff.md",
+        "reserve_summary_json": "reserve_summary.json",
+        "reserve_summary_markdown": "reserve_summary.md"
+      },
+      "governance": {
+        "constitution_check": "constitution_check.json"
+      },
+      "narrative": {
+        "narrative_draft": "narrative_draft.json"
+      },
+      "review": {
+        "review_packet": "review_packet.json",
+        "review_packet_markdown": "review_packet.md"
+      }
+    },
+    "stepToolIds": [
+      "chainladder-calc",
+      "narrative-draft",
+      "constitution-check",
+      "review-generator",
+      "report-export"
+    ],
+    "version": "actuarial-reserving.v1"
+  },
+  "contractVersion": "actuarial-reserving.v1",
+  "description": "Portable checksum manifest for ai_actuary/ai_interface compatibility tests. Consumers should treat listed schema, fixture, artifact ID, and canonical pipeline changes as contract-significant.",
+  "fixtureFiles": [
+    {
+      "bytes": 355,
+      "path": "tests/fixtures/tool_contracts/golden_run/case_input.json",
+      "sha256": "272b4d256baf7c489b485153564899cb6eb4469fc5376152761ac8db04550ff9"
+    },
+    {
+      "bytes": 251,
+      "path": "tests/fixtures/tool_contracts/golden_run/constitution_check.json",
+      "sha256": "8f5761e4ec7b513c5d641ae9023c7a62a88c546cc9f40f0c2a93138b6711f91e"
+    },
+    {
+      "bytes": 358,
+      "path": "tests/fixtures/tool_contracts/golden_run/deterministic_result.json",
+      "sha256": "937b618fc83bd0fe679caacd0cb2509915d6a975afb86f4ccd9e7e8ea3bf84df"
+    },
+    {
+      "bytes": 399,
+      "path": "tests/fixtures/tool_contracts/golden_run/narrative_draft.json",
+      "sha256": "2983df5ab5833f4b68eb847c33a191d5435f866994b84b845c240c7ba03dbc1c"
+    },
+    {
+      "bytes": 743,
+      "path": "tests/fixtures/tool_contracts/golden_run/operator_handoff.md",
+      "sha256": "b23ad53261d5133669b9aecf673ead21aeca200d603e575be4aaaf86e02e624e"
+    },
+    {
+      "bytes": 213,
+      "path": "tests/fixtures/tool_contracts/golden_run/reserve_summary.json",
+      "sha256": "372c5485f9d2769a136c61c37b3ce18e468a202806e8d12e33b4547220f21588"
+    },
+    {
+      "bytes": 252,
+      "path": "tests/fixtures/tool_contracts/golden_run/reserve_summary.md",
+      "sha256": "a098ff0e6aafb8c28b2c6d2b2da2c3f14531ce9c5c3827c3488e5502d5475024"
+    },
+    {
+      "bytes": 1136,
+      "path": "tests/fixtures/tool_contracts/golden_run/review_packet.json",
+      "sha256": "25a95e0f5cdf8e4e197a2828349f4c4f9f92631e9ff25bc7d0086fd1a6800f70"
+    },
+    {
+      "bytes": 328,
+      "path": "tests/fixtures/tool_contracts/golden_run/review_packet.md",
+      "sha256": "12826fa2178eb2de88ec624a0304aebf1c29837ed8d044e0eec92cf02ccdf745"
+    },
+    {
+      "bytes": 736,
+      "path": "tests/fixtures/tool_contracts/golden_run/run_manifest.json",
+      "sha256": "daa0d2501b14aafa1ef83483c59b2bdf9aa0564d513856819ef3ae94adcc2a23"
+    }
+  ],
+  "goldenRun": {
+    "artifactPaths": {
+      "case_input": "case_input.json",
+      "constitution_check": "constitution_check.json",
+      "deterministic_result": "deterministic_result.json",
+      "narrative_draft": "narrative_draft.json",
+      "operator_handoff": "operator_handoff.md",
+      "reserve_summary_json": "reserve_summary.json",
+      "reserve_summary_markdown": "reserve_summary.md",
+      "review_packet": "review_packet.json",
+      "review_packet_markdown": "review_packet.md",
+      "run_manifest": "run_manifest.json"
+    },
+    "artifactRoot": ".",
+    "caseId": "golden-raa",
+    "fixtureRoot": "tests/fixtures/tool_contracts/golden_run",
+    "runId": "golden-raa-20260520T120000Z"
+  },
+  "requiredArtifactIds": [
+    "case_input",
+    "deterministic_result",
+    "narrative_draft",
+    "constitution_check",
+    "run_manifest",
+    "review_packet",
+    "review_packet_markdown",
+    "operator_handoff",
+    "reserve_summary_json",
+    "reserve_summary_markdown"
+  ],
+  "schemaFiles": [
+    {
+      "bytes": 835,
+      "path": "schemas/actuarial-reserving/v1/ConstitutionCheckResult.schema.json",
+      "sha256": "ea78c21c95d2db8c76ed0394c2c003783a55a938d99603dc509a05f9925c1e31"
+    },
+    {
+      "bytes": 723,
+      "path": "schemas/actuarial-reserving/v1/DeterministicReserveResult.schema.json",
+      "sha256": "48e46700563a12c35ab5598eaa85982f1edcfeaf9beb9e6f70e7aa2822b5a6fa"
+    },
+    {
+      "bytes": 609,
+      "path": "schemas/actuarial-reserving/v1/NarrativeDraft.schema.json",
+      "sha256": "a360a1eddb1fc39ea67fa8e02e60a072e3b12c60385f1d650dcb2c1277227125"
+    },
+    {
+      "bytes": 672,
+      "path": "schemas/actuarial-reserving/v1/ReservingCaseInput.schema.json",
+      "sha256": "f5e842aa225f21d905f2f1ff1166fac61eaf9ccb5da0abd7cf07ff304f36ec48"
+    },
+    {
+      "bytes": 5866,
+      "path": "schemas/actuarial-reserving/v1/Review.schema.json",
+      "sha256": "3a1484c09c305862f9614d82a20e6460f0be423bc25f9af8e517b7e8d52fa455"
+    },
+    {
+      "bytes": 2347,
+      "path": "schemas/actuarial-reserving/v1/Run.schema.json",
+      "sha256": "6ecac56275c79320cccd1ee7f1ffb0a7da787e15381079ef15422fee1a82fe86"
+    },
+    {
+      "bytes": 908,
+      "path": "schemas/actuarial-reserving/v1/RunArtifactManifest.schema.json",
+      "sha256": "5c48598f37b05f14b3e7292fbb16dbb9b8818e1f656448a2977f74a385efbd30"
+    },
+    {
+      "bytes": 1494,
+      "path": "schemas/actuarial-reserving/v1/RunEvent.schema.json",
+      "sha256": "2d6b49eb44dd6bc8a47d834e5e2c457bbf2f4889760ea9d7b8cb2fcca9e439e8"
+    },
+    {
+      "bytes": 347,
+      "path": "schemas/actuarial-reserving/v1/ToolInvocation.schema.json",
+      "sha256": "4dd07418c98fd514d12b0f477e9d3a08a3df09fd574e5822d46cea7b5b1208db"
+    },
+    {
+      "bytes": 2494,
+      "path": "schemas/actuarial-reserving/v1/Workflow.schema.json",
+      "sha256": "75daedb6d81799d32f8cf99f695c37cb19dbc92d5557eaa330803c8762678dd9"
+    }
+  ],
+  "toolIds": [
+    "chainladder-calc",
+    "narrative-draft",
+    "constitution-check",
+    "review-generator",
+    "replay-run",
+    "repeatability-check",
+    "report-export"
+  ]
+}
