@@ -138,7 +138,7 @@ This keeps operator-facing automation on a stable response surface even when pla
 
 The API layer in `reserving_workflow.api.app` is a transport/control-plane wrapper over the existing CLI-grade contracts. It does not replace the planner, worker, artifact, or registry layers.
 
-The FastAPI routes are intentionally aligned to the future Symphony-style operator console shape:
+The FastAPI routes are intentionally aligned to the current operator-console shape:
 
 - `GET /console` — serve a lightweight operator console shell without a frontend build system
 - `GET /console/state` — return console-ready run cards, selected-run detail, timeline, artifact, review, and action panels
@@ -162,27 +162,27 @@ The FastAPI routes are intentionally aligned to the future Symphony-style operat
 
 Derived events are mapped from registry `status_history` into `run.accepted`, `run.queued`, `run.running`, `run.completed`, `run.needs_review`, or `run.failed` event types. The PR5 console shell reuses those events and the existing artifact/review/rerun endpoints to present a thin operator-facing workspace. PR6 adds a bounded background mode: the API writes an initial `accepted` registry event, schedules the same operator entrypoint through FastAPI background tasks, and exposes `/runs/{run_id}/events` for polling. This is still not a production queue, streaming bus, or separate business runtime.
 
-PR13 adds a lightweight per-actuary ownership layer on top of the same local control plane:
+The local control plane includes a lightweight per-actuary ownership layer:
 
 - runs can carry `operator_id`, `workspace_id`, and `created_by`
 - the single-user fallback stays local-only and defaults to `local-actuary` plus `default-workspace`
 - `/runs`, `/reviews`, and `/console/state` can apply bounded operator/workspace filters without introducing auth or multitenancy
 - review assignment remains a prototype `assigned_to` field derived from local ownership metadata rather than RBAC
 
-PR14 adds an agent adapter seam on top of the same public API:
+The public API also exposes an agent adapter seam:
 
 - the planner adapter produces only a bounded execution plan
 - the Hermes client starts runs and polls status through public HTTP endpoints only
 - neither adapter writes deterministic results, review decisions, or artifact-store records directly
 
-PR8/PR9 add a bounded tool catalog and tool-backed run invocation layer:
+The control plane includes a bounded tool catalog and tool-backed run invocation layer:
 
 - tool discovery is explicit through a local registry and builtin `chainladder` catalog entry
 - the console create-run form now loads its selector from `GET /tools`
 - `POST /runs` accepts `tool_id` plus `inputs`, preserves the legacy `method` alias for compatibility, and writes `validated_input.json` into run artifacts
 - run status values, run event types, artifact refs, review status, and rerun semantics are frozen in `docs/contracts/control-plane.md`
 
-PR10 adds a store boundary under the existing control plane:
+The existing control plane uses a store boundary:
 
 - `RunStore` is the operational index boundary for run lookup and status history
 - `ArtifactStore` is the evidence boundary for manifest-backed files
@@ -250,7 +250,7 @@ The system currently implements storage through one local adapter set:
 
 The registry remains an operational index. Artifacts and review decision files remain the evidence source. The current filesystem-backed stores are a deliberate prototype constraint, not the final intended deployment architecture.
 
-PR15 adds a bounded operator handoff export on top of that same evidence model:
+A bounded operator handoff export sits on top of that same evidence model:
 
 - the export reads deterministic artifacts, manifest refs, run registry data, and independent review decisions
 - the export writes `operator_handoff.md`, `reserve_summary.json`, and `reserve_summary.md`
@@ -294,16 +294,24 @@ PR15 adds a bounded operator handoff export on top of that same evidence model:
 - batch comparison between baseline and governed modes
 - replay from saved manifests
 - repeatability checks across multiple manifests
-- FastAPI control-plane routes for runs, reruns, artifacts, review packets, replay, repeatability, and batch benchmarks
+- FastAPI control-plane routes for runs, reruns, artifacts, review packets, reviews, replay, repeatability, workflows, tool discovery, and batch benchmarks
 - background run acceptance with polling-friendly `/runs/{run_id}/events`
 - lightweight operator console shell plus `/console/state` panel payload
-- Symphony-style derived run events from the registry status history
+- actionable console create-run, polling, rerun, review-decision, and report-export actions
+- tool catalog with the builtin `chainladder` reserving method
+- workflow catalog with bounded local sequential execution
+- local `RunStore`, `ArtifactStore`, and `ReviewStore` boundaries over JSON/filesystem storage
+- independent review records and review-decision artifacts
+- prototype `operator_id`, `workspace_id`, and `created_by` ownership metadata
+- bounded OpenAI planner / Hermes worker adapter contracts over public HTTP surfaces
+- evidence-only operator handoff export through CLI, API, and console
+- derived run and workflow events from registry status history
 
 ## What Is Not Implemented Yet
 
-- external artifact store or retention service
+- external artifact store, database-backed audit store, or retention service
 - production Hermes queue/runtime orchestration
-- outbound messaging delivery of review packets beyond local outbox
+- outbound messaging delivery of review packets or handoff reports beyond local artifacts/outbox patterns
 - production operator web console with authentication, streaming updates, and multi-user state
 - production queue workers, streaming event transport, and multi-user access control
 - broader actuarial methods and richer benchmark suites

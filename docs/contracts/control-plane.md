@@ -1,6 +1,6 @@
 # Control-Plane Contracts
 
-This document freezes the bounded operator-facing control-plane contract through PR15.
+This document freezes the bounded operator-facing control-plane contract for the current local prototype.
 
 ## Scope
 
@@ -28,7 +28,7 @@ The local JSON registry records only these status values.
 
 ## Prototype Ownership
 
-PR13 adds bounded prototype ownership fields for per-actuary workspaces.
+The control plane includes bounded prototype ownership fields for per-actuary workspaces.
 
 `Run` may now expose:
 
@@ -87,7 +87,7 @@ Artifact lists are derived from `run_manifest.json`. The manifest remains the so
 - `artifact_paths`
 - `artifacts`
 
-PR5 adds structured evidence fields so the console can render a readable evidence panel without changing the underlying runtime contract:
+The console exposes structured evidence fields so it can render a readable evidence panel without changing the underlying runtime contract:
 
 - `status` — `ok`, `manifest_missing`, or `no_run_selected`
 - `primary_artifact_refs`
@@ -122,7 +122,7 @@ Safe path behavior for the new evidence fields is frozen to:
 
 `Review` is an independent governance object. Review decisions do not mutate `Run.status`.
 
-PR13 also keeps review ownership lightweight:
+Review ownership remains lightweight:
 
 - `assigned_to` remains a prototype field only
 - local review records may also expose `workspace_id`
@@ -148,13 +148,13 @@ Decision submission persists an independent review record under the local review
 
 ## Tool Catalog
 
-PR8 adds a bounded tool catalog and local registry.
+The control plane includes a bounded tool catalog and local registry.
 
 - `GET /tools` returns catalog summaries.
 - `GET /tools/{tool_id}` returns full metadata and schema.
 - The built-in catalog currently contains `chainladder`.
 
-PR9 keeps `GET /tools` and `GET /tools/{tool_id}` as the discovery surfaces and upgrades `POST /runs` to accept a tool-backed invocation.
+`GET /tools` and `GET /tools/{tool_id}` are the discovery surfaces, and `POST /runs` accepts a tool-backed invocation.
 
 `RunCreateRequest` now accepts:
 
@@ -175,7 +175,7 @@ Each created run also writes `validated_input.json`, and `run_manifest.json` mus
 
 ## Workflow Catalog
 
-PR11 adds a bounded builtin workflow catalog.
+The control plane includes a bounded builtin workflow catalog.
 
 - `GET /workflows` returns workflow summaries.
 - `GET /workflows/{workflow_id}` returns one workflow definition with ordered steps.
@@ -189,7 +189,7 @@ Workflow-backed runs keep the existing run lifecycle and execution modes (`inlin
 
 ## Agent Adapter Contract
 
-PR14 adds a bounded agent-facing adapter contract for planner and Hermes runtime wrappers.
+The control plane includes a bounded agent-facing adapter contract for planner and Hermes runtime wrappers.
 
 `AgentExecutionPlan` is frozen to:
 
@@ -249,7 +249,7 @@ The control-plane contract exposes these semantics through `RerunSemantics`.
 
 ## Store Boundary
 
-PR10 keeps the current local storage behavior but moves it behind explicit interfaces:
+The current local storage behavior sits behind explicit interfaces:
 
 - `RunStore` backs the JSON registry and remains an operational index only
 - `ArtifactStore` backs filesystem artifacts and remains the evidence source for manifests and derived artifact refs
@@ -260,7 +260,7 @@ This boundary still does not add DB, object storage, queues, or auth.
 
 ## Report Export
 
-PR15 adds a bounded operator handoff export surface.
+The control plane includes a bounded operator handoff export surface.
 
 - `POST /runs/{run_id}/report-export` builds report artifacts from recorded evidence only
 - export inputs are limited to run registry data, `run_manifest.json`, deterministic artifacts, review packets, and independent review decisions

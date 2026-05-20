@@ -1,20 +1,45 @@
 # AI Actuary
 
-> A compositional actuarial-agent workspace built around **CAS Core + OpenAI Planner + Hermes Workers**.
+AI Actuary is a local **Agentic Actuarial Workbench** prototype. It runs deterministic actuarial reserving tools, records every run as auditable artifacts, exposes a small FastAPI control plane, and provides a lightweight operator console for creating runs, inspecting evidence, handling reviews, rerunning cases, and exporting handoff reports.
+
+The project’s operating model is simple:
+
+**Agents plan and explain; actuarial tools calculate; human actuaries decide; artifacts provide audit and replay evidence.**
 
 ---
 
 ## Project Positioning
 
-This repository is a governed actuarial workflow prototype.
-
 - **CAS Core** owns deterministic actuarial truth, governance rules, benchmark scoring, and artifact contracts.
 - **OpenAI Planner** owns planning, routing, and governed orchestration.
 - **Hermes Workers** own execution loops, artifact packaging, review handoff generation, and operator-facing runtime flows.
 
-One-line model:
+## Current Status
 
-**OpenAI decides what to do, Hermes executes it, and CAS Core defines what is numerically correct.**
+The current repo state is past the original CLI proof of concept. It includes:
+
+- deterministic Chainladder reserving through `chainladder-python`
+- governed single-case execution with OpenAI planner / Hermes worker boundaries
+- CLI/file-artifact tools for the actuarial pipeline
+- local JSON run registry and rerun tooling
+- FastAPI control plane for runs, tools, workflows, reviews, artifacts, replay, repeatability, and report export
+- lightweight `/console` operator UI with run creation, event polling, artifact/review panels, review decisions, rerun, and report export actions
+- tool catalog with the current builtin `chainladder` tool
+- workflow catalog with bounded local sequential execution
+- independent review contract and review-decision artifacts
+- prototype `operator_id` / `workspace_id` ownership metadata
+- bounded OpenAI planner / Hermes worker adapter seam that uses public API surfaces only
+- evidence-only operator handoff export
+- cross-repo `actuarial-reserving.v1` schema/fixture compatibility package
+
+Still intentionally out of scope:
+
+- production queue workers, websocket/SSE streaming, or durable async orchestration
+- auth, SSO/RBAC, enterprise multitenancy, or production workspace administration
+- object storage / database-backed audit store
+- production frontend build system
+- broader actuarial method catalog beyond the current `chainladder` path
+- optional HTTP calculator microservice or MCP adapter without a concrete caller
 
 ---
 
@@ -22,151 +47,181 @@ One-line model:
 
 ```text
 .
-├── benchmarks/
-├── docs/
-│   ├── architecture/
-│   ├── contracts/
-│   ├── plans/
-│   └── reports/
-├── prompts/
-│   └── codex/
-├── references/
-│   └── upstream/
-├── scripts/
-├── src/
-├── tests/
-└── workflows/
+├── benchmarks/                         # deterministic benchmark case packs
+├── docs/                               # current docs plus archive
+│   ├── archive/                         # historical plans/reports/prompts
+│   ├── architecture.md                  # current architecture reference
+│   ├── contracts/                       # control-plane and tool contracts
+│   ├── operator_handoff.md              # report-export contract
+│   ├── project-introduction.html        # standalone HTML overview and usage guide
+│   └── project-plan.md                  # current scope and next steps
+├── scripts/                             # operator CLI wrappers
+├── schemas/actuarial-reserving/v1/      # exported JSON Schemas
+├── src/reserving_workflow/              # core implementation
+├── tests/                               # pytest suite and golden fixtures
+└── workflows/agent-runtimes/            # OpenAI planner and Hermes worker adapters
 ```
 
-### Key handoff docs
+Read in this order when taking over the project:
 
-- `docs/architecture.md` — current three-layer architecture and runtime boundaries
-- `docs/contracts/control-plane.md` — frozen operator-facing status, event, artifact, review, tool, and rerun contracts
-- `docs/operator_handoff.md` — bounded report export and operator handoff workflow
-- `docs/project-plan.md` — completed scope, remaining gaps, and next recommended steps
-- `docs/architecture/overview.md` — short architecture summary for quick orientation
-- `docs/plans/openai-hermes-composition-design.md` — full original design and phased roadmap
-- `docs/plans/actuarial-workbench-tool-console-roadmap.md` — workbench roadmap for console and tool surfaces
-- `prompts/codex/step-by-step-prompts.md` — staged implementation prompt sequence
+1. `README.md`
+2. `docs/project-introduction.html`
+3. `docs/architecture.md`
+4. `docs/contracts/control-plane.md`
+5. `docs/project-plan.md`
+6. `docs/operator_handoff.md`
+7. `docs/README.md`
+
+Archived material is under `docs/archive/` and is retained for history only.
 
 ---
 
-## Current Working Surface
+## Install
 
-### CAS Core
-
-- `src/reserving_workflow/schemas/`
-- `src/reserving_workflow/calculators/`
-- `src/reserving_workflow/constitution/`
-- `src/reserving_workflow/contracts/`
-- `src/reserving_workflow/artifacts/`
-- `src/reserving_workflow/evaluation/`
-
-### OpenAI Planner
-
-- `workflows/agent-runtimes/openai-agents/agents.py`
-- `workflows/agent-runtimes/openai-agents/routing.py`
-- `workflows/agent-runtimes/openai-agents/tools.py`
-- `workflows/agent-runtimes/openai-agents/runner.py`
-
-### Hermes Workers
-
-- `workflows/agent-runtimes/hermes-worker/task_contracts.py`
-- `workflows/agent-runtimes/hermes-worker/case_worker.py`
-- `workflows/agent-runtimes/hermes-worker/review_worker.py`
-- `workflows/agent-runtimes/hermes-worker/batch_worker.py`
-- `workflows/agent-runtimes/hermes-worker/artifact_packager.py`
-
-### Local Control Plane
-
-- `src/reserving_workflow/api/`
-- `src/reserving_workflow/runtime/run_registry.py`
-- `src/reserving_workflow/tools/catalog.py`
-- `src/reserving_workflow/workflows/catalog.py`
-
----
-
-## Operator CLI Entry Points
-
-All current operator-facing entry points are machine-readable JSON CLIs.
-
-1. `scripts/run_governed_case.py`
-2. `scripts/run_batch_benchmark.py`
-3. `scripts/replay_case.py`
-4. `scripts/compare_repeatability.py`
-5. `scripts/list_runs.py`
-6. `scripts/show_run.py`
-7. `scripts/rerun_case.py`
-8. `scripts/export_run_report.py`
-
-The local FastAPI wrapper also exposes:
-
-- `GET /health`
-- `GET /health/preflight`
-- `GET /tools`
-- `GET /tools/{tool_id}`
-- `GET /workflows`
-- `GET /workflows/{workflow_id}`
-- `POST /runs`
-- `POST /runs/{run_id}/rerun`
-- `POST /runs/{run_id}/report-export`
-- `GET /reviews`
-- `GET /reviews/{review_id}`
-- `GET /runs/{run_id}/review`
-- `POST /reviews/{review_id}/decision`
-
-Builtin workflow notes:
-
-- `chainladder-basic` preserves the legacy single-step execution path.
-- `chainladder-validated` is a two-step path that validates tool/case inputs first, then executes the deterministic reserving run only after validation passes.
-
-### Runtime preflight
-
-Use `GET /health` for a lightweight liveness probe. It remains backward-compatible and returns at least:
-
-```json
-{"ok": true, "service": "ai-actuary-control-plane"}
-```
-
-Use `GET /health/preflight` for operator-facing local readiness before starting runs. The response is machine-readable and intentionally safe: it reports status, readiness, checks, configured path targets, default operator/workspace identifiers, and builtin tool/workflow ids, but it does not expose secrets, tokens, API keys, raw environment values, or arbitrary user identifiers.
-
-Typical preflight fields:
-
-- `ok` — `false` only when one or more required checks failed
-- `status` — `ok`, `degraded`, or `error`
-- `readiness` — `ready`, `degraded`, or `not_ready`
-- `checks` — ordered per-check results for registry path, artifact root, review store, review delivery, tool catalog, and workflow catalog
-- `warnings` / `errors` — compact summaries callers can surface directly
-
-Example smoke flow:
+Use Python 3.11+.
 
 ```bash
-python -m uvicorn reserving_workflow.api.app:create_app --factory --host 127.0.0.1 --port 8000
+git clone git@github.com:ferryhe/ai_actuary.git
+cd ai_actuary
+python -m venv .venv
+. .venv/bin/activate
+pip install -e '.[dev]'
+```
+
+For governed OpenAI planner paths, provide `OPENAI_API_KEY` through your local `.env` or shell. Do not commit secrets.
+
+```bash
+set -a && [ -f ./.env ] && . ./.env && set +a
+```
+
+For API-only usage, `pip install -e '.[api]'` is enough; `dev` includes API dependencies and pytest.
+
+---
+
+## Quick Start: Local API and Console
+
+Start the control plane:
+
+```bash
+python -m uvicorn 'reserving_workflow.api.app:create_app' --factory --host 127.0.0.1 --port 8000
+```
+
+Check readiness:
+
+```bash
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/health/preflight
 ```
 
-Interpretation:
+Open the operator console:
 
-- `status=ok` means the local runtime is ready for runs.
-- `status=degraded` means runs are still possible, but an operator should inspect warnings such as missing optional review delivery configuration.
-- `status=error` means one or more required local runtime paths or catalogs are not usable and runs should not be started until corrected.
+```text
+http://127.0.0.1:8000/console
+```
+
+The console can create runs, poll background events, inspect artifacts, view review state, submit review decisions, rerun recorded cases, and export operator handoff reports. It is intentionally a lightweight static shell over the API, not a production dashboard stack.
+
+---
+
+## Quick Start: Create a Run by API
+
+Synchronous run:
+
+```bash
+curl -X POST http://127.0.0.1:8000/runs \
+  -H 'content-type: application/json' \
+  -d '{
+    "case_id": "demo-case",
+    "tool_id": "chainladder",
+    "inputs": {
+      "sample_name": "RAA",
+      "method_variant": "chainladder"
+    }
+  }'
+```
+
+Background run:
+
+```bash
+curl -X POST http://127.0.0.1:8000/runs \
+  -H 'content-type: application/json' \
+  -d '{
+    "case_id": "demo-bg",
+    "tool_id": "chainladder",
+    "inputs": {
+      "sample_name": "RAA",
+      "method_variant": "chainladder"
+    },
+    "background": true
+  }'
+```
+
+Poll events:
+
+```bash
+curl http://127.0.0.1:8000/runs/<run_id>/events
+```
+
+Inspect artifacts and review state:
+
+```bash
+curl http://127.0.0.1:8000/runs/<run_id>/artifacts
+curl http://127.0.0.1:8000/runs/<run_id>/review
+```
+
+Export operator handoff:
+
+```bash
+curl -X POST http://127.0.0.1:8000/runs/<run_id>/report-export
+```
+
+---
+
+## Key API Routes
+
+```text
+GET  /health
+GET  /health/preflight
+GET  /console
+GET  /console/state
+GET  /tools
+GET  /tools/{tool_id}
+GET  /workflows
+GET  /workflows/{workflow_id}
+POST /runs
+GET  /runs
+GET  /runs/{run_id}
+GET  /runs/{run_id}/events
+POST /runs/{run_id}/rerun
+GET  /runs/{run_id}/artifacts
+GET  /runs/{run_id}/review-packet
+GET  /runs/{run_id}/review
+POST /runs/{run_id}/report-export
+GET  /reviews
+GET  /reviews/{review_id}
+POST /reviews/{review_id}/decision
+POST /replay
+POST /repeatability
+POST /benchmarks/batch
+```
+
+Current stable run statuses:
+
+```text
+accepted, queued, running, completed, needs_review, failed
+```
+
+Review decisions are separate from run status:
+
+```text
+approved, rejected, changes_requested
+```
 
 ---
 
 ## Step-by-Step Operating Guide
 
-### A. Run one governed case
-
-**Step 1 — Human:** prepare local environment.
-
-```bash
-cd /tmp/ai_actuary
-pip install -e .
-set -a && . ./.env && set +a
-```
-
-**Step 2 — Human:** start the single-case CLI.
+### 1. Governed single-case run
 
 ```bash
 python scripts/run_governed_case.py \
@@ -175,78 +230,34 @@ python scripts/run_governed_case.py \
   --registry-path ./tmp/run-registry.json
 ```
 
-**Step 3 — Agent system:** the OpenAI planner routes the governed run and Hermes worker executes the case.
+Inspect the run directory starting with `run_manifest.json`.
 
-**Step 4 — Human:** inspect artifacts under `./tmp/demo-case/`, starting with `run_manifest.json`.
-
-**Expected top-level CLI JSON fields**
-
-- `ok` — boolean success flag; `false` means the operator/planner path failed before a usable governed result was produced
-- `status` — stable single-run status: `completed`, `needs_review`, or `failed`
-- `case_id`
-- `run_id`
-- `summary`
-- `route`
-- `trace`
-- `worker_result`
-- `final_output`
-- `errors`
-- `error_category`
-- `review_packet` — present only when `status == "needs_review"`
-
-**Failure semantics**
-
-- `needs_review` means the workflow executed successfully but governance escalated the case
-- `failed` means the run did not complete successfully
-- `approved`, `rejected`, and `changes_requested` are review decisions, not run statuses
-- worker-side invalid input failures expose structured metadata under `worker_result.worker_metadata`, including `failure_category`, `failure_stage`, and `error_type`
-- PR9 keeps the legacy `method` alias but normalizes `POST /runs` into stable `tool_id` plus `inputs.method_variant`, and writes `validated_input.json` into the run artifact set
-- PR15 exports handoff artifacts from recorded evidence only; missing reserve values stay marked as missing
-
-### B. Trigger review flow
-
-**Step 1 — Human:** run the same workflow with a tighter review threshold.
+### 2. Force a review-required run
 
 ```bash
 python scripts/run_governed_case.py \
   --case-id review-case \
   --artifact-dir ./tmp/review-case \
+  --registry-path ./tmp/run-registry.json \
   --review-threshold-origin-count 5
 ```
 
-**Optional operator delivery outbox:**
+When governance escalates, inspect `review_packet.json` and `review_packet.md`.
+
+### 3. List, show, and rerun recorded runs
 
 ```bash
-python scripts/run_governed_case.py \
-  --case-id review-case \
-  --artifact-dir ./tmp/review-case \
-  --review-threshold-origin-count 5 \
-  --review-delivery-dir ./tmp/review-outbox
+python scripts/list_runs.py --registry-path ./tmp/run-registry.json
+python scripts/show_run.py --registry-path ./tmp/run-registry.json --run-id <run_id>
+python scripts/rerun_case.py \
+  --registry-path ./tmp/run-registry.json \
+  --run-id <run_id> \
+  --artifact-dir ./tmp/rerun-case
 ```
 
-**Step 2 — Agent system:** the worker produces governance outputs and, when required, writes `review_packet.json` and `review_packet.md`.
+A rerun always creates a distinct new run and preserves the source run.
 
-**Step 3 — Human:** inspect `constitution_check.json`, then read `review_packet.md`.
-
-**Step 4 — Human:** review through the console or API inbox, for example:
-
-```bash
-curl http://127.0.0.1:8000/reviews
-curl -X POST http://127.0.0.1:8000/reviews/<review_id>/decision \
-  -H 'content-type: application/json' \
-  -d '{"decision":"changes_requested","comment":"Re-run with updated assumptions.","decided_by":"actuary-001"}'
-```
-
-Decision submission notes:
-
-- allowed decisions are `approved`, `rejected`, and `changes_requested`
-- reposting the same decision payload is safe and idempotent
-- conflicting follow-up submissions for an already-decided review return `409`
-- when the run has an artifact root, review decision artifacts are written to `review_decision.json` and `review_decision.md`
-
-### B2. Export operator handoff
-
-**Step 1 — Human:** export a report from an existing recorded run.
+### 4. Export operator handoff report
 
 ```bash
 python scripts/export_run_report.py \
@@ -255,30 +266,15 @@ python scripts/export_run_report.py \
   --review-store-dir ./tmp/reviews
 ```
 
-**Step 2 — System:** the export reads deterministic artifacts, manifest refs, run registry metadata, and review decisions.
+Outputs are written from recorded evidence only:
 
-**Step 3 — Human:** inspect `operator_handoff.md`, `reserve_summary.json`, and `reserve_summary.md` under the run artifact root.
+- `operator_handoff.md`
+- `reserve_summary.json`
+- `reserve_summary.md`
 
-### C. Run a batch benchmark comparison
+Missing reserve facts remain explicit missing values; the exporter must not fabricate numeric results.
 
-**Step 1 — Human:** create `cases.json`, for example:
-
-```json
-[
-  {"case_id": "batch-case-1", "sample_name": "RAA"},
-  {"case_id": "batch-case-2", "sample_name": "RAA", "review_threshold_origin_count": 5}
-]
-```
-
-**Step 2 — Human:** start the batch CLI.
-
-```bash
-python scripts/run_batch_benchmark.py \
-  --cases-json ./cases.json \
-  --artifact-root ./tmp/batch-run
-```
-
-Or run the checked-in deterministic benchmark pack and emit a local run registry for later replay/report export:
+### 5. Batch benchmark
 
 ```bash
 python scripts/run_batch_benchmark.py \
@@ -287,247 +283,158 @@ python scripts/run_batch_benchmark.py \
   --registry-path ./tmp/batch-run/run-registry.json
 ```
 
-**Step 3 — Agent system:** baseline and governed modes are executed and scored.
+Inspect:
 
-**Step 4 — Human:** inspect `./tmp/batch-run/comparison_report.json`, `./tmp/batch-run/batch_manifest.json`, and the per-run manifests under each mode directory.
+- `comparison_report.json`
+- `batch_manifest.json`
+- per-run `run_manifest.json` files
 
-### D. Replay one saved run
-
-**Step 1 — Human:** point to a saved `run_manifest.json`.
+### 6. Replay and repeatability
 
 ```bash
 python scripts/replay_case.py \
   --manifest-path ./tmp/demo-case/run_manifest.json
-```
 
-**Step 2 — Agent system:** replay loads saved artifacts and recomputes the deterministic result.
-
-**Step 3 — Human:** compare `saved_summary` and `replayed_summary` in the JSON output.
-
-### E. Compare repeatability across multiple runs
-
-**Step 1 — Human:** collect two or more manifests for the same case.
-
-```bash
 python scripts/compare_repeatability.py \
   --manifest-path ./tmp/repeat-a/run_manifest.json \
   --manifest-path ./tmp/repeat-b/run_manifest.json
 ```
 
-**Step 2 — Agent system:** repeatability loads each run and evaluates status plus IBNR stability.
+---
 
-**Step 3 — Human:** inspect `stable_ibnr`, `ibnr_values`, and `all_statuses`.
+## CLI Tool Contract Surface
 
-### F. Inspect the local run registry
+The v1 file-artifact tool layer is the stable bridge for orchestrators such as `ai_interface`:
 
-**Step 1 — Human:** run one or more governed cases with a registry path.
-
-```bash
-python scripts/run_governed_case.py \
-  --case-id registry-case \
-  --artifact-dir ./tmp/registry-case \
-  --registry-path ./tmp/run-registry.json
+```text
+case_input.json
+  -> chainladder-calc -> deterministic_result.json
+  -> narrative-draft -> narrative_draft.json
+  -> constitution-check -> constitution_check.json
+  -> review-generator when review is required -> review_packet.json + review_packet.md
+  -> report-export -> operator_handoff.md + reserve_summary.*
 ```
 
-**Step 2 — Human:** list recorded runs.
+Side tools:
 
-```bash
-python scripts/list_runs.py --registry-path ./tmp/run-registry.json
+```text
+run_manifest.json -> replay-run -> replayed_result.json
+[run_manifest.json, ...] -> repeatability-check -> stability_report.json
 ```
 
-**Step 3 — Human:** inspect one run.
+Runnable module entry points:
 
-```bash
-python scripts/show_run.py \
-  --registry-path ./tmp/run-registry.json \
-  --run-id operator-registry-case-local
+```text
+python -m reserving_workflow.tools_cli.chainladder_calc
+python -m reserving_workflow.tools_cli.narrative_draft
+python -m reserving_workflow.tools_cli.constitution_check
+python -m reserving_workflow.tools_cli.review_generator
+python -m reserving_workflow.tools_cli.replay_run
+python -m reserving_workflow.tools_cli.repeatability_check
+python -m reserving_workflow.tools_cli.report_export
 ```
 
-**Step 4 — Human:** rerun a recorded case with optional overrides.
+Schema and fixture compatibility are pinned under:
+
+- `schemas/actuarial-reserving/v1/`
+- `tests/fixtures/tool_contracts/`
+- `docs/contracts/tool-contract-compatibility-suite.md`
+
+Regenerate schema/compatibility manifests only for intentional contract changes:
 
 ```bash
-python scripts/rerun_case.py \
-  --registry-path ./tmp/run-registry.json \
-  --run-id operator-registry-case-local \
-  --artifact-dir ./tmp/registry-case-rerun
+PYTHONPATH=src python scripts/export_contract_schemas.py
+PYTHONPATH=src python scripts/export_contract_compat_manifest.py
+PYTHONPATH=src python -m pytest tests/test_contract_schema_export.py tests/test_tool_contract_compat_manifest.py -q
 ```
-
-### G. Use the FastAPI control plane
-
-PR4 adds a service/control-plane wrapper that reuses the same operator, registry, artifact, replay, repeatability, and batch helpers used by the CLI. It is designed as the backend shape for a future Symphony-style operator console.
-
-```bash
-pip install -e '.[api]'
-uvicorn 'reserving_workflow.api.app:create_app' --factory --host 0.0.0.0 --port 8000
-```
-
-Key routes:
-
-- `GET /console` — serve a lightweight operator console shell
-- `GET /console/state` — return the console-ready run queue, timeline, artifact, review, and action panels
-- `POST /runs` — start a governed single-case run through the existing operator entrypoint; pass `"background": true` to accept the run immediately and execute it through FastAPI background tasks
-- `GET /workflows` — list builtin workflow templates
-- `GET /workflows/{workflow_id}` — fetch one builtin workflow definition with ordered steps
-- `GET /runs`
-- `GET /runs/{run_id}`
-- `GET /runs/{run_id}/events`
-- `POST /runs/{run_id}/rerun`
-- `GET /runs/{run_id}/artifacts`
-- `GET /runs/{run_id}/review-packet`
-- `GET /reviews`
-- `GET /runs/{run_id}/review`
-- `POST /reviews/{review_id}/decision`
-- `POST /runs/{run_id}/report-export`
-- `POST /replay`
-- `POST /repeatability`
-- `POST /benchmarks/batch`
-
-The `/runs/{run_id}` detail payload includes derived `events` such as `run.queued`, `run.running`, and `run.completed`. Workflow-backed runs keep that same outer lifecycle and append ordered workflow events like `workflow.started`, `workflow.step.started`, `workflow.step.completed`, `workflow.step.needs_review`, `workflow.needs_review`, and `workflow.completed`, with a top-level `run_manifest.json` pointing at workflow summary and step manifests. PR5 adds `/console` and `/console/state` on top of the same data, giving operators a simple run queue, timeline, structured artifact evidence panel, review panel, and rerun action panel without introducing a second runtime contract or a frontend build system. PR6 adds a bounded background execution mode: `POST /runs` can return `202 accepted` with a `run.accepted` event, then the existing operator flow appends `run.queued`, `run.running`, and the final lifecycle event for polling through `/runs/{run_id}/events`. PR7 keeps the same lightweight shell but makes it operational: the console can create governed runs through `POST /runs`, poll background lifecycle events through `GET /runs/{run_id}/events`, and trigger the existing rerun contract through `POST /runs/{run_id}/rerun`. PR12 extends that shell with a review inbox and review decision form backed by `GET /reviews`, `GET /runs/{run_id}/review`, and `POST /reviews/{review_id}/decision`.
-
-The console intentionally remains text-contract first. PR9 moves the create-run payload to a tool-backed shape: `case_id`, `tool_id`, `inputs`, and `background`, while preserving the legacy top-level `method` alias for compatibility. PR11 adds builtin workflow templates discoverable through `GET /workflows`, and `POST /runs` can now also accept `workflow_id` while preserving the legacy single-tool path unchanged. For the built-in deterministic path the normalized payload is `tool_id="chainladder"` with `inputs.method_variant="chainladder"`, and each run now writes `validated_input.json` alongside `run_manifest.json`. The PR5 artifact evidence panel remains a thin view over those artifacts: `/console/state` keeps the legacy manifest-derived keys and adds structured evidence fields such as `primary_artifact_refs`, `review_artifact_refs`, `decision_artifact_refs`, `evidence_items`, `missing_expected_artifacts`, and `freshness`. The added evidence refs use safe relative names where possible instead of introducing new absolute path leaks.
 
 ---
 
 ## Artifact Model
 
-A governed run writes local JSON artifacts under the chosen artifact directory.
+A governed run writes local evidence under the chosen artifact directory. Common files include:
 
-### Standard artifacts
+```text
+case_input.json
+validated_input.json
+deterministic_result.json
+narrative_draft.json
+constitution_check.json
+review_packet.json              # when review is generated
+review_packet.md                # when review is generated
+review_decision.json            # when a review decision is submitted
+review_decision.md              # when a review decision is submitted
+operator_handoff.md             # when report export runs
+reserve_summary.json            # when report export runs
+reserve_summary.md              # when report export runs
+run_manifest.json
+```
 
-- `case_input.json`
-- `validated_input.json`
-- `deterministic_result.json`
-- `narrative_draft.json`
-- `constitution_check.json`
-- `run_manifest.json`
+Read `run_manifest.json` first. It is the run-level index. Registry files are operational indexes; artifacts are the audit evidence.
 
-### Review artifacts
+---
 
-When governance escalates the case, the run also writes:
+## Development and Verification
 
-- `review_packet.json`
-- `review_packet.md`
+Run the full suite:
 
-### How to inspect artifacts
+```bash
+python -m pytest tests -q
+```
 
-1. Read `run_manifest.json` first — it is the run-level index of produced files.
-2. Read `deterministic_result.json` for reserve outputs.
-3. Read `constitution_check.json` for governance status.
-4. Read `review_packet.md` for the human-readable review handoff.
+Smoke API route availability:
+
+```bash
+python - <<'PY'
+from fastapi.testclient import TestClient
+from reserving_workflow.api.app import create_app
+client = TestClient(create_app())
+assert client.get('/health').json()['ok'] is True
+paths = client.get('/openapi.json').json()['paths']
+required = [
+    '/console', '/console/state', '/tools', '/tools/{tool_id}',
+    '/workflows', '/workflows/{workflow_id}', '/runs', '/runs/{run_id}',
+    '/runs/{run_id}/events', '/runs/{run_id}/rerun',
+    '/runs/{run_id}/artifacts', '/runs/{run_id}/review-packet',
+    '/runs/{run_id}/review', '/runs/{run_id}/report-export',
+    '/reviews', '/reviews/{review_id}', '/reviews/{review_id}/decision',
+    '/replay', '/repeatability', '/benchmarks/batch',
+]
+missing = [p for p in required if p not in paths]
+assert not missing, missing
+print('api_smoke_ok', len(paths))
+PY
+```
+
+For console changes, also start uvicorn and click through `/console` in a browser. TestClient alone is not enough for UI/JavaScript regressions.
 
 ---
 
 ## Human Responsibilities vs Agent Responsibilities
 
-### Human responsibilities
+Human actuary:
 
-- prepare Python environment and secrets
-- choose case IDs, artifact directories, and review thresholds
-- launch CLI entry points
-- inspect artifacts and make release/review decisions
-- decide what changes should become commits and PRs
+- chooses case, objective, and acceptable operating assumptions
+- reviews deterministic outputs and governance packets
+- submits approval / rejection / changes-requested decisions
+- signs off on business use of results
 
-### Agent responsibilities
+Agent / system:
 
-- plan and route governed execution through the OpenAI layer
-- run deterministic calculation and governance checks through worker paths
-- write artifacts and manifests
-- generate review flow outputs when escalation is required
-- produce replay, repeatability, and batch comparison outputs from artifact contracts
-
-### Shared boundary
-
-- humans own operational intent and approval
-- agents own execution and artifact production
-- CAS Core remains the numeric source of truth regardless of which agent runtime is active
+- converts requests into bounded tool or workflow plans
+- calls public API/CLI surfaces instead of modifying internal files directly
+- runs deterministic tools and governance checks
+- writes artifacts and manifests
+- summarizes evidence without fabricating missing facts
 
 ---
 
-## Environment Setup
+## Next Recommended Work
 
-```bash
-cd /tmp/ai_actuary
-pip install -e .
-set -a && . ./.env && set +a
-```
+1. Define artifact retention and persistence beyond local files.
+2. Add the next actuarial tool behind the same `ToolRegistry` and artifact-contract pattern.
+3. Expand deterministic benchmark coverage and CI-grade replay/repeatability/report-export checks.
+4. Add outbound delivery adapters for review packets and handoff reports.
+5. Plan production queue/storage/auth/observability as separate, narrow PRs.
 
-Minimum runtime requirements:
-
-- Python environment with project dependencies installed
-- `OPENAI_API_KEY` for governed planner runs
-- repository checkout or editable install, because operator entrypoints load modules from `workflows/`
-- FastAPI runtime dependencies installed with `pip install -e '.[api]'` for the local control plane
-
----
-
-## Current Scope Status
-
-### Completed
-
-- Prompt 1-7: governed single-case workflow, review escalation path, and operator CLI
-- Prompt 8: batch benchmark runner with baseline vs governed comparison
-- Prompt 9: replay and repeatability helpers plus CLI wrappers
-- Prompt 10: developer handoff documentation closeout
-- PR1-PR3: stable operator contract, artifact/review delivery boundary, and local run registry/rerun tooling
-- PR4: FastAPI control plane skeleton aligned to the OpenAI Agents runtime contract and Symphony-style run/event views
-- PR5: lightweight Symphony-style operator console shell over the run/event/artifact/review payloads
-- PR6: bounded background execution mode and `/runs/{run_id}/events` lifecycle polling
-- PR7: actionable lightweight console for creating governed runs, polling background events, and rerunning recorded cases through the existing API contracts
-- PR8: foundation control-plane contracts and the first registered actuarial tool catalog (`chainladder`)
-- PR9: tool-backed run dispatch inputs, `tool_id` plus `inputs`, legacy `method` compatibility, and `validated_input.json`
-- PR10: local `RunStore`, `ArtifactStore`, and `ReviewStore` boundaries over the current JSON/filesystem implementation
-- PR11: builtin workflow template catalog and bounded sequential workflow execution
-- PR12: independent review contract, review decision artifacts, and console review inbox/decision form
-- PR13: prototype per-actuary workspace and ownership metadata (`operator_id`, `workspace_id`, `created_by`)
-- PR14: bounded OpenAI planner and Hermes worker adapter seam over public control-plane APIs
-- PR15: evidence-only operator handoff report export through CLI, API, and console action panel
-
-### Current Usable Product Slice
-
-The repository is now a local **Agentic Actuarial Workbench** prototype. A local operator can use CLI, FastAPI, or the lightweight console to create governed runs, inspect lifecycle events, review artifacts, submit independent review decisions, rerun recorded cases, and export handoff reports from recorded evidence.
-
-### Not Yet Implemented
-
-- persistent artifact store beyond local filesystem, including retention and archival policy
-- production queue worker, streaming event bus, and service-backed Hermes runtime orchestration
-- outbound messaging/delivery adapters for review packets and operator handoff reports
-- authentication, SSO/RBAC, enterprise multitenancy, and production workspace governance
-- richer actuarial method catalog beyond the current `chainladder` path
-- expanded benchmark datasets and CI-grade scheduled replay/repeatability regression workflows
-- production-grade web console frontend and formal sign-off workflow automation
-
-### Next Recommended Steps
-
-1. harden artifact persistence and retention while preserving `run_manifest.json` compatibility
-2. expand the actuarial tool catalog and benchmark case coverage
-3. add outbound review/report delivery adapters without moving delivery into planner/core logic
-4. promote replay/repeatability and report export into scheduled regression and release checks
-
----
-
-## Validation Status
-
-The repository has been validated through:
-
-- unit and integration tests in `tests/`
-- real OpenAI governed case smoke runs
-- review-triggered governed run checks
-- batch benchmark smoke runs
-- replay and repeatability regression tests
-- Hermes CLI acting as an operator against the repo
-
-For the latest business-facing workflow memo, see:
-
-- `docs/reports/current-workflow-report.md`
-
----
-
-## Read This First If You Are Taking Over
-
-1. `README.md`
-2. `docs/architecture.md`
-3. `docs/project-plan.md`
-4. `docs/plans/openai-hermes-composition-design.md`
-5. `docs/reports/current-workflow-report.md`
-
-That reading order gives a new developer or future worker enough context to continue without rediscovering the current boundaries.
+Do not add a dedicated HTTP calculator adapter or MCP adapter until there is a concrete caller and deployment need.

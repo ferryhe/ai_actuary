@@ -1,6 +1,6 @@
 # Actuarial Tool Manifest v1
 
-This document defines the **PR1 contract-only** tool surface for actuarial reserving decomposition.
+This document defines the current **v1 CLI/file-artifact tool surface** for actuarial reserving decomposition.
 
 ## Scope and intent
 
@@ -20,8 +20,9 @@ This document defines the **PR1 contract-only** tool surface for actuarial reser
 
 ## Implementation status
 
-- PR1 documented the **contract surface** for these entrypoints.
-- PR2 adds runnable Python module entrypoints under `reserving_workflow.tools_cli` for all seven tools in this manifest.
+- The contract surface is documented and exported under `schemas/actuarial-reserving/v1/`.
+- Runnable Python module entrypoints now live under `reserving_workflow.tools_cli` for all seven tools in this manifest.
+- Cross-repo compatibility is pinned by `tests/fixtures/tool_contracts/actuarial_reserving_v1_compat_manifest.json`.
 - `python scripts/export_run_report.py` remains available as a compatibility wrapper for the legacy report-export CLI.
 
 ## Review contract boundary in v1
@@ -254,7 +255,7 @@ inputs:
     schemaRef: schemas/actuarial-reserving/v1/RunArtifactManifest.schema.json
     required: true
     provenance: derived_from_registry_entry.artifact_root
-    description: `report-export` loads `run_manifest.json` from the resolved run artifact root; callers do not pass the manifest as a direct CLI argument in PR1.
+    description: `report-export` loads `run_manifest.json` from the resolved run artifact root; callers do not pass the manifest as a direct CLI argument in v1.
   resolved_review_record:
     schemaRef: schemas/actuarial-reserving/v1/Review.schema.json
     required: false
@@ -271,7 +272,7 @@ errors:
   format: tool_error.v1
 ```
 
-## Source-of-truth schemas exported in PR1
+## Source-of-truth schemas
 
 PR1 exports versioned JSON Schema for these existing Pydantic/control-plane models:
 
@@ -288,7 +289,7 @@ PR1 exports versioned JSON Schema for these existing Pydantic/control-plane mode
 
 These schemas are exported by `scripts/export_contract_schemas.py` into `schemas/actuarial-reserving/v1/`.
 
-## Non-goals for PR1
+## Non-goals for v1
 
 - No runtime entrypoint changes
 - No CLI implementation changes beyond schema export

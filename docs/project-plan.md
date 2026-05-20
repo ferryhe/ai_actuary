@@ -34,6 +34,8 @@ It is no longer only a CLI proof of concept. It now has:
 - prototype per-actuary workspace ownership metadata
 - OpenAI planner / Hermes worker adapter seam over public APIs
 - evidence-only report export and operator handoff artifacts
+- seven CLI/file-artifact tool entrypoints for the `actuarial-reserving.v1` pipeline
+- exported schema and fixture compatibility package consumed by downstream orchestration layers
 
 It is still intentionally local-first and prototype-grade. It does **not** yet claim to be a production queue, storage service, auth system, enterprise console, or full actuarial platform.
 
@@ -177,6 +179,14 @@ It is still intentionally local-first and prototype-grade. It does **not** yet c
 - console action panel can trigger handoff export
 - export writes `operator_handoff.md`, `reserve_summary.json`, and `reserve_summary.md`
 - report output is evidence-only and never fabricates missing reserve values
+
+### Tool-decomposition rollout: CLI/file-artifact contract surface
+
+- `actuarial-reserving.v1` schemas are exported under `schemas/actuarial-reserving/v1/`
+- seven module CLIs exist under `reserving_workflow.tools_cli`
+- the local artifact runner can execute the canonical pipeline through files
+- the compatibility manifest pins schemas, golden fixtures, artifact IDs, and pipeline order for downstream consumers
+- optional HTTP calculator and MCP adapters are intentionally skipped until there is a concrete persistent-service or multi-agent-discovery caller
 
 ---
 
@@ -363,6 +373,6 @@ They must not write deterministic results, review decisions, artifact files, or 
 python -m pytest tests -q
 ```
 
-Current verified local state after PR15: all tests pass.
+Current local docs-refresh validation should run the focused contract/API checks and the full pytest suite before merge.
 
 After that, choose the next change as a single-scope PR rather than reopening multiple architectural fronts at once.
