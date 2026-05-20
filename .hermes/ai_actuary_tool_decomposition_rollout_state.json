@@ -2,10 +2,10 @@
   "rollout": "ai_actuary_tool_decomposition",
   "authorized_by_user": true,
   "created_at": "2026-05-20T04:20:36.159561+00:00",
-  "plan_path": "docs/plans/2026-05-20-ai-actuary-tool-decomposition-pr-plan.md",
-  "current_pr_index": 6,
-  "current_branch": "feat/tool-contract-compat-suite",
-  "stage": "pr6_open_waiting_remote_review",
+  "plan_path": "docs/archive/plans/2026-05-20-ai-actuary-tool-decomposition-pr-plan.md",
+  "current_pr_index": 8,
+  "current_branch": "docs/refresh-project-docs",
+  "stage": "complete_optional_prs_not_worth_now",
   "prs": [
     {
       "index": 1,
@@ -79,25 +79,29 @@
       "index": 6,
       "branch": "feat/tool-contract-compat-suite",
       "title": "test: add tool contract compatibility suite",
-      "status": "open_waiting_remote_review",
+      "status": "merged",
       "number": 30,
       "url": "https://github.com/ferryhe/ai_actuary/pull/30",
-      "last_commit": "61b243d",
-      "last_push_at": "2026-05-20T13:11:47Z",
+      "last_commit": "14c4256",
+      "last_push_at": "2026-05-20T13:12:14Z",
       "review_gate": "Codex blocked because ChatGPT account does not support gpt-5.2-codex; independent delegate reviewers used. Accepted/fixed review findings around hermetic output, tool ID source of truth, narrower pipeline contract, and set comparisons; final delegate re-reviews found no blockers.",
-      "last_remote_review_action": "Accepted and fixed two Copilot inline comments: exporter now bootstraps src on sys.path when PYTHONPATH is unset and --output now rejects repo-root/directory targets cleanly; focused validation passed."
+      "last_remote_review_action": "No new actionable comments after follow-up; mergeStateStatus CLEAN and no checks configured, so PR6 was squash-merged.",
+      "merged_at": "2026-05-20T13:28:13Z",
+      "merge_commit": "67a27a3814810066338b9b3e854a17693738adec"
     },
     {
       "index": 7,
       "branch": "feat/optional-chainladder-http-adapter",
       "title": "feat: add optional chainladder HTTP adapter",
-      "status": "optional_pending_decision"
+      "status": "skipped_optional_not_worth_now",
+      "decision": "Reassessed live repo/docs/issues on 2026-05-20. Not worth starting now: existing FastAPI control plane already covers health/runs/tool discovery, ai_interface currently uses the CLI pipeline adapter, and there is no concrete lower-startup/concurrency/long-lived-service requirement."
     },
     {
       "index": 8,
       "branch": "feat/optional-mcp-tools-adapter",
       "title": "feat: add optional MCP tools adapter",
-      "status": "optional_pending_decision"
+      "status": "skipped_optional_not_worth_now",
+      "decision": "Reassessed live repo/docs/issues on 2026-05-20. Not worth starting now: no active requirement for exposing ai_actuary tools through MCP to multiple agent frameworks; implementing MCP now would add dependency/protocol/security surface without a caller."
     }
   ],
   "rules": [
@@ -110,10 +114,22 @@
     "merge and delete branch",
     "sync main then next PR"
   ],
-  "current_pr_number": 30,
-  "current_pr_url": "https://github.com/ferryhe/ai_actuary/pull/30",
-  "last_push_at": "2026-05-20T13:11:47Z",
-  "next_action": "At next 15-minute tick, inspect ai_actuary PR #30 checks, reviews, issue comments, and inline comments after the Copilot follow-up fix commit; fix only confirmed in-scope issues, otherwise squash-merge if clean and proceed to optional PR7 decision.",
-  "codex_review_gate": "Codex blocked for PR6 because ChatGPT account does not support gpt-5.2-codex in Codex CLI; independent delegate reviewers used. Initial findings were fixed (repo-contained output, implementation-sourced tool IDs, narrower pipeline contract, set comparisons) and final re-reviews reported no blockers.",
-  "updated_at": "2026-05-20T13:11:47Z"
+  "current_pr_number": null,
+  "current_pr_url": null,
+  "last_push_at": "2026-05-20T13:12:14Z",
+  "next_action": "No implementation PR needed. Revisit PR7 only if a persistent service/concurrency/health-check deployment requirement appears; revisit PR8 only if multiple agent frameworks need MCP discovery for ai_actuary tools.",
+  "codex_review_gate": "Codex CLI was blocked across implementation PRs because the ChatGPT account does not support the requested Codex models; independent delegate reviewers were used as substitute review gates.",
+  "updated_at": "2026-05-20T18:39:54Z",
+  "final_live_recheck": "No open ai_actuary or ai_interface PRs; PR #27 remains merged; gh pr checks 27 reports no checks configured; inline comments are the already-handled prior comments; no local crontab/user-systemd/system-systemd timer entry visible for this rollout to remove.",
+  "optional_prs_reassessment": {
+    "assessed_at": "2026-05-20T15:37:57Z",
+    "conclusion": "Do not continue PR7/PR8 now; both remain optional and lack a concrete current requirement.",
+    "evidence": [
+      "PR1-PR6 merged; ai_actuary and ai_interface have no open PRs or open issues requiring HTTP/MCP.",
+      "ai_actuary already has FastAPI health/preflight/tools/runs/replay/repeatability/report/review control-plane endpoints, so a single /calculate chainladder HTTP adapter would duplicate a narrower surface.",
+      "ai_interface consumes ai_actuary through the CLI pipeline adapter (ai_actuary.cli.v1); no current caller requires a long-lived ai_actuary service for lower startup overhead or concurrency.",
+      "ai_interface manifests reserve execution.kind=mcp, but no current MCP caller/request exists for ai_actuary tool discovery; adding an MCP server would introduce protocol/dependency/security surface before demand."
+    ],
+    "cron_action": "Paused Hermes cron job b32233a7eddf to avoid unnecessary rollout ticks."
+  }
 }

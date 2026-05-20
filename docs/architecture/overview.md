@@ -1,65 +1,93 @@
 # AI Actuary Architecture Overview
 
-This repository currently operates as a three-layer governed workflow prototype:
+AI Actuary is a local Agentic Actuarial Workbench prototype built around three durable layers:
 
-1. **CAS Core** — deterministic actuarial truth, constitution rules, replay helpers, and benchmark comparison logic.
-2. **OpenAI Planner** — governed routing and orchestration through the OpenAI Agents SDK.
-3. **Hermes Workers** — task execution, artifact packaging, review flow generation, batch worker behavior, and operator-facing runtime entry.
+1. **CAS Core** — deterministic actuarial truth, schemas, constitution rules, replay helpers, and benchmark comparison logic.
+2. **OpenAI Planner** — bounded planning, routing, and explanation through agent-facing contracts.
+3. **Hermes Workers** — execution loops, artifact packaging, review generation, and operator-facing runtime paths.
 
-## Current Operator Paths
+The central boundary remains unchanged: numeric reserve truth comes from deterministic tools, not from the language model.
 
-- single-case governed CLI: `scripts/run_governed_case.py`
-- batch benchmark CLI: `scripts/run_batch_benchmark.py`
-- replay CLI: `scripts/replay_case.py`
-- repeatability CLI: `scripts/compare_repeatability.py`
-- local FastAPI control plane and lightweight console: `GET /console`, `GET /tools`, `POST /runs`, `GET /runs/{run_id}/events`, and `POST /runs/{run_id}/rerun`
+## Current Operator Surfaces
 
-## Local Control Plane / Console Boundary
+- CLI single-case governed run: `scripts/run_governed_case.py`
+- CLI batch benchmark: `scripts/run_batch_benchmark.py`
+- CLI replay: `scripts/replay_case.py`
+- CLI repeatability: `scripts/compare_repeatability.py`
+- CLI report export: `scripts/export_run_report.py`
+- CLI registry operations: `scripts/list_runs.py`, `scripts/show_run.py`, `scripts/rerun_case.py`
+- Local FastAPI control plane: `GET /tools`, `GET /workflows`, `POST /runs`, `GET /runs/{run_id}/events`, review routes, replay/repeatability routes, and report export routes
+- Lightweight console: `GET /console` and `GET /console/state`
 
-The FastAPI control plane is a transport wrapper over the existing operator, registry, artifact, replay, repeatability, and batch helpers. The lightweight console follows a Symphony-style workspace shape: run queue, timeline, artifact panel, review panel, and action panel.
+## Current Product Shape
 
-PR7 makes that shell minimally operational without changing the runtime boundary:
+The repo now supports a local operator loop:
 
-- Create governed runs from the console using the same `RunCreateRequest` JSON contract as `POST /runs`.
-- Poll background lifecycle events through `GET /runs/{run_id}/events` instead of adding websocket/SSE or a production queue.
-- Trigger reruns through the existing `POST /runs/{run_id}/rerun` API instead of duplicating rerun logic in the page.
-- Keep the console text-contract first: `case_id`, `sample_name`, `method`, `background`, and optional `review_threshold_origin_count` are explicit API-facing fields.
+1. discover tools and workflows;
+2. create a governed run from CLI, API, or console;
+3. poll lifecycle events;
+4. inspect artifacts and governance outputs;
+5. materialize or review review-required runs;
+6. submit independent review decisions;
+7. rerun recorded cases without overwriting the source run;
+8. export evidence-only operator handoff reports.
 
-PR8 adds a bounded tool catalog and frozen control-plane contracts:
+This is still a local prototype. It is not a production queue, SaaS console, enterprise auth system, or durable audit warehouse.
 
-- `GET /tools` and `GET /tools/{tool_id}` expose the current builtin catalog entry for `chainladder`
-- the create-run form uses the catalog to populate its selector while still posting the existing `method` field
-- status literals, event literals, review status, artifact refs, and rerun semantics are documented under `docs/contracts/control-plane.md`
+## Control Plane / Console Boundary
 
-PR10 adds a local store boundary without changing the external behavior:
+The FastAPI control plane is a transport wrapper over existing operator, registry, artifact, replay, repeatability, batch, review, workflow, and report helpers. It should not duplicate business logic.
 
-- `RunStore` wraps the JSON registry as an operational index
-- `ArtifactStore` wraps filesystem artifacts as audit evidence
-- `ReviewStore` provides local artifact-backed review records and decisions for later review workflow work
-- the old registry/artifact helper modules remain in place as compatibility wrappers over the local adapters
+The console is a static, offline-friendly operator shell over the same API. It renders run queue, timeline, artifact evidence, review inbox/decision form, rerun, and report-export actions without introducing a frontend build system.
 
-The current actuarial calculation method remains `chainladder`. Future actuarial tools should attach to the same composable `method`/case-input contract so an agent can operate them through JSON/YAML/text instructions, not through UI-only special cases.
+## Tool and Artifact Boundary
 
-## Responsibility Split
+The current builtin actuarial tool is `chainladder`.
 
-### Human
-- prepares environment and secrets
-- launches the desired workflow CLI or local console action
-- reads artifacts and review outputs
-- decides approvals, follow-up, and code changes
+The v1 file-artifact pipeline is:
 
-### Agent
-- routes and executes workflows
-- writes artifact outputs and manifests
-- generates review flow, replay, and comparison results
-- keeps runtime behavior aligned with the contract boundary
+```text
+case_input.json
+  -> chainladder-calc -> deterministic_result.json
+  -> narrative-draft -> narrative_draft.json
+  -> constitution-check -> constitution_check.json
+  -> review-generator when review is required -> review_packet.json/md
+  -> report-export -> operator_handoff.md + reserve_summary.*
+```
 
-## Current Boundaries
+Side tools:
 
-- CAS Core still owns numeric reserve truth.
-- OpenAI planner still owns planning and orchestration only.
-- Hermes workers still own execution plus local artifact production.
-- Review flow exists today and produces `review_packet.json` and `review_packet.md`.
-- Replay and repeatability exist today and are driven by `run_manifest.json`.
+```text
+run_manifest.json -> replay-run -> replayed_result.json
+[run_manifest.json, ...] -> repeatability-check -> stability_report.json
+```
 
-For fuller detail, see `docs/architecture.md` and `docs/project-plan.md`.
+Future actuarial methods should plug into the same registry, schema, artifact, and workflow pattern rather than adding bespoke UI-only logic.
+
+## Review and Report Boundary
+
+Run execution status is separate from review decisions.
+
+- Run status: `accepted`, `queued`, `running`, `completed`, `needs_review`, `failed`
+- Review decision: `approved`, `rejected`, `changes_requested`
+
+Report export is evidence-only. It reads registry data, manifests, deterministic artifacts, review packets, and review decisions; it does not fabricate missing reserve values.
+
+## Human / Agent Split
+
+Human actuary:
+
+- defines objectives and assumptions;
+- inspects evidence;
+- decides approval, rejection, or change requests;
+- signs off on business use.
+
+Agent/system:
+
+- plans bounded tool/workflow calls;
+- calls public CLI/API surfaces;
+- executes deterministic tools and governance checks;
+- writes artifacts and manifests;
+- summarizes evidence without inventing facts.
+
+For full detail, see `docs/architecture.md`, `docs/project-plan.md`, and `docs/contracts/control-plane.md`.

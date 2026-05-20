@@ -1,6 +1,6 @@
 # Operator Handoff
 
-PR15 adds a bounded report export surface for operator handoff.
+The project includes a bounded report export surface for operator handoff.
 
 ## Scope
 

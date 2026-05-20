@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Actuary 项目介绍与使用指南</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #111a2e;
+      --panel-2: #16223a;
+      --text: #ecf2ff;
+      --muted: #a8b7d4;
+      --brand: #7dd3fc;
+      --accent: #c4b5fd;
+      --good: #86efac;
+      --warn: #fde68a;
+      --line: rgba(255,255,255,.12);
+      --code: #07111f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: radial-gradient(circle at top left, rgba(125,211,252,.22), transparent 32rem), radial-gradient(circle at top right, rgba(196,181,253,.18), transparent 28rem), var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+    }
+    a { color: var(--brand); }
+    .wrap { max-width: 1180px; margin: 0 auto; padding: 40px 24px 72px; }
+    .hero { padding: 64px 0 40px; }
+    .eyebrow { color: var(--brand); font-weight: 700; letter-spacing: .12em; text-transform: uppercase; font-size: 13px; }
+    h1 { font-size: clamp(40px, 6vw, 78px); line-height: .98; margin: 14px 0 20px; letter-spacing: -0.06em; }
+    .lead { font-size: clamp(18px, 2vw, 24px); color: var(--muted); max-width: 900px; }
+    .hero-card { margin-top: 28px; padding: 22px 24px; border: 1px solid var(--line); background: rgba(17,26,46,.76); border-radius: 22px; box-shadow: 0 20px 70px rgba(0,0,0,.28); }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin: 28px 0; }
+    .grid.two { grid-template-columns: repeat(2, 1fr); }
+    .card { padding: 22px; border: 1px solid var(--line); background: rgba(17,26,46,.72); border-radius: 20px; }
+    .card h3 { margin: 0 0 8px; font-size: 20px; }
+    .card p { margin: 0; color: var(--muted); }
+    section { margin: 44px 0; }
+    h2 { font-size: 32px; line-height: 1.15; margin: 0 0 18px; letter-spacing: -0.03em; }
+    h3 { margin-top: 24px; }
+    .tag { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 999px; background: rgba(125,211,252,.12); border: 1px solid rgba(125,211,252,.28); color: var(--brand); font-size: 13px; font-weight: 700; }
+    .flow { display: grid; gap: 12px; }
+    .step { display: grid; grid-template-columns: 190px 1fr; gap: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: rgba(22,34,58,.76); }
+    .step strong { color: var(--good); }
+    pre { overflow: auto; padding: 18px; border-radius: 16px; background: var(--code); border: 1px solid var(--line); color: #dbeafe; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: .94em; }
+    ul { padding-left: 22px; }
+    li { margin: 6px 0; }
+    .split { display: grid; grid-template-columns: 1.1fr .9fr; gap: 20px; align-items: start; }
+    .notice { border-left: 4px solid var(--warn); background: rgba(253,230,138,.08); padding: 14px 16px; border-radius: 12px; color: #fff7cc; }
+    .footer { margin-top: 56px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--line); padding-top: 24px; }
+    @media (max-width: 850px) {
+      .grid, .grid.two, .split { grid-template-columns: 1fr; }
+      .step { grid-template-columns: 1fr; }
+      .wrap { padding: 28px 16px 56px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <div class="eyebrow">Agentic Actuarial Workbench</div>
+      <h1>AI Actuary 项目介绍与使用指南</h1>
+      <p class="lead">AI Actuary 是一个本地优先的精算工作台原型：确定性精算工具负责计算，Agent 负责规划和解释，人类精算师负责判断，所有结果以 artifacts 留痕、可审计、可回放。</p>
+      <div class="hero-card">
+        <strong>一句话：</strong>Agents plan and explain; actuarial tools calculate; human actuaries decide; artifacts provide audit and replay evidence.
+      </div>
+    </section>
+
+    <section>
+      <h2>现在它能做什么</h2>
+      <div class="grid">
+        <div class="card"><h3>精算计算</h3><p>内置 Chainladder reserving，当前确定性引擎来自 <code>chainladder-python</code>。</p></div>
+        <div class="card"><h3>治理审查</h3><p>生成 constitution check、review packet，并支持独立 review decision。</p></div>
+        <div class="card"><h3>可审计制品</h3><p>每次运行写入 <code>run_manifest.json</code>、输入、计算结果、叙述草稿、治理结果和报告制品。</p></div>
+        <div class="card"><h3>控制面 API</h3><p>FastAPI 提供 runs、events、tools、workflows、reviews、artifacts、replay、repeatability、batch、report export。</p></div>
+        <div class="card"><h3>轻量 Console</h3><p><code>/console</code> 可以发起任务、轮询事件、查看 evidence panel、处理 review、rerun 和导出 handoff。</p></div>
+        <div class="card"><h3>工具化接口</h3><p>七个 CLI/file-artifact 工具组成 <code>actuarial-reserving.v1</code> 合同，可被上层 orchestrator 消费。</p></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>架构边界</h2>
+      <div class="grid">
+        <div class="card"><span class="tag">CAS Core</span><h3>真值层</h3><p>schemas、calculators、constitution、replay、benchmark、artifact contract。数值准备金事实必须来自这里。</p></div>
+        <div class="card"><span class="tag">OpenAI Planner</span><h3>规划层</h3><p>把请求转成 bounded plan，负责路由、解释和总结，但不拥有精算真值。</p></div>
+        <div class="card"><span class="tag">Hermes Workers</span><h3>执行层</h3><p>执行任务、打包 artifact、生成 review packet、对接 operator-facing runtime。</p></div>
+      </div>
+      <div class="notice">边界规则：Run status 只表达执行结果；review decision 是独立治理记录；report export 只从已有证据生成，不补造缺失数值。</div>
+    </section>
+
+    <section>
+      <h2>安装与启动</h2>
+      <div class="split">
+        <div>
+          <h3>安装依赖</h3>
+          <pre><code>git clone git@github.com:ferryhe/ai_actuary.git
+cd ai_actuary
+python -m venv .venv
+. .venv/bin/activate
+pip install -e '.[dev]'</code></pre>
+          <p>如果要运行 governed OpenAI planner 路径，需要在本地 shell 或 <code>.env</code> 中提供 <code>OPENAI_API_KEY</code>，不要提交任何密钥。</p>
+          <pre><code>set -a && [ -f ./.env ] && . ./.env && set +a</code></pre>
+        </div>
+        <div>
+          <h3>启动控制面和 Console</h3>
+          <pre><code>python -m uvicorn \
+  'reserving_workflow.api.app:create_app' \
+  --factory --host 127.0.0.1 --port 8000</code></pre>
+          <pre><code>curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/health/preflight</code></pre>
+          <p>浏览器打开：<code>http://127.0.0.1:8000/console</code></p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>最常用操作</h2>
+      <div class="flow">
+        <div class="step"><strong>1. 跑一个 governed case</strong><div><pre><code>python scripts/run_governed_case.py \
+  --case-id demo-case \
+  --artifact-dir ./tmp/demo-case \
+  --registry-path ./tmp/run-registry.json</code></pre></div></div>
+        <div class="step"><strong>2. 触发 review</strong><div><pre><code>python scripts/run_governed_case.py \
+  --case-id review-case \
+  --artifact-dir ./tmp/review-case \
+  --registry-path ./tmp/run-registry.json \
+  --review-threshold-origin-count 5</code></pre></div></div>
+        <div class="step"><strong>3. 查看和 rerun</strong><div><pre><code>python scripts/list_runs.py --registry-path ./tmp/run-registry.json
+python scripts/show_run.py --registry-path ./tmp/run-registry.json --run-id &lt;run_id&gt;
+python scripts/rerun_case.py --registry-path ./tmp/run-registry.json --run-id &lt;run_id&gt; --artifact-dir ./tmp/rerun-case</code></pre></div></div>
+        <div class="step"><strong>4. 导出 handoff</strong><div><pre><code>python scripts/export_run_report.py \
+  --registry-path ./tmp/run-registry.json \
+  --run-id &lt;run_id&gt; \
+  --review-store-dir ./tmp/reviews</code></pre><p>输出：<code>operator_handoff.md</code>、<code>reserve_summary.json</code>、<code>reserve_summary.md</code>。</p></div></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>API 用法</h2>
+      <h3>创建同步 run</h3>
+      <pre><code>curl -X POST http://127.0.0.1:8000/runs \
+  -H 'content-type: application/json' \
+  -d '{
+    "case_id": "demo-case",
+    "tool_id": "chainladder",
+    "inputs": {
+      "sample_name": "RAA",
+      "method_variant": "chainladder"
+    }
+  }'</code></pre>
+      <h3>创建后台 run 并轮询</h3>
+      <pre><code>curl -X POST http://127.0.0.1:8000/runs \
+  -H 'content-type: application/json' \
+  -d '{
+    "case_id": "demo-bg",
+    "tool_id": "chainladder",
+    "inputs": {"sample_name": "RAA", "method_variant": "chainladder"},
+    "background": true
+  }'
+
+curl http://127.0.0.1:8000/runs/&lt;run_id&gt;/events</code></pre>
+      <h3>关键路由</h3>
+      <pre><code>GET  /tools
+GET  /workflows
+POST /runs
+GET  /runs/{run_id}/events
+POST /runs/{run_id}/rerun
+GET  /runs/{run_id}/artifacts
+GET  /runs/{run_id}/review
+POST /runs/{run_id}/report-export
+GET  /reviews
+POST /reviews/{review_id}/decision
+POST /replay
+POST /repeatability
+POST /benchmarks/batch</code></pre>
+    </section>
+
+    <section>
+      <h2>Artifact 合同</h2>
+      <p>所有重要事实都落到文件，不靠会话记忆保存。</p>
+      <pre><code>case_input.json
+validated_input.json
+deterministic_result.json
+narrative_draft.json
+constitution_check.json
+review_packet.json / review_packet.md
+review_decision.json / review_decision.md
+operator_handoff.md
+reserve_summary.json / reserve_summary.md
+run_manifest.json</code></pre>
+      <p>使用时先读 <code>run_manifest.json</code>。Registry 是操作索引，artifacts 才是审计证据。</p>
+    </section>
+
+    <section>
+      <h2>开发验证</h2>
+      <pre><code>python -m pytest tests -q</code></pre>
+      <pre><code>python - <<'PY'
+from fastapi.testclient import TestClient
+from reserving_workflow.api.app import create_app
+client = TestClient(create_app())
+assert client.get('/health').json()['ok'] is True
+paths = client.get('/openapi.json').json()['paths']
+assert '/console' in paths and '/runs' in paths and '/reviews' in paths
+print('api_smoke_ok', len(paths))
+PY</code></pre>
+      <p>涉及 console 的改动还需要本地启动 uvicorn，并用浏览器实点关键交互。</p>
+    </section>
+
+    <section>
+      <h2>下一步建议</h2>
+      <ul>
+        <li>定义 artifact retention / persistence，不破坏现有 <code>run_manifest.json</code> 兼容性。</li>
+        <li>在同一 ToolRegistry / artifact contract 下添加下一个精算工具。</li>
+        <li>扩充 benchmark case pack，并把 replay / repeatability / report export 纳入 CI 或定期检查。</li>
+        <li>增加 review packet / handoff report 的 outbound delivery adapter。</li>
+        <li>生产化 queue、storage、auth、observability 拆成独立 PR，不和工具扩展混做。</li>
+      </ul>
+    </section>
+
+    <div class="footer">
+      Current source docs: README.md, docs/architecture.md, docs/contracts/control-plane.md, docs/project-plan.md, docs/operator_handoff.md. Historical planning material is under docs/archive/.
+    </div>
+  </main>
+</body>
+</html>

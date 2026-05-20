@@ -1,6 +1,6 @@
 # Actuarial Artifact Layout v1
 
-This document defines the **artifact-oriented layout** for the PR1 tool-contract surface.
+This document defines the **artifact-oriented layout** for the current v1 tool-contract surface.
 
 ## Principles
 
@@ -158,9 +158,9 @@ Outputs:
 - `reserve_summary.json`
 - `reserve_summary.md`
 
-## Golden fixture intent in PR1
+## Golden fixture intent
 
-PR1 includes a deterministic illustrative golden run under:
+The compatibility package includes a deterministic illustrative golden run under:
 
 `tests/fixtures/tool_contracts/golden_run/`
 
@@ -173,6 +173,6 @@ It is intended to:
 
 ## Non-goals
 
-- No requirement that every current runtime path already writes every v1 artifact
+- No requirement that every runtime path writes every optional v1 artifact on every run
 - No HTTP payload contract beyond exported JSON Schemas already defined in Python
 - No storage backend abstraction changes
