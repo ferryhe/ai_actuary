@@ -1,0 +1,42 @@
+pipelineId: actuarial-reserving-review
+version: actuarial-reserving.v1
+artifactRoot: tmp/pipeline-runs/{{run_id}}
+steps:
+  - id: calc
+    toolId: chainladder-calc
+    inputs:
+      case_input: case_input.json
+    outputs:
+      deterministic_result: deterministic_result.json
+  - id: narrative
+    toolId: narrative-draft
+    inputs:
+      case_input: case_input.json
+      deterministic_result: deterministic_result.json
+    outputs:
+      narrative_draft: narrative_draft.json
+  - id: governance
+    toolId: constitution-check
+    inputs:
+      case_input: case_input.json
+      deterministic_result: deterministic_result.json
+      narrative_draft: narrative_draft.json
+    outputs:
+      constitution_check: constitution_check.json
+  - id: review
+    toolId: review-generator
+    when: steps.governance.outputs.status == 'review_required'
+    inputs:
+      constitution_check: constitution_check.json
+      deterministic_result: deterministic_result.json
+      narrative_draft: narrative_draft.json
+    outputs:
+      review_packet: review_packet.json
+      review_packet_markdown: review_packet.md
+  - id: export
+    toolId: report-export
+    inputs: {}
+    outputs:
+      operator_handoff: operator_handoff.md
+      reserve_summary_json: reserve_summary.json
+      reserve_summary_markdown: reserve_summary.md
