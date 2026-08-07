@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import reserving_workflow.review.benchmark_import as benchmark_import
 from reserving_workflow.review.benchmark_import import (
     BenchmarkImportError,
     import_benchmark_review,
@@ -218,3 +219,90 @@ def test_import_rejects_tampered_materialized_source(tmp_path: Path):
 
     with pytest.raises(BenchmarkImportError, match="does not match extracted submission"):
         _import(tmp_path, manifest_path)
+
+
+def test_import_snapshots_the_bytes_that_were_verified(tmp_path: Path, monkeypatch):
+    manifest_path = _benchmark_fixture(tmp_path)
+    policy_path = tmp_path / "benchmark" / "configs" / "sandbox" / "fixture.json"
+    expected_policy_sha256 = json.loads(manifest_path.read_text(encoding="utf-8"))["policy"][
+        "sha256"
+    ]
+    original_write_snapshot = benchmark_import._write_snapshot
+
+    def mutate_source_then_write(*args, **kwargs):
+        policy_path.write_text('{"policy_id":"mutated-after-verification"}\n', encoding="utf-8")
+        return original_write_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(benchmark_import, "_write_snapshot", mutate_source_then_write)
+
+    result = _import(tmp_path, manifest_path)
+
+    snapshot_policy = Path(result["artifact_root"]) / "source" / "sandbox_policy.json"
+    assert _sha256(snapshot_policy.read_bytes()) == expected_policy_sha256
+    assert _sha256(policy_path.read_bytes()) != expected_policy_sha256
+
+
+def test_import_retry_repairs_a_missing_review_record(tmp_path: Path, monkeypatch):
+    manifest_path = _benchmark_fixture(tmp_path)
+    original_create_review = benchmark_import.LocalReviewStore.create_review
+    attempts = 0
+
+    def fail_once(self, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("injected review-store failure")
+        return original_create_review(self, **kwargs)
+
+    monkeypatch.setattr(benchmark_import.LocalReviewStore, "create_review", fail_once)
+
+    with pytest.raises(OSError, match="injected review-store failure"):
+        _import(tmp_path, manifest_path)
+
+    result = _import(tmp_path, manifest_path)
+
+    assert result["status"] == "already_imported"
+    review = LocalReviewStore(tmp_path / "ai" / "reviews").get_review(result["review_id"])
+    assert review["status"] == "review_required"
+
+
+def test_import_retry_recovers_an_orphaned_snapshot(tmp_path: Path, monkeypatch):
+    manifest_path = _benchmark_fixture(tmp_path)
+    original_create_run = benchmark_import.LocalRunStore.create_run
+    attempts = 0
+
+    def fail_once(self, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("injected registry failure")
+        return original_create_run(self, **kwargs)
+
+    monkeypatch.setattr(benchmark_import.LocalRunStore, "create_run", fail_once)
+
+    with pytest.raises(OSError, match="injected registry failure"):
+        _import(tmp_path, manifest_path)
+
+    result = _import(tmp_path, manifest_path)
+
+    assert result["status"] == "imported"
+    assert LocalRunStore(tmp_path / "ai" / "run-registry.json").get_run(result["run_id"])
+    assert LocalReviewStore(tmp_path / "ai" / "reviews").get_review(result["review_id"])
+
+
+def test_imported_review_text_uses_verified_provider_metadata(tmp_path: Path):
+    manifest_path = _benchmark_fixture(tmp_path)
+
+    result = _import(tmp_path, manifest_path)
+
+    run = LocalRunStore(tmp_path / "ai" / "run-registry.json").get_run(result["run_id"])
+    packet = json.loads(
+        (Path(result["artifact_root"]) / "review_packet.json").read_text(encoding="utf-8")
+    )
+    narrative = json.loads(
+        (Path(result["artifact_root"]) / "narrative_draft.json").read_text(encoding="utf-8")
+    )
+    assert "FixtureModel" in run["summary"]
+    assert "FixtureModel" in packet["case_summary"]
+    assert "MiniMax-M3" not in run["summary"] + packet["case_summary"]
+    assert all("two generated Python files" not in point for point in narrative["key_points"])

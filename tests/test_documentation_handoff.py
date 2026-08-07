@@ -32,7 +32,7 @@ def test_readme_covers_operator_entrypoints_review_flow_and_role_split() -> None
     readme = _read(README_PATH)
 
     for expected in [
-        "CAS Core",
+        "Calculation Core",
         "OpenAI Planner",
         "Hermes Workers",
         "scripts/run_governed_case.py",

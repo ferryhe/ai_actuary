@@ -103,11 +103,32 @@ def import_benchmark_review(
             raise BenchmarkImportError(
                 f"run id {run_id!r} already exists for different benchmark evidence"
             )
+        existing_artifact_root = existing_run.get("artifact_root")
+        if not isinstance(existing_artifact_root, str) or not existing_artifact_root:
+            raise BenchmarkImportError(f"run id {run_id!r} has no artifact root")
+        existing_destination = Path(existing_artifact_root).expanduser().resolve()
+        artifact_paths = _verify_import_snapshot(
+            existing_destination,
+            expected_case_id=str(existing_run.get("case_id")),
+            expected_run_id=run_id,
+            expected_manifest_sha256=manifest_sha256,
+        )
+        review_record = _ensure_import_review(
+            reviews,
+            destination=existing_destination,
+            artifact_paths=artifact_paths,
+            run_id=run_id,
+            case_id=str(existing_run.get("case_id")),
+            operator_id=str(existing_run.get("operator_id") or operator_id),
+            workspace_id=str(existing_run.get("workspace_id") or workspace_id),
+        )
         return {
             "status": "already_imported",
             "case_id": existing_run.get("case_id"),
             "run_id": run_id,
-            "review_id": build_review_id(run_id),
+            "review_id": review_record["review_id"],
+            "review_status": review_record["status"],
+            "run_status": existing_run.get("status"),
             "artifact_root": existing_run.get("artifact_root"),
             "machine_disposition": manifest["machine_disposition"],
             "promotion_eligible": False,
@@ -117,34 +138,39 @@ def import_benchmark_review(
     destination = (root / resolved_case_id / run_id).resolve()
     _require_within(destination, root, label="import destination")
     if destination.exists():
-        raise BenchmarkImportError(
-            f"import destination already exists without a matching registry run: {destination}"
+        artifact_paths = _verify_import_snapshot(
+            destination,
+            expected_case_id=resolved_case_id,
+            expected_run_id=run_id,
+            expected_manifest_sha256=manifest_sha256,
         )
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        destination.parent.mkdir(parents=True, exist_ok=True)
 
-    staging = Path(tempfile.mkdtemp(prefix=f".{run_id}-", dir=destination.parent))
-    try:
-        artifact_paths = _write_snapshot(
-            staging,
-            final_destination=destination,
-            case_id=resolved_case_id,
-            run_id=run_id,
-            manifest=manifest,
-            manifest_bytes=manifest_bytes,
-            manifest_sha256=manifest_sha256,
-            verified=verified,
-            repository_root=repository_root,
-            operator_id=operator_id,
-            workspace_id=workspace_id,
-        )
-        staging.rename(destination)
-    except Exception:
-        if staging.exists():
-            shutil.rmtree(staging)
-        raise
+        staging = Path(tempfile.mkdtemp(prefix=f".{run_id}-", dir=destination.parent))
+        try:
+            artifact_paths = _write_snapshot(
+                staging,
+                final_destination=destination,
+                case_id=resolved_case_id,
+                run_id=run_id,
+                manifest=manifest,
+                manifest_bytes=manifest_bytes,
+                manifest_sha256=manifest_sha256,
+                verified=verified,
+                repository_root=repository_root,
+                operator_id=operator_id,
+                workspace_id=workspace_id,
+            )
+            staging.rename(destination)
+        except Exception:
+            if staging.exists():
+                shutil.rmtree(staging)
+            raise
 
+    model_label = _source_model_label(verified["source_run_manifest"])
     summary = (
-        "MiniMax-M3 C4 component candidate passed automated sandbox gates; "
+        f"{model_label} experience-study C4 component candidate passed automated sandbox gates; "
         "human code and actuarial review are required before promotion."
     )
     operator_params = {
@@ -179,18 +205,16 @@ def import_benchmark_review(
         },
     )
 
-    review_packet = _read_json(destination / artifact_paths["review_packet"])
-    review_id = build_review_id(run_id)
-    review_record = reviews.create_review(
-        review_id=review_id,
+    review_record = _ensure_import_review(
+        reviews,
+        destination=destination,
+        artifact_paths=artifact_paths,
         run_id=run_id,
         case_id=resolved_case_id,
-        status="review_required",
-        reason_codes=list(REVIEW_REASONS),
-        assigned_to=operator_id,
+        operator_id=operator_id,
         workspace_id=workspace_id,
-        packet=review_packet,
     )
+    review_id = str(review_record["review_id"])
     return {
         "status": "imported",
         "case_id": resolved_case_id,
@@ -202,6 +226,84 @@ def import_benchmark_review(
         "machine_disposition": manifest["machine_disposition"],
         "promotion_eligible": False,
     }
+
+
+def _verify_import_snapshot(
+    destination: Path,
+    *,
+    expected_case_id: str,
+    expected_run_id: str,
+    expected_manifest_sha256: str,
+) -> dict[str, str]:
+    if not destination.is_dir():
+        raise BenchmarkImportError(f"import destination is not a directory: {destination}")
+    run_manifest_path = destination / "run_manifest.json"
+    if not run_manifest_path.is_file() or run_manifest_path.is_symlink():
+        raise BenchmarkImportError(f"import destination has no regular run manifest: {destination}")
+    run_manifest = _read_json(run_manifest_path)
+    _require_equal(run_manifest.get("case_id"), expected_case_id, "snapshot case_id")
+    _require_equal(run_manifest.get("run_id"), expected_run_id, "snapshot run_id")
+    _require_equal(
+        run_manifest.get("benchmark_evaluation_manifest_sha256"),
+        expected_manifest_sha256,
+        "snapshot benchmark manifest sha256",
+    )
+    artifact_paths = run_manifest.get("artifact_paths")
+    if not isinstance(artifact_paths, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in artifact_paths.items()
+    ):
+        raise BenchmarkImportError("snapshot artifact_paths must map strings to strings")
+    source_manifest_path = _safe_repo_path(
+        destination,
+        artifact_paths.get("sandbox_evaluation_manifest"),
+        label="snapshot sandbox evaluation manifest",
+    )
+    _assert_no_symlinks(destination, source_manifest_path)
+    if not source_manifest_path.is_file():
+        raise BenchmarkImportError("snapshot sandbox evaluation manifest is missing")
+    if _sha256(source_manifest_path.read_bytes()) != expected_manifest_sha256:
+        raise BenchmarkImportError("snapshot sandbox evaluation manifest sha256 does not match")
+    review_packet_path = _safe_repo_path(
+        destination,
+        artifact_paths.get("review_packet"),
+        label="snapshot review packet",
+    )
+    _assert_no_symlinks(destination, review_packet_path)
+    if not review_packet_path.is_file():
+        raise BenchmarkImportError("snapshot review packet is missing")
+    return dict(artifact_paths)
+
+
+def _ensure_import_review(
+    reviews: LocalReviewStore,
+    *,
+    destination: Path,
+    artifact_paths: dict[str, str],
+    run_id: str,
+    case_id: str,
+    operator_id: str,
+    workspace_id: str,
+) -> dict[str, Any]:
+    existing_review = reviews.get_review_for_run(run_id)
+    if existing_review is not None:
+        return existing_review
+    review_packet_path = _safe_repo_path(
+        destination,
+        artifact_paths.get("review_packet"),
+        label="snapshot review packet",
+    )
+    review_packet = _read_json(review_packet_path)
+    return reviews.create_review(
+        review_id=build_review_id(run_id),
+        run_id=run_id,
+        case_id=case_id,
+        status="review_required",
+        reason_codes=list(review_packet.get("review_reasons") or REVIEW_REASONS),
+        assigned_to=str(review_packet.get("assigned_to") or operator_id),
+        workspace_id=str(review_packet.get("workspace_id") or workspace_id),
+        packet=review_packet,
+    )
 
 
 def _verify_evaluation_manifest(
@@ -252,54 +354,55 @@ def _verify_evaluation_manifest(
             )
 
     source = _require_object(manifest, "source")
-    source_run_path = _verified_repo_file(
+    source_run_bytes = _verified_repo_file(
         repository_root,
         source.get("run_manifest_path"),
         expected_sha256=source.get("run_manifest_sha256"),
         label="source run manifest",
     )
-    extracted_submission_path = _verified_repo_file(
+    extracted_submission_bytes = _verified_repo_file(
         repository_root,
         source.get("extracted_submission_path"),
         expected_sha256=source.get("extracted_submission_sha256"),
         expected_bytes=source.get("extracted_submission_bytes"),
         label="extracted submission",
     )
-    source_run_manifest = _read_json(source_run_path)
+    source_run_manifest = _load_json_object(source_run_bytes, label="source run manifest")
     _require_equal(
         source_run_manifest.get("run_id"), source.get("run_id"), "source run id linkage"
     )
-    _require_equal(
-        (source_run_manifest.get("prompt") or {}).get("pack_id"),
-        source.get("pack_id"),
-        "source pack linkage",
-    )
+    source_prompt = _require_object(source_run_manifest, "prompt", prefix="source run manifest")
+    _require_equal(source_prompt.get("pack_id"), source.get("pack_id"), "source pack linkage")
+    _require_object(source_run_manifest, "provider", prefix="source run manifest")
     _require_equal(
         (source_run_manifest.get("extracted_output") or {}).get("sha256"),
         source.get("extracted_submission_sha256"),
         "source extracted output linkage",
     )
 
-    policy_path = _verified_repo_file(
+    policy_bytes = _verified_repo_file(
         repository_root,
         policy.get("path"),
         expected_sha256=policy.get("sha256"),
         label="sandbox policy",
     )
-    stdout_path = _verified_repo_file(
+    stdout_bytes = _verified_repo_file(
         repository_root,
         execution.get("stdout_path"),
         expected_sha256=execution.get("stdout_sha256"),
         label="execution stdout",
     )
-    stderr_path = _verified_repo_file(
+    stderr_bytes = _verified_repo_file(
         repository_root,
         execution.get("stderr_path"),
         expected_sha256=execution.get("stderr_sha256"),
         label="execution stderr",
     )
 
-    submission = _read_json(extracted_submission_path)
+    submission = _load_json_object(extracted_submission_bytes, label="extracted submission")
+    _require_equal(submission.get("schema_version"), EXPECTED_SCHEMA_VERSION, "submission schema_version")
+    _require_equal(submission.get("task_id"), "c4", "submission task_id")
+    _require_equal(submission.get("status"), "completed", "submission status")
     materialization = _require_object(manifest, "materialization")
     _require_equal(materialization.get("status"), "completed", "materialization.status")
     materialization_root = _safe_repo_path(
@@ -315,13 +418,13 @@ def _verify_evaluation_manifest(
         expected_source_sha256=materialization.get("materialized_source_sha256"),
     )
     return {
-        "source_run_path": source_run_path,
+        "source_run_bytes": source_run_bytes,
         "source_run_manifest": source_run_manifest,
-        "extracted_submission_path": extracted_submission_path,
+        "extracted_submission_bytes": extracted_submission_bytes,
         "submission": submission,
-        "policy_path": policy_path,
-        "stdout_path": stdout_path,
-        "stderr_path": stderr_path,
+        "policy_bytes": policy_bytes,
+        "stdout_bytes": stdout_bytes,
+        "stderr_bytes": stderr_bytes,
         "materialization_root": materialization_root,
         "component_files": component_files,
     }
@@ -408,11 +511,11 @@ def _write_snapshot(
     source_dir = staging / "source"
     source_dir.mkdir(parents=True)
     (source_dir / "sandbox_evaluation_manifest.json").write_bytes(manifest_bytes)
-    shutil.copy2(verified["source_run_path"], source_dir / "source_run_manifest.json")
-    shutil.copy2(verified["extracted_submission_path"], source_dir / "extracted_submission.json")
-    shutil.copy2(verified["policy_path"], source_dir / "sandbox_policy.json")
-    shutil.copy2(verified["stdout_path"], source_dir / "execution_stdout.json")
-    shutil.copy2(verified["stderr_path"], source_dir / "execution_stderr.txt")
+    (source_dir / "source_run_manifest.json").write_bytes(verified["source_run_bytes"])
+    (source_dir / "extracted_submission.json").write_bytes(verified["extracted_submission_bytes"])
+    (source_dir / "sandbox_policy.json").write_bytes(verified["policy_bytes"])
+    (source_dir / "execution_stdout.json").write_bytes(verified["stdout_bytes"])
+    (source_dir / "execution_stderr.txt").write_bytes(verified["stderr_bytes"])
 
     component_artifacts: list[dict[str, Any]] = []
     for index, (relative_text, _source_path, content) in enumerate(verified["component_files"], start=1):
@@ -433,7 +536,8 @@ def _write_snapshot(
         )
 
     source_run = verified["source_run_manifest"]
-    provider = source_run.get("provider") or {}
+    provider = _require_object(source_run, "provider", prefix="source run manifest")
+    model_label = _source_model_label(source_run)
     validated_input = {
         "case_id": case_id,
         "run_id": run_id,
@@ -466,7 +570,7 @@ def _write_snapshot(
         "status": "draft_pending_human_review",
         "summary": "Isolated execution and all automated gates passed; the result is eligible only for human review.",
         "key_points": [
-            "The two generated Python files were imported as a non-executable review snapshot.",
+            "The generated component files were imported as a non-executable review snapshot.",
             "Machine results do not approve actuarial correctness or production readiness.",
             "The component must not be promoted or used in production before a human decision.",
         ],
@@ -486,7 +590,7 @@ def _write_snapshot(
         "status": "review_required",
         "assigned_to": operator_id,
         "workspace_id": workspace_id,
-        "case_summary": "MiniMax-M3 experience-study C4 component candidate awaiting human code and actuarial-rule review.",
+        "case_summary": f"{model_label} experience-study C4 component candidate awaiting human code and actuarial-rule review.",
         "review_reasons": list(REVIEW_REASONS),
         "automated_result": {
             "machine_disposition": "ready_for_human_review",
@@ -614,11 +718,20 @@ def _find_benchmark_repository(manifest_path: Path) -> Path:
 
 
 def _default_case_id(source_run_manifest: dict[str, Any]) -> str:
-    pack_id = str((source_run_manifest.get("prompt") or {}).get("pack_id") or "codegen")
-    provider = source_run_manifest.get("provider") or {}
-    model_alias = str(provider.get("alias") or provider.get("effective_model_id") or "model")
+    prompt = _require_object(source_run_manifest, "prompt", prefix="source run manifest")
+    provider = _require_object(source_run_manifest, "provider", prefix="source run manifest")
+    pack_id = str(prompt.get("pack_id") or "codegen")
+    model_alias = str(provider.get("alias") or _source_model_label(source_run_manifest))
     raw = f"benchmark-{pack_id}-{model_alias}".lower()
     return re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-.")
+
+
+def _source_model_label(source_run_manifest: dict[str, Any]) -> str:
+    provider = _require_object(source_run_manifest, "provider", prefix="source run manifest")
+    model = provider.get("effective_model_id") or provider.get("requested_model_id") or provider.get("alias")
+    if not isinstance(model, str) or not model.strip():
+        raise BenchmarkImportError("source run manifest provider must identify a model")
+    return model.strip()
 
 
 def _verified_repo_file(
@@ -628,7 +741,7 @@ def _verified_repo_file(
     expected_sha256: Any,
     label: str,
     expected_bytes: Any | None = None,
-) -> Path:
+) -> bytes:
     path = _safe_repo_path(repository_root, relative_path, label=label)
     _assert_no_symlinks(repository_root, path)
     if not path.is_file():
@@ -639,7 +752,7 @@ def _verified_repo_file(
     expected_hash = _validated_sha256(expected_sha256, f"{label} sha256")
     if _sha256(data) != expected_hash:
         raise BenchmarkImportError(f"{label} sha256 does not match")
-    return path
+    return data
 
 
 def _safe_repo_path(repository_root: Path, value: Any, *, label: str) -> Path:
