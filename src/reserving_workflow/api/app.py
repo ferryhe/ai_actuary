@@ -1850,13 +1850,15 @@ def _operator_console_html() -> str:
     h1, h2 { margin: 0 0 12px; }
     h2 { font-size: 16px; }
     label { display: block; margin: 10px 0; font-size: 13px; color: var(--muted); }
-    input, select { box-sizing: border-box; width: 100%; margin-top: 4px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; color: #102a43; background: white; }
+    input, select, textarea { box-sizing: border-box; width: 100%; margin-top: 4px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; color: #102a43; background: white; font: inherit; }
     input[type="checkbox"] { width: auto; margin-right: 6px; }
     button, .pill { border: 1px solid var(--border); border-radius: 999px; padding: 6px 10px; background: #f8fafc; cursor: pointer; }
     button.primary { border-color: var(--accent); background: var(--accent); color: white; }
     button:disabled { cursor: not-allowed; opacity: 0.55; }
     .run-card { display: block; width: 100%; margin: 0 0 8px; text-align: left; border-radius: 10px; }
     .run-card[selected] { border-color: var(--accent); color: var(--accent); }
+    .review-link { box-sizing: border-box; border: 1px solid var(--border); padding: 8px 10px; background: #f8fafc; color: #102a43; text-decoration: none; }
+    .review-link:hover, .review-link:focus { border-color: var(--accent); color: var(--accent); }
     .status { min-height: 18px; margin: 8px 0 16px; color: var(--muted); font-size: 13px; }
     .status.error { color: var(--danger); }
     .status.ok { color: var(--ok); }
@@ -1883,7 +1885,40 @@ def _operator_console_html() -> str:
     .artifact-gaps { margin: 12px 0 0; padding-left: 18px; }
     .artifact-gaps li { margin: 4px 0; }
     details.raw-json { margin-top: 14px; }
+    .review-section { grid-column: 1 / -1; }
+    .review-panel { display: grid; gap: 14px; }
+    .review-overview, .review-block, .review-decision-card { border: 1px solid var(--border); border-radius: 12px; background: #fbfcfe; padding: 14px; }
+    .review-overview header, .review-block header, .review-decision-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding: 0; background: transparent; color: inherit; }
+    .review-overview h3, .review-block h3, .review-decision-card h3 { margin: 0; font-size: 15px; }
+    .review-overview p, .review-block header p, .review-decision-card header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+    .review-status-chip { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 999px; padding: 3px 9px; background: white; color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .review-status-chip.passed, .review-status-chip.approved { border-color: #a6f4c5; background: #ecfdf3; color: var(--ok); }
+    .review-status-chip.pending, .review-status-chip.review-required, .review-status-chip.changes-requested { border-color: #fedf89; background: #fffaeb; color: #b54708; }
+    .review-status-chip.failed, .review-status-chip.rejected { border-color: #fda29b; background: #fef3f2; color: var(--danger); }
+    .review-meta-grid, .review-decision-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+    .review-meta-item, .adaptive-field { min-width: 0; }
+    .review-meta-item strong, .adaptive-field > strong { display: block; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; }
+    .review-meta-item span, .adaptive-field > span { display: block; margin-top: 3px; word-break: break-word; }
+    .review-block.output { border-left: 4px solid var(--accent); }
+    .review-block.suggestion { border-left: 4px solid #7f56d9; }
+    .review-block.human { border-left: 4px solid #dc6803; }
+    .adaptive-object { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
+    .adaptive-field.nested { grid-column: 1 / -1; border-top: 1px solid var(--border); padding-top: 8px; }
+    .adaptive-list { margin: 5px 0 0; padding-left: 20px; }
+    .adaptive-list li { margin: 5px 0; }
+    .review-checklist { display: grid; gap: 8px; }
+    .review-check { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start; border: 1px solid var(--border); border-radius: 9px; padding: 10px; background: white; }
+    .review-check-index { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: #fff4e5; color: #b54708; font-size: 12px; font-weight: 700; }
+    .review-check strong { display: block; font-size: 13px; }
+    .review-check p { margin: 3px 0 0; color: var(--muted); font-size: 13px; }
+    .review-reasons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .review-reason { border-radius: 999px; padding: 3px 8px; background: #fff4e5; color: #b54708; font-size: 12px; }
+    .review-decision-card { margin-top: 14px; }
+    .review-decision-card button { margin-top: 10px; }
+    .review-decision-card textarea { resize: vertical; min-height: 76px; }
+    .review-raw pre { max-height: 320px; }
     @media (max-width: 900px) { main, .workspace { grid-template-columns: 1fr; } }
+    @media (max-width: 600px) { .review-meta-grid, .review-decision-grid, .adaptive-object { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -1932,22 +1967,30 @@ def _operator_console_html() -> str:
     <div class="workspace">
       <section aria-label="Timeline"><h2>Timeline</h2><div id="timeline" class="panel-body">Loading…</div></section>
       <section aria-label="Artifact Evidence Panel"><h2>Artifact Evidence Panel</h2><div id="artifact-panel" class="panel-body">Loading…</div></section>
-      <section aria-label="Review Panel">
+      <section aria-label="Review Panel" class="review-section">
         <h2>Review Panel</h2>
-        <pre id="review-panel">Loading…</pre>
-        <form id="review-decision-form" onsubmit="submitReviewDecision(event)">
+        <div id="review-panel" class="review-panel">Loading…</div>
+        <div class="review-decision-card">
+          <header>
+            <div><h3>Human Review Decision</h3><p>Review the output and AI guidance, then record the final human decision.</p></div>
+            <span id="review-decision-status" class="review-status-chip pending">Pending review</span>
+          </header>
+          <form id="review-decision-form" onsubmit="submitReviewDecision(event)">
           <input id="review-id-input" name="review_id" type="hidden">
-          <label>decision
-            <select name="decision">
-              <option value="approved">approved</option>
-              <option value="changes_requested">changes_requested</option>
-              <option value="rejected">rejected</option>
-            </select>
-          </label>
-          <label>decided_by<input name="decided_by" placeholder="actuary-001"></label>
-          <label>comment<input name="comment" placeholder="Optional decision note"></label>
-          <button id="submit-review-decision" type="submit">Submit review decision</button>
-        </form>
+            <div class="review-decision-grid">
+              <label>Decision
+                <select name="decision">
+                  <option value="approved">Approve</option>
+                  <option value="changes_requested">Request changes</option>
+                  <option value="rejected">Reject</option>
+                </select>
+              </label>
+              <label>Reviewer<input name="decided_by" placeholder="actuary-001"></label>
+            </div>
+            <label>Review comment<textarea name="comment" placeholder="Record the rationale, requested changes, or approval scope"></textarea></label>
+            <button id="submit-review-decision" class="primary" type="submit">Submit review decision</button>
+          </form>
+        </div>
       </section>
       <section aria-label="Action Panel"><h2>Action Panel</h2><div class="status">Actions include rerun and Export handoff report through <code>/runs/{run_id}/report-export</code> when a run is selected.</div><div id="action-panel" class="panel-body">Loading…</div></section>
     </div>
@@ -2138,7 +2181,7 @@ def _operator_console_html() -> str:
         const button = document.createElement("button");
         button.className = "run-card";
         if (card.selected) button.setAttribute("selected", "selected");
-        button.textContent = `${card.case_id || "unknown case"} · ${card.status || "unknown"}`;
+        button.textContent = `${card.case_id || "unknown case"} - ${card.status || "unknown"}`;
         button.onclick = () => loadConsole(card.run_id);
         queue.appendChild(button);
       }
@@ -2154,13 +2197,280 @@ def _operator_console_html() -> str:
       }
       inbox.className = "";
       for (const review of reviews) {
-        const button = document.createElement("button");
-        button.className = "run-card";
-        if (review.selected) button.setAttribute("selected", "selected");
-        button.textContent = `${review.case_id || "unknown case"} · ${review.status || "review"}`;
-        button.onclick = () => loadConsole(review.run_id);
-        inbox.appendChild(button);
+        const link = document.createElement("a");
+        link.className = "run-card review-link";
+        link.href = reviewDetailsUrl(review);
+        if (review.selected) link.setAttribute("selected", "selected");
+        link.textContent = `${review.case_id || "unknown case"} - Open review details`;
+        inbox.appendChild(link);
       }
+    }
+
+    function reviewDetailsUrl(review) {
+      const params = new URLSearchParams();
+      const filters = getConsoleFilters();
+      if (review && review.run_id) params.set("run_id", review.run_id);
+      if (filters.operator_id || (review && review.assigned_to)) {
+        params.set("operator_id", filters.operator_id || review.assigned_to);
+      }
+      if (filters.workspace_id || (review && review.workspace_id)) {
+        params.set("workspace_id", filters.workspace_id || review.workspace_id);
+      }
+      return `/console?${params.toString()}#review-panel`;
+    }
+
+    const reviewFieldLabels = {
+      automated_result: "Automated evaluation",
+      deterministic_outputs: "Deterministic outputs",
+      component_candidate: "Component candidate",
+      machine_disposition: "Machine disposition",
+      promotion_eligible: "Promotion eligible",
+      static_scan: "Static scan",
+      strong_isolation: "Strong isolation",
+      test_gates: "Test gates",
+      reserve_summary: "Reserve summary",
+      diagnostics: "Diagnostics",
+      method: "Method",
+      summary: "Summary",
+      key_points: "Key points",
+      recommendation: "Recommendation",
+      decision_note: "Decision note",
+      model: "Model",
+      files: "Files",
+      path: "Path",
+      source_path: "Source path",
+      bytes: "Bytes",
+      status: "Status",
+    };
+
+    function reviewLabel(key) {
+      if (reviewFieldLabels[key]) return reviewFieldLabels[key];
+      return String(key || "field").replaceAll("_", " ").replace(/\\b\\w/g, (letter) => letter.toUpperCase());
+    }
+
+    function reviewScalar(value) {
+      if (value === null || value === undefined || value === "") return "Not provided";
+      if (value === true) return "Yes";
+      if (value === false) return "No";
+      return String(value);
+    }
+
+    function reviewStatusClass(value) {
+      const normalized = String(value || "pending").toLowerCase().replaceAll("_", "-");
+      if (["passed", "approved", "completed"].includes(normalized)) return "passed";
+      if (["failed", "rejected", "blocked"].includes(normalized)) return "failed";
+      if (normalized === "changes-requested") return "changes-requested";
+      return "pending";
+    }
+
+    function makeReviewStatusChip(value, label) {
+      const chip = document.createElement("span");
+      chip.className = `review-status-chip ${reviewStatusClass(value)}`;
+      chip.textContent = label || reviewScalar(value);
+      return chip;
+    }
+
+    function renderAdaptiveValue(value) {
+      if (Array.isArray(value)) {
+        if (!value.length) {
+          const empty = document.createElement("span");
+          empty.className = "empty";
+          empty.textContent = "None";
+          return empty;
+        }
+        const list = document.createElement("ul");
+        list.className = "adaptive-list";
+        for (const itemValue of value) {
+          const item = document.createElement("li");
+          item.appendChild(renderAdaptiveValue(itemValue));
+          list.appendChild(item);
+        }
+        return list;
+      }
+      if (value && typeof value === "object") {
+        const objectGrid = document.createElement("div");
+        objectGrid.className = "adaptive-object";
+        for (const [key, itemValue] of Object.entries(value)) {
+          const field = document.createElement("div");
+          const nested = itemValue && typeof itemValue === "object";
+          field.className = nested ? "adaptive-field nested" : "adaptive-field";
+          const label = document.createElement("strong");
+          label.textContent = reviewLabel(key);
+          field.append(label, renderAdaptiveValue(itemValue));
+          objectGrid.appendChild(field);
+        }
+        return objectGrid;
+      }
+      const scalar = document.createElement("span");
+      scalar.textContent = reviewScalar(value);
+      return scalar;
+    }
+
+    function makeReviewBlock(kind, title, subtitle) {
+      const block = document.createElement("article");
+      block.className = `review-block ${kind}`;
+      const header = document.createElement("header");
+      const headingGroup = document.createElement("div");
+      const heading = document.createElement("h3");
+      heading.textContent = title;
+      const description = document.createElement("p");
+      description.textContent = subtitle;
+      headingGroup.append(heading, description);
+      header.appendChild(headingGroup);
+      block.appendChild(header);
+      return block;
+    }
+
+    function appendReviewMeta(container, label, value) {
+      const item = document.createElement("div");
+      item.className = "review-meta-item";
+      const title = document.createElement("strong");
+      title.textContent = label;
+      const content = document.createElement("span");
+      content.textContent = reviewScalar(value);
+      item.append(title, content);
+      container.appendChild(item);
+    }
+
+    function renderReviewChecklist(block, checklist, reasons) {
+      if (Array.isArray(checklist) && checklist.length) {
+        const list = document.createElement("div");
+        list.className = "review-checklist";
+        checklist.forEach((check, index) => {
+          const row = document.createElement("div");
+          row.className = "review-check";
+          const number = document.createElement("span");
+          number.className = "review-check-index";
+          number.textContent = String(index + 1);
+          const content = document.createElement("div");
+          const title = document.createElement("strong");
+          const question = document.createElement("p");
+          if (check && typeof check === "object") {
+            title.textContent = check.title || check.id || `Review item ${index + 1}`;
+            question.textContent = check.question || check.description || "Human confirmation required";
+          } else {
+            title.textContent = `Review item ${index + 1}`;
+            question.textContent = reviewScalar(check);
+          }
+          content.append(title, question);
+          row.append(number, content, makeReviewStatusChip("pending", "Pending"));
+          list.appendChild(row);
+        });
+        block.appendChild(list);
+      } else {
+        const empty = document.createElement("p");
+        empty.className = "empty";
+        empty.textContent = "This review packet has no dedicated checklist. Use the review reasons and source evidence to decide.";
+        block.appendChild(empty);
+      }
+      if (Array.isArray(reasons) && reasons.length) {
+        const reasonList = document.createElement("div");
+        reasonList.className = "review-reasons";
+        for (const reason of reasons) {
+          const chip = document.createElement("span");
+          chip.className = "review-reason";
+          chip.textContent = reviewScalar(reason);
+          reasonList.appendChild(chip);
+        }
+        block.appendChild(reasonList);
+      }
+    }
+
+    function renderReviewPanel(panel) {
+      const container = document.getElementById("review-panel");
+      container.innerHTML = "";
+      const packet = panel && panel.packet && typeof panel.packet === "object" ? panel.packet : {};
+      if (!panel || panel.status === "not_available" || panel.status === "not_required") {
+        container.textContent = "The selected run does not require human review.";
+        container.className = "review-panel empty";
+      } else {
+        container.className = "review-panel";
+        const overview = document.createElement("article");
+        overview.className = "review-overview";
+        const overviewHeader = document.createElement("header");
+        const overviewText = document.createElement("div");
+        const overviewTitle = document.createElement("h3");
+        overviewTitle.textContent = "Review overview";
+        const overviewSummary = document.createElement("p");
+        overviewSummary.textContent = packet.case_summary || "This run requires human review before it can proceed.";
+        overviewText.append(overviewTitle, overviewSummary);
+        overviewHeader.append(overviewText, makeReviewStatusChip(panel.status));
+        const meta = document.createElement("div");
+        meta.className = "review-meta-grid";
+        appendReviewMeta(meta, "Case", panel.case_id || packet.case_id);
+        appendReviewMeta(meta, "Run", panel.run_id || packet.run_id);
+        appendReviewMeta(meta, "Assignee", panel.assigned_to || packet.assigned_to);
+        appendReviewMeta(meta, "Workspace", panel.workspace_id || packet.workspace_id);
+        overview.append(overviewHeader, meta);
+        container.appendChild(overview);
+
+        const outputBlock = makeReviewBlock("output", "Output", "Primary results from machine execution and deterministic calculations.");
+        let outputPayload = packet.automated_result || packet.deterministic_outputs || packet.deterministic_result;
+        if (packet.component_candidate) {
+          outputPayload = {
+            ...(packet.automated_result ? {automated_result: packet.automated_result} : {}),
+            ...(packet.deterministic_outputs ? {deterministic_outputs: packet.deterministic_outputs} : {}),
+            component_candidate: packet.component_candidate,
+          };
+        }
+        outputBlock.appendChild(renderAdaptiveValue(outputPayload || {status: panel.status}));
+        container.appendChild(outputBlock);
+
+        const suggestionBlock = makeReviewBlock("suggestion", "AI guidance", "AI-generated explanations and review focus areas; these do not replace a human decision.");
+        const explicitSuggestion = packet.ai_suggestion || packet.ai_recommendation || packet.draft_narrative || packet.narrative_draft || packet.recommendation;
+        const suggestionPayload = explicitSuggestion || {
+          summary: packet.case_summary || "This run triggered human review.",
+          recommendation: packet.decision_note || "Verify the review focus areas and evidence before deciding.",
+          key_points: Array.isArray(packet.review_checklist) ? packet.review_checklist.map((item) => item.title || item.id || item.question) : [],
+        };
+        suggestionBlock.appendChild(renderAdaptiveValue(suggestionPayload));
+        container.appendChild(suggestionBlock);
+
+        const humanBlock = makeReviewBlock("human", "Human review focus", "Verify business rules, model output, and production-fit risks item by item.");
+        const reasons = panel.reason_codes || packet.review_reasons || packet.failed_checks || [];
+        renderReviewChecklist(humanBlock, packet.review_checklist, reasons);
+        if (panel.decision) {
+          const decisionDetails = document.createElement("details");
+          const decisionSummary = document.createElement("summary");
+          decisionSummary.textContent = "Recorded review decision";
+          decisionDetails.append(decisionSummary, renderAdaptiveValue(panel.decision));
+          humanBlock.appendChild(decisionDetails);
+        }
+        container.appendChild(humanBlock);
+
+        const consumedKeys = new Set([
+          "assigned_to", "automated_result", "case_id", "case_summary", "component_candidate",
+          "decision_note", "decision_options", "deterministic_outputs", "deterministic_result",
+          "draft_narrative", "failed_checks", "narrative_draft", "recommendation", "review_checklist",
+          "review_reasons", "run_id", "status", "workspace_id", "ai_suggestion", "ai_recommendation",
+        ]);
+        const extraPacket = Object.fromEntries(Object.entries(packet).filter(([key]) => !consumedKeys.has(key)));
+        if (Object.keys(extraPacket).length) {
+          const extraDetails = document.createElement("details");
+          extraDetails.className = "review-block";
+          const extraSummary = document.createElement("summary");
+          extraSummary.textContent = "Additional structured data (auto-adapted)";
+          extraDetails.append(extraSummary, renderAdaptiveValue(extraPacket));
+          container.appendChild(extraDetails);
+        }
+
+        const rawDetails = document.createElement("details");
+        rawDetails.className = "raw-json review-raw";
+        const rawSummary = document.createElement("summary");
+        rawSummary.textContent = "View raw review JSON";
+        const rawPre = document.createElement("pre");
+        rawPre.textContent = JSON.stringify(panel, null, 2);
+        rawDetails.append(rawSummary, rawPre);
+        container.appendChild(rawDetails);
+      }
+
+      const decision = panel && panel.decision;
+      const decisionValue = decision && decision.decision;
+      const decisionStatus = document.getElementById("review-decision-status");
+      decisionStatus.className = `review-status-chip ${reviewStatusClass(decisionValue)}`;
+      decisionStatus.textContent = decisionValue ? `Decision: ${decisionValue}` : "Pending review";
+      document.getElementById("review-id-input").value = panel && panel.review_id ? panel.review_id : "";
+      document.getElementById("submit-review-decision").disabled = !(panel && panel.review_id) || Boolean(decisionValue);
     }
 
     function renderActionPanel(actionPanel) {
@@ -2310,9 +2620,7 @@ def _operator_console_html() -> str:
         renderReviewInbox(state.review_inbox || []);
         renderTimeline(state.timeline || []);
         renderArtifactPanel(state.artifact_panel);
-        document.getElementById("review-panel").textContent = JSON.stringify(state.review_panel, null, 2);
-        document.getElementById("review-id-input").value = state.review_panel && state.review_panel.review_id ? state.review_panel.review_id : "";
-        document.getElementById("submit-review-decision").disabled = !(state.review_panel && state.review_panel.review_id);
+        renderReviewPanel(state.review_panel);
         renderActionPanel(state.action_panel);
         if (!options.preservePolling && shouldPollEvents(state.timeline || [])) {
           startPolling(state.selected_run_id);
@@ -2431,7 +2739,13 @@ def _operator_console_html() -> str:
       }
     }
 
-    Promise.all([loadToolCatalog(), loadConsole()]).catch((error) => {
+    const initialConsoleParams = new URLSearchParams(window.location.search);
+    const initialRunId = initialConsoleParams.get("run_id");
+    const initialFilters = {
+      operator_id: initialConsoleParams.get("operator_id"),
+      workspace_id: initialConsoleParams.get("workspace_id"),
+    };
+    Promise.all([loadToolCatalog(), loadConsole(initialRunId, initialFilters)]).catch((error) => {
       const message = error instanceof Error ? error.message : "Failed to initialize console.";
       renderConsoleError(message);
       setOperationStatus(message, "error");

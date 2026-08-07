@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -841,6 +842,19 @@ def test_console_shell_serves_operator_console_html(tmp_path):
     assert "submitReviewDecision(" in html
     assert "loadToolCatalog()" in html
     assert "renderArtifactPanel(" in html
+    assert "renderReviewPanel(" in html
+    assert "renderAdaptiveValue(" in html
+    assert "Output" in html
+    assert "AI guidance" in html
+    assert "Human review focus" in html
+    assert "Human Review Decision" in html
+    assert "Additional structured data (auto-adapted)" in html
+    assert "View raw review JSON" in html
+    assert "reviewDetailsUrl(" in html
+    assert "Open review details" in html
+    assert "#review-panel" in html
+    assert "initialRunId" in html
+    assert re.search(r"[\u4e00-\u9fff]", html) is None
     assert "Evidence Gaps" in html
     assert "fetch(\"/tools\")" in html
     assert "fetch(`/reviews/${encodeURIComponent(reviewId)}/decision`" in html
@@ -889,6 +903,8 @@ def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path)
     assert "pollRunEvents(runId, generation, filterOptions)" in html
     assert "await loadConsole(runId, { preservePolling: true, ...filterOptions })" in html
     assert "No review selected for decision submission." in html
+    assert 'name="comment"' in html
+    assert "Record the rationale, requested changes, or approval scope" in html
     assert "Export handoff report" in html
     assert "Decision / Export Evidence" in html
     assert "Raw artifact panel JSON" in html

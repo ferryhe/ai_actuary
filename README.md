@@ -10,7 +10,7 @@ The project’s operating model is simple:
 
 ## Project Positioning
 
-- **CAS Core** owns deterministic actuarial truth, governance rules, benchmark scoring, and artifact contracts.
+- **Calculation Core** owns deterministic actuarial truth, governance rules, benchmark scoring, and artifact contracts.
 - **OpenAI Planner** owns planning, routing, and governed orchestration.
 - **Hermes Workers** own execution loops, artifact packaging, review handoff generation, and operator-facing runtime flows.
 
