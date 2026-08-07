@@ -29,6 +29,11 @@ from reserving_workflow.contracts.control_plane import (
     ValidatedToolInput,
     run_event_type_for_status,
 )
+from reserving_workflow.model_tools import (
+    MINIMAX_EXPERIENCE_STUDY_TOOL_ID,
+    ExperienceStudyToolInput,
+    run_minimax_experience_study,
+)
 from reserving_workflow.review import build_review_contract, ensure_review_record, write_run_review_decision_artifacts
 from reserving_workflow.reports import export_run_report
 from reserving_workflow.storage.local import LocalReviewStore, ReviewDecisionConflictError
@@ -45,6 +50,9 @@ from reserving_workflow.workflows import build_builtin_workflow_catalog
 
 DEFAULT_OPERATOR_ID = "local-actuary"
 DEFAULT_WORKSPACE_ID = "default-workspace"
+MODEL_COMPARISON_TOOL_RUNNERS = {
+    MINIMAX_EXPERIENCE_STUDY_TOOL_ID: run_minimax_experience_study,
+}
 
 
 class ApiSettings(BaseModel):
@@ -261,6 +269,31 @@ def create_app(
             return JSONResponse(
                 content=_run_sequential_workflow(**operator_params)
             )
+        if validated_tool_input.tool_id in MODEL_COMPARISON_TOOL_RUNNERS:
+            model_tool_params = _model_tool_params_from_request(
+                request,
+                validated_tool_input=validated_tool_input,
+                artifact_dir=artifact_dir,
+                registry_path=resolved_settings.registry_path,
+                ownership=ownership,
+            )
+            run_id = _generate_api_run_id(request.case_id)
+            model_tool_params["run_id"] = run_id
+            if request.background:
+                accepted_payload = _record_background_acceptance(
+                    request,
+                    validated_tool_input=validated_tool_input,
+                    artifact_dir=artifact_dir,
+                    review_delivery_dir=review_delivery_dir,
+                    registry_path=resolved_settings.registry_path,
+                    run_id=run_id,
+                    workflow_id=None,
+                    ownership=ownership,
+                )
+                scheduler = background_task_runner or background_tasks.add_task
+                scheduler(_run_model_tool_background, model_tool_params)
+                return JSONResponse(status_code=202, content=accepted_payload)
+            return JSONResponse(content=_run_registered_model_tool(model_tool_params))
         operator_params = _operator_params_from_request(
             request,
             validated_tool_input=validated_tool_input,
@@ -339,6 +372,29 @@ def create_app(
                 operator_params["task_contracts_module"] = task_contracts_module
             operator_params["tool_registry"] = resolved_tool_registry
             result = _run_sequential_workflow(**operator_params)
+            result["rerun"] = RerunSemantics(source_run_id=run_id).model_dump()
+            return JSONResponse(content=result)
+        model_tool_id = operator_params.get("tool_id")
+        if model_tool_id in MODEL_COMPARISON_TOOL_RUNNERS:
+            rerun_id = _generate_api_run_id(str(entry.get("case_id") or "case"))
+            result = _run_registered_model_tool(
+                {
+                    "case_id": str(entry.get("case_id") or "case"),
+                    "inputs": dict(operator_params.get("inputs") or {}),
+                    "artifact_dir": str(
+                        request.artifact_dir
+                        or _default_artifact_dir(
+                            resolved_settings, str(entry.get("case_id") or "case")
+                        )
+                    ),
+                    "registry_path": resolved_settings.registry_path,
+                    "run_id": rerun_id,
+                    "created_by": str(entry.get("created_by") or DEFAULT_OPERATOR_ID),
+                    "operator_id": str(entry.get("operator_id") or DEFAULT_OPERATOR_ID),
+                    "workspace_id": str(entry.get("workspace_id") or DEFAULT_WORKSPACE_ID),
+                    "tool_id": model_tool_id,
+                }
+            )
             result["rerun"] = RerunSemantics(source_run_id=run_id).model_dump()
             return JSONResponse(content=result)
         try:
@@ -551,6 +607,26 @@ def _operator_params_from_request(
     return params
 
 
+def _model_tool_params_from_request(
+    request: RunCreateRequest,
+    *,
+    validated_tool_input: ValidatedToolInput,
+    artifact_dir: str | Path,
+    registry_path: str | Path,
+    ownership: dict[str, str],
+) -> dict[str, Any]:
+    return {
+        "case_id": request.case_id,
+        "tool_id": validated_tool_input.tool_id,
+        "inputs": dict(validated_tool_input.inputs),
+        "artifact_dir": str(artifact_dir),
+        "registry_path": str(registry_path),
+        "created_by": ownership["created_by"],
+        "operator_id": ownership["operator_id"],
+        "workspace_id": ownership["workspace_id"],
+    }
+
+
 def _workflow_operator_params_from_request(
     request: RunCreateRequest,
     *,
@@ -600,12 +676,18 @@ def _workflow_operator_params_from_request(
 
 
 def _case_payload_from_tool_input(case_id: str, validated_tool_input: ValidatedToolInput) -> dict[str, Any]:
-    if validated_tool_input.tool_id != "chainladder":
-        raise ValueError(f"Unknown tool_id: {validated_tool_input.tool_id}")
-    return build_chainladder_case_payload(
-        case_id=case_id,
-        tool_inputs=validated_tool_input.inputs,
-    )
+    if validated_tool_input.tool_id == "chainladder":
+        return build_chainladder_case_payload(
+            case_id=case_id,
+            tool_inputs=validated_tool_input.inputs,
+        )
+    if validated_tool_input.tool_id in MODEL_COMPARISON_TOOL_RUNNERS:
+        return {
+            "case_id": case_id,
+            "tool_id": validated_tool_input.tool_id,
+            "inputs": dict(validated_tool_input.inputs),
+        }
+    raise ValueError(f"Unknown tool_id: {validated_tool_input.tool_id}")
 
 
 def _workflow_inputs_from_request(request: RunCreateRequest) -> dict[str, Any]:
@@ -646,6 +728,8 @@ def _record_background_acceptance(
         "workspace_id": ownership["workspace_id"],
     }
     if validated_tool_input is not None:
+        operator_params["tool_id"] = validated_tool_input.tool_id
+        operator_params["inputs"] = tool_inputs
         operator_params["case_payload"] = _case_payload_from_tool_input(request.case_id, validated_tool_input)
         operator_params["validated_input"] = {
             "case_id": request.case_id,
@@ -685,6 +769,23 @@ def _record_background_acceptance(
 def _run_operator_flow_background(operator_params: dict[str, Any]) -> None:
     try:
         operator_entrypoint.run_operator_flow(**operator_params)
+    except Exception as exc:
+        _record_background_failure(operator_params, exc)
+
+
+def _run_registered_model_tool(operator_params: dict[str, Any]) -> dict[str, Any]:
+    params = dict(operator_params)
+    tool_id = str(params.pop("tool_id"))
+    try:
+        runner = MODEL_COMPARISON_TOOL_RUNNERS[tool_id]
+    except KeyError as exc:
+        raise ValueError(f"Unknown model comparison tool_id: {tool_id}") from exc
+    return runner(**params)
+
+
+def _run_model_tool_background(operator_params: dict[str, Any]) -> None:
+    try:
+        _run_registered_model_tool(operator_params)
     except Exception as exc:
         _record_background_failure(operator_params, exc)
 
@@ -832,7 +933,12 @@ def _normalize_tool_invocation(request: RunCreateRequest, *, tool_registry) -> V
         merged_inputs["sample_name"] = request.sample_name
     if request.review_threshold_origin_count is not None and "review_threshold_origin_count" not in merged_inputs:
         merged_inputs["review_threshold_origin_count"] = request.review_threshold_origin_count
-    if legacy_method is not None and "method_variant" not in merged_inputs and "method" not in merged_inputs:
+    if (
+        tool_invocation.tool_id == "chainladder"
+        and legacy_method is not None
+        and "method_variant" not in merged_inputs
+        and "method" not in merged_inputs
+    ):
         merged_inputs["method_variant"] = legacy_method
 
     if tool_invocation.tool_id == "chainladder":
@@ -842,6 +948,12 @@ def _normalize_tool_invocation(request: RunCreateRequest, *, tool_registry) -> V
             tool_inputs=validated_inputs.model_dump(mode="json"),
         )
         validate_chainladder_case(case_input)
+        return ValidatedToolInput(
+            tool_id=tool_invocation.tool_id,
+            inputs=validated_inputs.model_dump(mode="json"),
+        )
+    if tool_invocation.tool_id == MINIMAX_EXPERIENCE_STUDY_TOOL_ID:
+        validated_inputs = ExperienceStudyToolInput.model_validate(merged_inputs)
         return ValidatedToolInput(
             tool_id=tool_invocation.tool_id,
             inputs=validated_inputs.model_dump(mode="json"),
@@ -1931,9 +2043,9 @@ def _operator_console_html() -> str:
       <h2>Create Governed Run</h2>
       <form id="create-run-form" onsubmit="createRun(event)">
         <label>case_id<input name="case_id" required placeholder="demo-case"></label>
-        <label>sample_name<input name="sample_name" value="RAA"></label>
+        <label>sample_name<input id="sample-name-input" name="sample_name" value="RAA"></label>
         <label>tool
-          <select id="tool-selector" name="tool_id" data-default-tool-id="chainladder">
+          <select id="tool-selector" name="tool_id" data-default-tool-id="chainladder" onchange="applyToolDefaults()">
             <option value="chainladder">Loading tool catalog…</option>
           </select>
         </label>
@@ -1999,6 +2111,7 @@ def _operator_console_html() -> str:
     let selectedRunId = null;
     let pollTimer = null;
     let pollGeneration = 0;
+    let toolCatalogById = new Map();
     const activeEventTypes = ["run.accepted", "run.queued", "run.running"];
     const terminalEventTypes = ["run.completed", "run.failed", "run.needs_review"];
 
@@ -2074,6 +2187,7 @@ def _operator_console_html() -> str:
         const payload = await parseJsonOrThrow(response, "Tool catalog");
         const tools = payload.tools || [];
         if (!tools.length) return;
+        toolCatalogById = new Map(tools.map((tool) => [tool.tool_id || tool.method, tool]));
         selector.innerHTML = "";
         for (const tool of tools) {
           const option = document.createElement("option");
@@ -2087,6 +2201,7 @@ def _operator_console_html() -> str:
         if (!selector.value && tools.length) {
           selector.value = tools[0].tool_id || tools[0].method;
         }
+        applyToolDefaults();
       } catch (error) {
         const fallback = selector.querySelector("option[value='chainladder']") || selector.options[0];
         if (fallback) {
@@ -2204,6 +2319,14 @@ def _operator_console_html() -> str:
         link.textContent = `${review.case_id || "unknown case"} - Open review details`;
         inbox.appendChild(link);
       }
+    }
+
+    function applyToolDefaults() {
+      const selector = document.getElementById("tool-selector");
+      const sampleInput = document.getElementById("sample-name-input");
+      const tool = toolCatalogById.get(selector.value);
+      const defaults = tool && tool.console_defaults ? tool.console_defaults : {};
+      sampleInput.value = defaults.sample_name || (selector.value === "chainladder" ? "RAA" : "");
     }
 
     function reviewDetailsUrl(review) {
@@ -2637,10 +2760,11 @@ def _operator_console_html() -> str:
       const form = event.currentTarget;
       const formData = new FormData(form);
       const thresholdValue = formData.get("review_threshold_origin_count");
+      const toolId = String(formData.get("tool_id") || "chainladder").trim() || "chainladder";
       const payload = {
         case_id: String(formData.get("case_id") || "").trim(),
-        tool_id: String(formData.get("tool_id") || "chainladder").trim() || "chainladder",
-        method: String(formData.get("tool_id") || "chainladder").trim() || "chainladder",
+        tool_id: toolId,
+        method: toolId,
         inputs: {
           sample_name: String(formData.get("sample_name") || "RAA").trim() || "RAA",
         },
@@ -2649,7 +2773,7 @@ def _operator_console_html() -> str:
         created_by: String(formData.get("created_by") || "").trim() || null,
         background: formData.get("background") === "on",
       };
-      if (thresholdValue !== null && String(thresholdValue).trim() !== "") {
+      if (toolId === "chainladder" && thresholdValue !== null && String(thresholdValue).trim() !== "") {
         const thresholdNumber = Number(thresholdValue);
         if (!Number.isInteger(thresholdNumber) || thresholdNumber < 0) {
           setOperationStatus("review_threshold_origin_count must be a non-negative integer.", "error");

@@ -24,7 +24,7 @@ The current repo state is past the original CLI proof of concept. It includes:
 - local JSON run registry and rerun tooling
 - FastAPI control plane for runs, tools, workflows, reviews, artifacts, replay, repeatability, and report export
 - lightweight `/console` operator UI with run creation, event polling, artifact/review panels, review decisions, rerun, and report export actions
-- tool catalog with the current builtin `chainladder` tool
+- tool catalog with builtin `chainladder` and `minimax_experience_study_tool` implementations
 - workflow catalog with bounded local sequential execution
 - independent review contract and review-decision artifacts
 - prototype `operator_id` / `workspace_id` ownership metadata
@@ -38,7 +38,7 @@ Still intentionally out of scope:
 - auth, SSO/RBAC, enterprise multitenancy, or production workspace administration
 - object storage / database-backed audit store
 - production frontend build system
-- broader actuarial method catalog beyond the current `chainladder` path
+- the remaining model-specific experience-study tools and their cross-model comparison report
 - optional HTTP calculator microservice or MCP adapter without a concrete caller
 
 ---

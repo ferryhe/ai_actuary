@@ -336,7 +336,10 @@ def test_preflight_endpoint_reports_ready_runtime_when_paths_and_catalogs_are_co
     assert payload["readiness"] == "ready"
     assert payload["summary"]["warning_count"] == 0
     assert payload["summary"]["error_count"] == 0
-    assert payload["configuration"]["catalog"]["tool_ids"] == ["chainladder"]
+    assert payload["configuration"]["catalog"]["tool_ids"] == [
+        "chainladder",
+        "minimax_experience_study_tool",
+    ]
     assert payload["configuration"]["catalog"]["workflow_ids"] == ["chainladder-basic", "chainladder-validated"]
     assert payload["configuration"]["defaults"]["operator_id"] == DEFAULT_OPERATOR_ID
     assert payload["configuration"]["defaults"]["workspace_id"] == DEFAULT_WORKSPACE_ID
@@ -697,20 +700,82 @@ def test_post_run_rejects_invalid_chainladder_method_variant_with_http_400(tmp_p
     assert "chainladder" in str(response.json()["detail"])
 
 
-def test_tool_catalog_endpoints_expose_builtin_chainladder(tmp_path):
+def test_tool_catalog_endpoints_expose_builtin_tools(tmp_path):
     _reset_fake_runner_calls()
     client = _client(tmp_path)
 
     tools = client.get("/tools")
     tool = client.get("/tools/chainladder")
+    minimax_tool = client.get("/tools/minimax_experience_study_tool")
 
     assert tools.status_code == 200
-    assert tools.json()["tool_count"] == 1
+    assert tools.json()["tool_count"] == 2
     assert tools.json()["tools"][0]["tool_id"] == "chainladder"
     assert tool.status_code == 200
     assert tool.json()["method"] == "chainladder"
     assert tool.json()["input_schema"]["properties"]["sample_name"]["default"] == "RAA"
     assert tool.json()["input_schema"]["properties"]["method_variant"]["const"] == "chainladder"
+    assert minimax_tool.status_code == 200
+    assert minimax_tool.json()["method"] == "minimax_experience_study_tool"
+    assert minimax_tool.json()["console_defaults"]["sample_name"] == "ae_small"
+
+
+def test_post_run_executes_minimax_experience_study_tool(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/runs",
+        json={
+            "case_id": "minimax-experience-case",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small", "dimensions": ["product"]},
+            "background": False,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "completed"
+    assert payload["tool_id"] == "minimax_experience_study_tool"
+    assert payload["result_count"] == 8
+    detail = client.get(f"/runs/{payload['run_id']}").json()
+    result_path = Path(detail["run"]["artifact_root"]) / "deterministic_result.json"
+    deterministic_result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert deterministic_result["model"] == "MiniMax-M3"
+    assert deterministic_result["result_count"] == 8
+
+
+def test_minimax_experience_tool_supports_background_execution_and_rerun(tmp_path):
+    scheduled = []
+
+    def capture_background_task(fn, *args, **kwargs):
+        scheduled.append((fn, args, kwargs))
+
+    client = _client(tmp_path, background_task_runner=capture_background_task)
+    accepted = client.post(
+        "/runs",
+        json={
+            "case_id": "minimax-background-case",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small"},
+            "background": True,
+        },
+    )
+
+    assert accepted.status_code == 202
+    assert len(scheduled) == 1
+    fn, args, kwargs = scheduled[0]
+    fn(*args, **kwargs)
+    run_id = accepted.json()["run_id"]
+    events = client.get(f"/runs/{run_id}/events").json()["events"]
+    assert [event["status"] for event in events] == ["accepted", "running", "completed"]
+
+    rerun = client.post(f"/runs/{run_id}/rerun", json={})
+
+    assert rerun.status_code == 200
+    assert rerun.json()["status"] == "completed"
+    assert rerun.json()["run_id"] != run_id
+    assert rerun.json()["rerun"]["source_run_id"] == run_id
 
 
 def test_post_run_can_accept_background_execution_and_poll_events(tmp_path):
@@ -878,7 +943,9 @@ def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path)
     assert "fetch(\"/runs\"" in html
     assert "tool_id:" in html
     assert "inputs:" in html
-    assert "method: String(formData.get(\"tool_id\") || \"chainladder\")" in html
+    assert "method: toolId" in html
+    assert "applyToolDefaults()" in html
+    assert "defaults.sample_name" in html
     assert "Tool catalog" in html
     assert "fetch(`/runs/${encodeURIComponent(runId)}/events`)" in html
     assert "review-inbox" in html
