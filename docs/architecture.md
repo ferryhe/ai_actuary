@@ -141,7 +141,7 @@ The API layer in `reserving_workflow.api.app` is a transport/control-plane wrapp
 The FastAPI routes are intentionally aligned to the current operator-console shape:
 
 - `GET /console` — serve a lightweight operator console shell without a frontend build system
-- `GET /console/state` — return console-ready run cards, selected-run detail, timeline, artifact, review, and action panels
+- `GET /console/state` — return console-ready run cards, selected-run detail, timeline, projected results, artifact, review, and action panels
 - `GET /tools` — return the operator-visible tool catalog summary
 - `GET /tools/{tool_id}` — return tool metadata and input schema for one registered tool
 - `POST /runs` — start a governed single-case run through the existing operator entrypoint; with `background=true`, accept immediately and execute through FastAPI background tasks
@@ -151,6 +151,7 @@ The FastAPI routes are intentionally aligned to the current operator-console sha
 - `POST /runs/{run_id}/rerun` — rerun a recorded run through the existing registry/operator path
 - `POST /runs/{run_id}/report-export` — generate auditable operator handoff markdown/json from recorded evidence
 - `GET /runs/{run_id}/artifacts` — expose artifact manifest and artifact paths for an artifact panel
+- `GET /runs/{run_id}/results` — expose a bounded, path-free projection of registered deterministic and narrative result artifacts
 - `GET /runs/{run_id}/review-packet` — expose review packet metadata for a review panel
 - `GET /runs/{run_id}/review` — expose the independent review object for one run
 - `GET /reviews` — list local review records and lazily materialized review-needed runs

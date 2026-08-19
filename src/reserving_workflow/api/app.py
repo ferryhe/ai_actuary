@@ -6,6 +6,8 @@ boundaries instead of introducing a second runtime implementation.
 
 from __future__ import annotations
 
+import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -53,6 +55,9 @@ DEFAULT_WORKSPACE_ID = "default-workspace"
 MODEL_COMPARISON_TOOL_RUNNERS = {
     MINIMAX_EXPERIENCE_STUDY_TOOL_ID: run_minimax_experience_study,
 }
+MAX_RESULT_ARTIFACT_BYTES = 1_000_000
+MAX_PROJECTED_RESULTS = 1_000
+UNAVAILABLE = "unavailable"
 
 
 class ApiSettings(BaseModel):
@@ -429,6 +434,11 @@ def create_app(
             "artifact_paths": manifest.get("artifact_paths", {}) if manifest else {},
             "artifacts": _artifact_refs_from_manifest(manifest),
         }
+
+    @app.get("/runs/{run_id}/results")
+    async def get_results(run_id: str) -> dict[str, Any]:
+        entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+        return _result_panel_projection(entry)
 
     @app.get("/runs/{run_id}/review-packet")
     async def get_review_packet(run_id: str) -> dict[str, Any]:
@@ -1487,6 +1497,7 @@ def _console_state_payload(
         "selected_run": _console_selected_run(selected_entry),
         "run_cards": [_console_run_card(entry, selected_run_id=selected_run_id) for entry in runs],
         "timeline": _console_timeline(selected_entry),
+        "result_panel": _result_panel_projection(selected_entry),
         "artifact_panel": _console_artifact_panel(selected_entry),
         "review_inbox": review_inbox,
         "review_panel": _console_review_panel(
@@ -1540,11 +1551,356 @@ def _console_timeline(entry: dict[str, Any] | None) -> list[dict[str, Any]]:
     return [_event_from_history(run_id, item) for item in entry.get("status_history", [])]
 
 
+def _empty_result_panel(
+    *,
+    status: str,
+    tool_id: Any = UNAVAILABLE,
+    errors: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "tool_id": _projection_scalar(tool_id),
+        "model": UNAVAILABLE,
+        "method": UNAVAILABLE,
+        "result_count": UNAVAILABLE,
+        "population_id": UNAVAILABLE,
+        "period": UNAVAILABLE,
+        "results": [],
+        "narrative_summary": UNAVAILABLE,
+        "key_points": [],
+        "errors": list(errors or []),
+    }
+
+
+def _result_panel_projection(entry: dict[str, Any] | None) -> dict[str, Any]:
+    """Project registered result artifacts into a path-free Console contract."""
+
+    if entry is None:
+        return _empty_result_panel(status="no_run_selected")
+
+    registered_tool_id = _registered_tool_id(entry)
+    if registered_tool_id not in {None, MINIMAX_EXPERIENCE_STUDY_TOOL_ID}:
+        return _empty_result_panel(status="not_available", tool_id=registered_tool_id)
+
+    root, manifest, manifest_error = _load_result_manifest(entry)
+    if manifest_error is not None or root is None or manifest is None:
+        return _empty_result_panel(
+            status="error",
+            tool_id=registered_tool_id or UNAVAILABLE,
+            errors=[manifest_error] if manifest_error is not None else [],
+        )
+
+    manifest_tool_id = manifest.get("tool_id")
+    if (
+        registered_tool_id is not None
+        and manifest_tool_id is not None
+        and str(manifest_tool_id) != registered_tool_id
+    ):
+        return _empty_result_panel(
+            status="error",
+            tool_id=registered_tool_id,
+            errors=[
+                _result_projection_error(
+                    "run_manifest",
+                    "artifact_tool_mismatch",
+                    "Run manifest tool identity does not match the selected run.",
+                )
+            ],
+        )
+    tool_id = registered_tool_id or manifest_tool_id
+    if tool_id != MINIMAX_EXPERIENCE_STUDY_TOOL_ID:
+        return _empty_result_panel(status="not_available", tool_id=tool_id or UNAVAILABLE)
+
+    payloads: dict[str, dict[str, Any]] = {}
+    errors: list[dict[str, str]] = []
+    for artifact_id in ("validated_input", "deterministic_result", "narrative_draft"):
+        payload, error = _read_registered_result_artifact(
+            artifact_root=root,
+            manifest=manifest,
+            artifact_id=artifact_id,
+        )
+        if error is not None:
+            errors.append(error)
+        elif payload is not None:
+            identity_errors = _result_artifact_identity_errors(
+                payload,
+                artifact_id=artifact_id,
+                expected_run_id=entry.get("run_id"),
+                expected_tool_id=tool_id,
+            )
+            if identity_errors:
+                errors.extend(identity_errors)
+            else:
+                payloads[artifact_id] = payload
+
+    deterministic = payloads.get("deterministic_result", {})
+    raw_results = deterministic.get("results")
+    projected_results: list[dict[str, Any]] = []
+    if "deterministic_result" in payloads and not isinstance(raw_results, list):
+        errors.append(
+            _result_projection_error(
+                "deterministic_result",
+                "artifact_invalid_shape",
+                "Registered deterministic result does not contain a results array.",
+            )
+        )
+    elif isinstance(raw_results, list) and len(raw_results) > MAX_PROJECTED_RESULTS:
+        errors.append(
+            _result_projection_error(
+                "deterministic_result",
+                "result_limit_exceeded",
+                "Registered result count exceeds the Console projection limit.",
+            )
+        )
+    elif isinstance(raw_results, list):
+        if any(not isinstance(item, dict) for item in raw_results):
+            errors.append(
+                _result_projection_error(
+                    "deterministic_result",
+                    "artifact_invalid_shape",
+                    "Registered results must contain JSON objects.",
+                )
+            )
+        else:
+            projected_results = [_project_experience_result(item) for item in raw_results]
+
+    result_count = deterministic.get("result_count", UNAVAILABLE)
+    if result_count != UNAVAILABLE and (
+        isinstance(result_count, bool)
+        or not isinstance(result_count, int)
+        or result_count < 0
+        or result_count > MAX_PROJECTED_RESULTS
+    ):
+        result_count = UNAVAILABLE
+        errors.append(
+            _result_projection_error(
+                "deterministic_result",
+                "invalid_result_count",
+                "Registered result_count is invalid for Console projection.",
+            )
+        )
+    elif isinstance(raw_results, list) and isinstance(result_count, int) and result_count != len(raw_results):
+        errors.append(
+            _result_projection_error(
+                "deterministic_result",
+                "result_count_mismatch",
+                "Registered result_count does not match the results array.",
+            )
+        )
+
+    validated_inputs = payloads.get("validated_input", {}).get("inputs")
+    if not isinstance(validated_inputs, dict):
+        validated_inputs = {}
+    narrative = payloads.get("narrative_draft", {})
+    raw_key_points = narrative.get("key_points")
+    key_points = (
+        [_projection_scalar(item) for item in raw_key_points[:MAX_PROJECTED_RESULTS]]
+        if isinstance(raw_key_points, list)
+        else []
+    )
+    status = "available" if not errors else ("partial" if projected_results else "error")
+    return {
+        "status": status,
+        "tool_id": _projection_scalar(deterministic.get("tool_id", tool_id)),
+        "model": _projection_scalar(deterministic.get("model", manifest.get("model", UNAVAILABLE))),
+        "method": _projection_scalar(deterministic.get("method", UNAVAILABLE)),
+        "result_count": result_count,
+        "population_id": _projection_scalar(validated_inputs.get("population_id", UNAVAILABLE)),
+        "period": _projection_scalar(validated_inputs.get("period", UNAVAILABLE)),
+        "results": projected_results,
+        "narrative_summary": _projection_scalar(narrative.get("summary", UNAVAILABLE)),
+        "key_points": key_points,
+        "errors": errors,
+    }
+
+
+def _registered_tool_id(entry: dict[str, Any]) -> str | None:
+    operator_params = entry.get("operator_params")
+    if not isinstance(operator_params, dict):
+        operator_params = {}
+    value = entry.get("tool_id") or operator_params.get("tool_id") or operator_params.get("method")
+    return str(value) if value else None
+
+
+def _load_result_manifest(
+    entry: dict[str, Any],
+) -> tuple[Path | None, dict[str, Any] | None, dict[str, str] | None]:
+    artifact_root = entry.get("artifact_root")
+    if not artifact_root:
+        return None, None, _result_projection_error(
+            "run_manifest", "artifact_root_missing", "Run artifact root is unavailable."
+        )
+    try:
+        root = Path(str(artifact_root)).expanduser().resolve()
+        manifest_path = (root / "run_manifest.json").resolve()
+        manifest_path.relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return None, None, _result_projection_error(
+            "run_manifest", "artifact_path_rejected", "Run manifest path failed safety validation."
+        )
+    manifest, error = _read_bounded_result_json(manifest_path, artifact_id="run_manifest")
+    if error is not None:
+        return root, None, error
+    if manifest is None:
+        return root, None, _result_projection_error(
+            "run_manifest", "artifact_unavailable", "Run manifest is unavailable."
+        )
+    if manifest.get("run_id") not in {None, entry.get("run_id")}:
+        return root, None, _result_projection_error(
+            "run_manifest", "manifest_run_mismatch", "Run manifest does not match the selected run."
+        )
+    return root, manifest, None
+
+
+def _read_registered_result_artifact(
+    *,
+    artifact_root: Path,
+    manifest: dict[str, Any],
+    artifact_id: str,
+) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+    artifact_paths = manifest.get("artifact_paths")
+    if not isinstance(artifact_paths, dict) or artifact_id not in artifact_paths:
+        return None, _result_projection_error(
+            artifact_id,
+            "artifact_not_registered",
+            "Required result artifact is not registered in the run manifest.",
+        )
+    raw_ref = artifact_paths.get(artifact_id)
+    if not isinstance(raw_ref, str) or not raw_ref.strip():
+        return None, _result_projection_error(
+            artifact_id, "artifact_path_rejected", "Registered artifact path failed safety validation."
+        )
+    relative_ref = Path(raw_ref)
+    if relative_ref.is_absolute() or ".." in relative_ref.parts:
+        return None, _result_projection_error(
+            artifact_id, "artifact_path_rejected", "Registered artifact path failed safety validation."
+        )
+    try:
+        candidate = (artifact_root / relative_ref).resolve()
+        candidate.relative_to(artifact_root)
+    except (OSError, RuntimeError, ValueError):
+        return None, _result_projection_error(
+            artifact_id, "artifact_path_rejected", "Registered artifact path failed safety validation."
+        )
+    return _read_bounded_result_json(candidate, artifact_id=artifact_id)
+
+
+def _read_bounded_result_json(
+    path: Path,
+    *,
+    artifact_id: str,
+) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+    try:
+        if not path.is_file():
+            return None, _result_projection_error(
+                artifact_id, "artifact_missing", "Registered result artifact is missing."
+            )
+        if path.stat().st_size > MAX_RESULT_ARTIFACT_BYTES:
+            return None, _result_projection_error(
+                artifact_id,
+                "artifact_size_exceeded",
+                "Registered result artifact exceeds the Console size limit.",
+            )
+        with path.open("rb") as artifact_file:
+            content = artifact_file.read(MAX_RESULT_ARTIFACT_BYTES + 1)
+        if len(content) > MAX_RESULT_ARTIFACT_BYTES:
+            return None, _result_projection_error(
+                artifact_id,
+                "artifact_size_exceeded",
+                "Registered result artifact exceeds the Console size limit.",
+            )
+        payload = json.loads(content.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None, _result_projection_error(
+            artifact_id, "artifact_unreadable", "Registered result artifact could not be read safely."
+        )
+    if not isinstance(payload, dict):
+        return None, _result_projection_error(
+            artifact_id, "artifact_invalid_shape", "Registered result artifact must be a JSON object."
+        )
+    return payload, None
+
+
+def _result_artifact_identity_errors(
+    payload: dict[str, Any],
+    *,
+    artifact_id: str,
+    expected_run_id: Any,
+    expected_tool_id: Any,
+) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    if "run_id" in payload and payload.get("run_id") != expected_run_id:
+        errors.append(
+            _result_projection_error(
+                artifact_id,
+                "artifact_run_mismatch",
+                "Registered result artifact does not match the selected run.",
+            )
+        )
+    if (
+        artifact_id in {"validated_input", "deterministic_result"}
+        and "tool_id" in payload
+        and payload.get("tool_id") != expected_tool_id
+    ):
+        errors.append(
+            _result_projection_error(
+                artifact_id,
+                "artifact_tool_mismatch",
+                "Registered result artifact does not match the selected tool.",
+            )
+        )
+    return errors
+
+
+def _project_experience_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "group_values": _project_group_values(result.get("group_values", UNAVAILABLE)),
+        "metric_kind": _projection_scalar(result.get("metric_kind", UNAVAILABLE)),
+        "mortality_improvement": _projection_scalar(
+            result.get("mortality_improvement", UNAVAILABLE)
+        ),
+        "actual": _projection_scalar(result.get("actual_total", UNAVAILABLE)),
+        "expected": _projection_scalar(result.get("expected_total", UNAVAILABLE)),
+        "ratio": _projection_scalar(result.get("ratio", UNAVAILABLE)),
+        "reason_code": _projection_scalar(result.get("reason_code", UNAVAILABLE)),
+        "uncertainty": {
+            "lower": _projection_scalar(result.get("lower_ci", UNAVAILABLE)),
+            "upper": _projection_scalar(result.get("upper_ci", UNAVAILABLE)),
+            "confidence_level": _projection_scalar(result.get("confidence_level", UNAVAILABLE)),
+            "basis": _projection_scalar(result.get("uncertainty_basis", UNAVAILABLE)),
+        },
+    }
+
+
+def _project_group_values(value: Any) -> list[list[Any]] | str:
+    if not isinstance(value, (list, tuple)):
+        return UNAVAILABLE
+    projected: list[list[Any]] = []
+    for pair in value:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            return UNAVAILABLE
+        projected.append([_projection_scalar(pair[0]), _projection_scalar(pair[1])])
+    return projected
+
+
+def _projection_scalar(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        return UNAVAILABLE
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return UNAVAILABLE
+
+
+def _result_projection_error(artifact_id: str, code: str, message: str) -> dict[str, str]:
+    return {"artifact_id": artifact_id, "code": code, "message": message}
+
+
 def _console_artifact_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
     if entry is None:
         return {
             "present": False,
             "status": "no_run_selected",
+            "error": None,
             "artifact_root": None,
             "artifact_manifest": None,
             "artifact_paths": {},
@@ -1556,7 +1912,15 @@ def _console_artifact_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
             "missing_expected_artifacts": [],
             "freshness": None,
         }
-    manifest = _load_manifest_for_entry(entry)
+    manifest_error = None
+    try:
+        manifest = _load_manifest_for_entry(entry)
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        manifest = None
+        manifest_error = {
+            "code": "manifest_unreadable",
+            "message": "Run manifest could not be read safely.",
+        }
     artifact_root = entry.get("artifact_root")
     root = Path(artifact_root).expanduser().resolve() if artifact_root else None
     primary_refs = _console_expected_artifact_refs(root, manifest, category="primary")
@@ -1565,7 +1929,14 @@ def _console_artifact_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
     evidence_items = [*primary_refs, *review_refs, *decision_refs]
     return {
         "present": manifest is not None,
-        "status": "ok" if manifest is not None else "manifest_missing",
+        "status": (
+            "ok"
+            if manifest is not None
+            else "manifest_unreadable"
+            if manifest_error is not None
+            else "manifest_missing"
+        ),
+        "error": manifest_error,
         "artifact_root": artifact_root,
         "artifact_manifest": manifest,
         "artifact_paths": manifest.get("artifact_paths", {}) if manifest else {},
@@ -2027,6 +2398,19 @@ def _operator_console_html() -> str:
     .artifact-gaps { margin: 12px 0 0; padding-left: 18px; }
     .artifact-gaps li { margin: 4px 0; }
     details.raw-json { margin-top: 14px; }
+    .result-section { grid-column: 1 / -1; }
+    .result-panel { display: grid; gap: 14px; }
+    .result-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px 12px; }
+    .result-summary strong { display: block; font-size: 12px; color: var(--muted); font-weight: 600; }
+    .result-summary span { display: block; margin-top: 2px; word-break: break-word; }
+    .result-narrative { margin: 0; color: #243b53; }
+    .result-key-points { margin: 0; padding-left: 20px; }
+    .result-errors { margin: 0; padding: 10px 10px 10px 28px; border: 1px solid #fda29b; border-radius: 8px; background: #fef3f2; color: var(--danger); }
+    .result-table-wrap { overflow-x: auto; }
+    .result-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .result-table th, .result-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+    .result-table th { color: var(--muted); font-size: 12px; font-weight: 700; }
+    .result-table td:last-child { font-weight: 600; }
     .review-section { grid-column: 1 / -1; }
     .review-panel { display: grid; gap: 14px; }
     .review-overview, .review-block, .review-decision-card { border: 1px solid var(--border); border-radius: 12px; background: #fbfcfe; padding: 14px; }
@@ -2060,7 +2444,7 @@ def _operator_console_html() -> str:
     .review-decision-card textarea { resize: vertical; min-height: 76px; }
     .review-raw pre { max-height: 320px; }
     @media (max-width: 900px) { main, .workspace { grid-template-columns: 1fr; } }
-    @media (max-width: 600px) { .review-meta-grid, .review-decision-grid, .adaptive-object { grid-template-columns: 1fr; } }
+    @media (max-width: 600px) { .result-summary, .review-meta-grid, .review-decision-grid, .adaptive-object { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -2107,6 +2491,7 @@ def _operator_console_html() -> str:
       <div id="review-inbox" class="empty">Loading reviews…</div>
     </section>
     <div class="workspace">
+      <section aria-label="Experience Study Results" class="result-section"><h2>Experience Study Results</h2><div id="result-panel" class="result-panel">Loading…</div></section>
       <section aria-label="Timeline"><h2>Timeline</h2><div id="timeline" class="panel-body">Loading…</div></section>
       <section aria-label="Artifact Evidence Panel"><h2>Artifact Evidence Panel</h2><div id="artifact-panel" class="panel-body">Loading…</div></section>
       <section aria-label="Review Panel" class="review-section">
@@ -2156,6 +2541,7 @@ def _operator_console_html() -> str:
       queue.textContent = message;
       queue.className = "empty";
       renderTimeline([{event_type: "run.failed", summary: message}]);
+      document.getElementById("result-panel").textContent = message;
       document.getElementById("artifact-panel").textContent = message;
       document.getElementById("review-panel").textContent = message;
       document.getElementById("review-inbox").textContent = message;
@@ -2662,6 +3048,117 @@ def _operator_console_html() -> str:
       container.appendChild(cell);
     }
 
+    function projectionText(value) {
+      return value === null || value === undefined || value === "" ? "unavailable" : String(value);
+    }
+
+    function formatResultGroup(groupValues) {
+      if (!Array.isArray(groupValues)) return projectionText(groupValues);
+      return groupValues.map((pair) => {
+        if (!Array.isArray(pair) || pair.length !== 2) return "unavailable";
+        return `${projectionText(pair[0])}=${projectionText(pair[1])}`;
+      }).join(", ");
+    }
+
+    function renderResultPanel(panel) {
+      const container = document.getElementById("result-panel");
+      container.innerHTML = "";
+      if (!panel || panel.status === "no_run_selected") {
+        container.textContent = "Select a run to inspect projected results.";
+        container.className = "result-panel empty";
+        return;
+      }
+      if (panel.status === "not_available") {
+        container.textContent = "Experience Study results are not applicable to this run.";
+        container.className = "result-panel empty";
+        return;
+      }
+      container.className = "result-panel";
+
+      const errors = Array.isArray(panel.errors) ? panel.errors : [];
+      if (errors.length) {
+        const list = document.createElement("ul");
+        list.className = "result-errors";
+        for (const error of errors) {
+          const item = document.createElement("li");
+          item.textContent = `${projectionText(error.artifact_id)}: ${projectionText(error.message)} (${projectionText(error.code)})`;
+          list.appendChild(item);
+        }
+        container.appendChild(list);
+      }
+
+      const summary = document.createElement("div");
+      summary.className = "result-summary";
+      appendSummaryCell(summary, "Model", projectionText(panel.model));
+      appendSummaryCell(summary, "Population", projectionText(panel.population_id));
+      appendSummaryCell(summary, "Period", projectionText(panel.period));
+      appendSummaryCell(summary, "Result count", projectionText(panel.result_count));
+      container.appendChild(summary);
+
+      const narrativeHeading = document.createElement("h3");
+      narrativeHeading.textContent = "Narrative summary";
+      const narrative = document.createElement("p");
+      narrative.className = "result-narrative";
+      narrative.textContent = projectionText(panel.narrative_summary);
+      container.append(narrativeHeading, narrative);
+
+      if (Array.isArray(panel.key_points) && panel.key_points.length) {
+        const keyPoints = document.createElement("ul");
+        keyPoints.className = "result-key-points";
+        for (const point of panel.key_points) {
+          const item = document.createElement("li");
+          item.textContent = projectionText(point);
+          keyPoints.appendChild(item);
+        }
+        container.appendChild(keyPoints);
+      }
+
+      const results = Array.isArray(panel.results) ? panel.results : [];
+      if (!results.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "No projected results are available.";
+        container.appendChild(empty);
+        return;
+      }
+      const tableWrap = document.createElement("div");
+      tableWrap.className = "result-table-wrap";
+      const table = document.createElement("table");
+      table.className = "result-table";
+      const head = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      for (const label of ["Group", "Metric", "MI", "Actual", "Expected", "A/E Ratio", "Status"]) {
+        const cell = document.createElement("th");
+        cell.scope = "col";
+        cell.textContent = label;
+        headRow.appendChild(cell);
+      }
+      head.appendChild(headRow);
+      const body = document.createElement("tbody");
+      for (const result of results) {
+        const row = document.createElement("tr");
+        const reasonCode = result.reason_code;
+        const values = [
+          formatResultGroup(result.group_values),
+          projectionText(result.metric_kind),
+          result.mortality_improvement === true ? "Yes" : result.mortality_improvement === false ? "No" : "unavailable",
+          projectionText(result.actual),
+          projectionText(result.expected),
+          projectionText(result.ratio),
+          reasonCode === null ? "ok" : projectionText(reasonCode),
+        ];
+        for (const value of values) {
+          const cell = document.createElement("td");
+          cell.textContent = value;
+          row.appendChild(cell);
+        }
+        body.appendChild(row);
+      }
+      table.append(head, body);
+      tableWrap.appendChild(table);
+      container.appendChild(tableWrap);
+    }
+
     function renderArtifactGroup(container, title, items, emptyMessage) {
       const section = document.createElement("div");
       section.className = "artifact-group";
@@ -2728,6 +3225,11 @@ def _operator_console_html() -> str:
         warning.className = "empty";
         warning.textContent = "Run artifact root exists, but run_manifest.json is missing. Known evidence refs are still shown below.";
         container.appendChild(warning);
+      } else if (panel.status === "manifest_unreadable") {
+        const warning = document.createElement("div");
+        warning.className = "status error";
+        warning.textContent = panel.error && panel.error.message ? panel.error.message : "Run manifest could not be read safely.";
+        container.appendChild(warning);
       }
 
       if (panel.missing_expected_artifacts && panel.missing_expected_artifacts.length) {
@@ -2779,6 +3281,7 @@ def _operator_console_html() -> str:
         renderRunQueue(state);
         renderReviewInbox(state.review_inbox || []);
         renderTimeline(state.timeline || []);
+        renderResultPanel(state.result_panel);
         renderArtifactPanel(state.artifact_panel);
         renderReviewPanel(state.review_panel);
         renderActionPanel(state.action_panel);

@@ -166,6 +166,7 @@ Inspect artifacts and review state:
 
 ```bash
 curl http://127.0.0.1:8000/runs/<run_id>/artifacts
+curl http://127.0.0.1:8000/runs/<run_id>/results
 curl http://127.0.0.1:8000/runs/<run_id>/review
 ```
 
@@ -194,6 +195,7 @@ GET  /runs/{run_id}
 GET  /runs/{run_id}/events
 POST /runs/{run_id}/rerun
 GET  /runs/{run_id}/artifacts
+GET  /runs/{run_id}/results
 GET  /runs/{run_id}/review-packet
 GET  /runs/{run_id}/review
 POST /runs/{run_id}/report-export
@@ -395,7 +397,7 @@ required = [
     '/console', '/console/state', '/tools', '/tools/{tool_id}',
     '/workflows', '/workflows/{workflow_id}', '/runs', '/runs/{run_id}',
     '/runs/{run_id}/events', '/runs/{run_id}/rerun',
-    '/runs/{run_id}/artifacts', '/runs/{run_id}/review-packet',
+    '/runs/{run_id}/artifacts', '/runs/{run_id}/results', '/runs/{run_id}/review-packet',
     '/runs/{run_id}/review', '/runs/{run_id}/report-export',
     '/reviews', '/reviews/{review_id}', '/reviews/{review_id}/decision',
     '/replay', '/repeatability', '/benchmarks/batch',

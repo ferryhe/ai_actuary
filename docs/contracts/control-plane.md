@@ -89,7 +89,7 @@ Artifact lists are derived from `run_manifest.json`. The manifest remains the so
 
 The console exposes structured evidence fields so it can render a readable evidence panel without changing the underlying runtime contract:
 
-- `status` — `ok`, `manifest_missing`, or `no_run_selected`
+- `status` — `ok`, `manifest_missing`, `manifest_unreadable`, or `no_run_selected`
 - `primary_artifact_refs`
 - `review_artifact_refs`
 - `decision_artifact_refs`
@@ -104,6 +104,12 @@ Safe path behavior for the new evidence fields is frozen to:
 - keep legacy `artifact_manifest`, `artifact_paths`, and `artifacts` behavior unchanged for compatibility
 - expose new evidence refs through safe relative refs such as `run_manifest.json` or `step_validate/run_manifest.json`
 - avoid leaking new absolute local filesystem paths in the added console evidence fields when a relative ref or basename is sufficient
+
+## Result Projection
+
+`GET /runs/{run_id}/results` and the `result_panel` in `GET /console/state` expose the same controlled projection. Experience Study projections contain only the registered tool/model/method metadata, population and period, result count, whitelisted result fields, narrative summary, key points, and path-free safety errors. Missing source fields are rendered as `unavailable`; the projection never recalculates or guesses actuarial values.
+
+The projection reads only JSON artifacts named in the selected run's `run_manifest.json`. Absolute paths, `..` traversal, symlink escapes, oversized JSON files, and excessive result arrays are rejected. Paths are resolved against the registry-backed run artifact root, and neither successful projections nor error payloads expose local filesystem paths. Chainladder and other tools without a registered projection return `not_available` without changing their existing Console evidence behavior.
 
 ## Review Contract
 
@@ -232,6 +238,7 @@ Hermes/OpenAI/Codex adapters must use public HTTP surfaces only:
 - `GET /runs/{run_id}`
 - `GET /runs/{run_id}/events`
 - `GET /runs/{run_id}/artifacts`
+- `GET /runs/{run_id}/results`
 - `GET /runs/{run_id}/review`
 
 The adapter contract does not authorize direct writes to the artifact store, review store, or deterministic result files.
