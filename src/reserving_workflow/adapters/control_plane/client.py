@@ -1,0 +1,282 @@
+"""Installable bounded client for public read-only control-plane endpoints."""
+
+from __future__ import annotations
+
+import json
+import re
+import time
+from typing import Any, TypeVar
+
+import httpx
+from pydantic import BaseModel, ValidationError
+
+from reserving_workflow.contracts import Review, Run, RunEvent
+
+from .contracts import (
+    ArtifactListEnvelope,
+    ArtifactMetadata,
+    ArtifactProjection,
+    HealthStatus,
+    PreflightStatus,
+    ReviewEnvelope,
+    RunEnvelope,
+    RunEventListEnvelope,
+    RunListEnvelope,
+    ToolDetail,
+    ToolListEnvelope,
+    ToolSummary,
+    Workflow,
+    WorkflowListEnvelope,
+    WorkflowSummary,
+)
+from .errors import (
+    ControlPlaneContractError,
+    ControlPlaneError,
+    ControlPlaneResponseError,
+    ControlPlaneTransportError,
+    error_for_status,
+)
+
+
+DEFAULT_MAX_RESPONSE_BYTES = 1_000_000
+DEFAULT_MAX_GET_ATTEMPTS = 2
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
+
+
+class ReadOnlyControlPlaneClient:
+    """Read-only facade with bounded transport, retries, and typed responses."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: float = 30.0,
+        transport: httpx.BaseTransport | None = None,
+        client: httpx.Client | None = None,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+        max_get_attempts: int = DEFAULT_MAX_GET_ATTEMPTS,
+        retry_backoff_seconds: float = 0.05,
+    ) -> None:
+        if max_response_bytes < 1:
+            raise ValueError("max_response_bytes must be at least 1")
+        if max_get_attempts < 1:
+            raise ValueError("max_get_attempts must be at least 1")
+        if retry_backoff_seconds < 0:
+            raise ValueError("retry_backoff_seconds must not be negative")
+        self._owns_client = client is None
+        self._client = client or httpx.Client(
+            base_url=base_url.rstrip("/"),
+            headers=headers,
+            timeout=timeout,
+            transport=transport,
+        )
+        self._max_response_bytes = max_response_bytes
+        self._max_get_attempts = max_get_attempts
+        self._retry_backoff_seconds = retry_backoff_seconds
+        self._closed = False
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        if self._owns_client and not self._closed:
+            self._client.close()
+        self._closed = True
+
+    def __enter__(self) -> "ReadOnlyControlPlaneClient":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.close()
+        return False
+
+    def get_health(self) -> HealthStatus:
+        return self._request_model("GET", "/health", HealthStatus)
+
+    def get_preflight(self) -> PreflightStatus:
+        return self._request_model("GET", "/health/preflight", PreflightStatus)
+
+    def list_tools(self) -> list[ToolSummary]:
+        return self._request_model("GET", "/tools", ToolListEnvelope).tools
+
+    def get_tool(self, tool_id: str) -> ToolDetail:
+        return self._request_model("GET", f"/tools/{_identifier(tool_id, field_name='tool_id')}", ToolDetail)
+
+    def list_workflows(self) -> list[WorkflowSummary]:
+        return self._request_model("GET", "/workflows", WorkflowListEnvelope).workflows
+
+    def get_workflow(self, workflow_id: str) -> Workflow:
+        return self._request_model(
+            "GET",
+            f"/workflows/{_identifier(workflow_id, field_name='workflow_id')}",
+            Workflow,
+        )
+
+    def list_runs(
+        self,
+        *,
+        limit: int = 20,
+        status: str | None = None,
+        operator_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> list[Run]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        params: dict[str, str] = {}
+        if operator_id is not None:
+            params["operator_id"] = _identifier(operator_id, field_name="operator_id")
+        if workspace_id is not None:
+            params["workspace_id"] = _identifier(workspace_id, field_name="workspace_id")
+        runs = self._request_model("GET", "/runs", RunListEnvelope, params=params).runs
+        if status is not None:
+            if status not in {"accepted", "queued", "running", "completed", "needs_review", "failed"}:
+                raise ValueError("unsupported run status")
+            runs = [run for run in runs if run.status == status]
+        return runs[:limit]
+
+    def get_run(self, run_id: str) -> Run:
+        return self._request_model(
+            "GET",
+            f"/runs/{_identifier(run_id, field_name='run_id')}",
+            RunEnvelope,
+        ).run
+
+    def get_run_events(self, run_id: str) -> list[RunEvent]:
+        safe_run_id = _identifier(run_id, field_name="run_id")
+        return self._request_model(
+            "GET", f"/runs/{safe_run_id}/events", RunEventListEnvelope
+        ).events
+
+    def get_run_artifacts(self, run_id: str) -> list[ArtifactMetadata]:
+        safe_run_id = _identifier(run_id, field_name="run_id")
+        return self._request_model(
+            "GET", f"/runs/{safe_run_id}/artifacts", ArtifactListEnvelope
+        ).artifacts
+
+    def get_run_review_snapshot(self, run_id: str) -> Review:
+        safe_run_id = _identifier(run_id, field_name="run_id")
+        return self._request_model(
+            "GET", f"/runs/{safe_run_id}/review", ReviewEnvelope
+        ).review
+
+    def get_run_review(self, run_id: str) -> Review:
+        """Compatibility alias used by existing Hermes callers."""
+
+        return self.get_run_review_snapshot(run_id)
+
+    def get_artifact_projection(self, run_id: str, artifact_id: str) -> ArtifactProjection:
+        safe_run_id = _identifier(run_id, field_name="run_id")
+        safe_artifact_id = _identifier(artifact_id, field_name="artifact_id")
+        return self._request_model(
+            "GET",
+            f"/runs/{safe_run_id}/artifacts/{safe_artifact_id}/projection",
+            ArtifactProjection,
+        )
+
+    def _request_model(
+        self,
+        method: str,
+        path: str,
+        model: type[_ModelT],
+        **kwargs: Any,
+    ) -> _ModelT:
+        payload = self._request_json(method, path, **kwargs)
+        return self._validate_contract(model, payload)
+
+    def _validate_contract(self, model: type[_ModelT], payload: Any) -> _ModelT:
+        try:
+            return model.model_validate(payload, strict=True)
+        except (TypeError, ValueError, ValidationError) as exc:
+            raise ControlPlaneContractError(
+                code="invalid_contract",
+                message="Control plane returned an invalid response contract.",
+            ) from exc
+
+    def _request_json(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        normalized_method = method.upper()
+        attempts = self._max_get_attempts if normalized_method == "GET" else 1
+        for attempt in range(attempts):
+            try:
+                return self._request_json_once(normalized_method, path, **kwargs)
+            except ControlPlaneError as exc:
+                if not exc.retryable or attempt + 1 >= attempts:
+                    raise
+                if self._retry_backoff_seconds:
+                    time.sleep(self._retry_backoff_seconds * (attempt + 1))
+        raise AssertionError("bounded request loop exhausted")
+
+    def _request_json_once(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        try:
+            with self._client.stream(method, path, **kwargs) as response:
+                if response.status_code >= 400:
+                    raise error_for_status(response.status_code)
+                declared_length = response.headers.get("content-length")
+                if declared_length is not None:
+                    try:
+                        length = int(declared_length)
+                    except ValueError as exc:
+                        raise ControlPlaneResponseError(
+                            code="invalid_response",
+                            message="Control plane returned invalid response metadata.",
+                        ) from exc
+                    if length < 0 or length > self._max_response_bytes:
+                        raise ControlPlaneResponseError(
+                            code="response_too_large",
+                            message="Control plane response exceeded the bounded response limit.",
+                        )
+                content = bytearray()
+                for chunk in response.iter_bytes():
+                    if len(content) + len(chunk) > self._max_response_bytes:
+                        raise ControlPlaneResponseError(
+                            code="response_too_large",
+                            message="Control plane response exceeded the bounded response limit.",
+                        )
+                    content.extend(chunk)
+        except ControlPlaneError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise ControlPlaneTransportError(
+                code="timeout",
+                message="Control plane request timed out.",
+                retryable=True,
+            ) from exc
+        except httpx.RequestError as exc:
+            raise ControlPlaneTransportError(
+                code="connection_failed",
+                message="Control plane connection failed.",
+                retryable=True,
+            ) from exc
+
+        try:
+            text = bytes(content).decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise ControlPlaneContractError(
+                code="invalid_encoding",
+                message="Control plane response was not valid UTF-8.",
+            ) from exc
+        try:
+            payload = json.loads(text)
+        except (json.JSONDecodeError, RecursionError) as exc:
+            raise ControlPlaneContractError(
+                code="invalid_json",
+                message="Control plane response was not valid JSON.",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ControlPlaneContractError(
+                code="invalid_shape",
+                message="Control plane response must be a JSON object.",
+            )
+        return payload
+
+
+def _identifier(value: str, *, field_name: str) -> str:
+    candidate = str(value)
+    if not _SAFE_IDENTIFIER.fullmatch(candidate):
+        raise ValueError(f"{field_name} must be a bounded safe identifier")
+    return candidate
+
+
+__all__ = ["ReadOnlyControlPlaneClient"]

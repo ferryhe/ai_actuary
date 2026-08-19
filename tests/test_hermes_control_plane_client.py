@@ -6,7 +6,9 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 
+from reserving_workflow.adapters.control_plane import ControlPlaneError, ReadOnlyControlPlaneClient
 from reserving_workflow.api.app import ApiSettings, create_app
 from reserving_workflow.contracts import AgentExecutionPlan
 
@@ -227,3 +229,39 @@ def test_public_api_contract_supports_hermes_adapter_regression(tmp_path):
     assert events_payload["events"][-1]["status"] == "completed"
     assert any(item["artifact_id"] == "run_manifest" for item in artifacts_payload["artifacts"])
     assert review_payload["review"]["status"] == "not_required"
+
+
+def test_hermes_legacy_import_is_a_thin_shared_client_facade() -> None:
+    module = _load_module("control_plane_client_thin", CLIENT_MODULE_PATH)
+
+    assert issubclass(module.HermesControlPlaneClient, ReadOnlyControlPlaneClient)
+    assert "_request_json" not in module.HermesControlPlaneClient.__dict__
+    assert "close" not in module.HermesControlPlaneClient.__dict__
+    assert "get_run_events" not in module.HermesControlPlaneClient.__dict__
+
+
+def test_hermes_post_is_not_retried_implicitly() -> None:
+    module = _load_module("control_plane_client_post_retry", CLIENT_MODULE_PATH)
+    attempts = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(503, json={"detail": "temporarily unavailable"})
+
+    client = module.HermesControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(handler),
+        max_get_attempts=3,
+        retry_backoff_seconds=0,
+    )
+    plan = AgentExecutionPlan(
+        case_id="case-post-once",
+        objective="Run once",
+        workflow_id="chainladder-basic",
+    )
+
+    with pytest.raises(ControlPlaneError):
+        client.create_run(plan)
+
+    assert attempts == 1
