@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
+import math
 import os
 import re
 import stat
@@ -169,7 +170,7 @@ def read_bounded_json_object(
     except UnicodeDecodeError as exc:
         raise _read_error(namespace, "invalid_encoding", "Registered JSON artifact is not valid UTF-8.") from exc
     try:
-        payload = json.loads(text)
+        payload = json.loads(text, parse_constant=_reject_json_constant)
     except RecursionError as exc:
         raise _read_error(
             namespace,
@@ -177,7 +178,7 @@ def read_bounded_json_object(
             "Registered JSON artifact is nested too deeply.",
             status_code=422,
         ) from exc
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, ValueError) as exc:
         raise _read_error(namespace, "invalid_json", "Registered artifact is not valid JSON.") from exc
     if not isinstance(payload, dict):
         raise _read_error(namespace, "invalid_shape", "Registered artifact must be a JSON object.", status_code=422)
@@ -315,14 +316,14 @@ def project_preflight(value: PreflightStatus) -> dict[str, Any]:
     def project_check(check: Any) -> dict[str, Any]:
         return {
             "check_id": check_id_aliases.get(str(check.check_id), "runtime_check"),
-            "status": check.status,
+            "status": _safe_json_value(check.status),
             "summary": _safe_json_value(check.summary),
         }
 
     def project_message(message: dict[str, Any]) -> dict[str, Any]:
         return {
             "check_id": check_id_aliases.get(str(message.get("check_id")), "runtime_check"),
-            "status": str(message.get("status", "unknown")),
+            "status": _safe_json_value(str(message.get("status", "unknown"))),
             "summary": _safe_json_value(
                 str(message.get("summary", "Runtime check reported an issue."))
             ),
@@ -330,9 +331,9 @@ def project_preflight(value: PreflightStatus) -> dict[str, Any]:
 
     return {
         "ok": value.ok,
-        "service": value.service,
-        "status": value.status,
-        "readiness": value.readiness,
+        "service": _safe_json_value(value.service),
+        "status": _safe_json_value(value.status),
+        "readiness": _safe_json_value(value.readiness),
         "summary": _safe_json_value(value.summary),
         "catalog": _safe_json_value(catalog) if isinstance(catalog, dict) else {},
         "checks": [project_check(check) for check in value.checks],
@@ -348,7 +349,7 @@ def project_tool(value: ToolSummary | ToolDetail) -> dict[str, Any]:
         "title": _safe_json_value(value.title),
         "description": _safe_json_value(value.description),
         "builtin": value.builtin,
-        "tags": list(value.tags),
+        "tags": _safe_json_value(value.tags),
         "console_defaults": _safe_json_value(value.console_defaults),
     }
     if isinstance(value, ToolDetail):
@@ -542,41 +543,163 @@ def _open_descriptor_posix(root: Path, parts: tuple[str, ...], *, namespace: str
 
 
 def _open_descriptor_fallback(root: Path, parts: tuple[str, ...], *, namespace: str) -> int:
-    candidate = root.joinpath(*parts)
-    current = Path(root.anchor) if root.anchor else Path()
-    for component in (*root.parts[1:], *parts):
-        current = current / component
-        try:
-            metadata = current.lstat()
-        except FileNotFoundError:
-            raise
-        if stat.S_ISLNK(metadata.st_mode) or _is_reparse_point(metadata):
-            raise _read_error(namespace, "path_rejected", "Registered artifact path failed safety validation.")
-    final_metadata = candidate.lstat()
-    if not stat.S_ISREG(final_metadata.st_mode):
-        raise _read_error(namespace, "not_regular", "Registered artifact must be a regular file.")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
-    descriptor = os.open(candidate, flags)
-    opened_metadata = os.fstat(descriptor)
+    if os.name != "nt":
+        raise _read_error(
+            namespace,
+            "path_rejected",
+            "Registered artifact path failed safety validation.",
+        )
+
+    import msvcrt
+
+    if not root.anchor or not root.is_absolute():
+        raise _read_error(
+            namespace,
+            "path_rejected",
+            "Registered artifact path failed safety validation.",
+        )
+
+    parent_handles: list[int] = []
+    final_handle: int | None = None
     try:
-        current_metadata = candidate.lstat()
-        if (
-            stat.S_ISLNK(current_metadata.st_mode)
-            or _is_reparse_point(current_metadata)
-            or (opened_metadata.st_dev, opened_metadata.st_ino)
-            != (current_metadata.st_dev, current_metadata.st_ino)
-        ):
-            raise _read_error(namespace, "path_rejected", "Registered artifact changed during safety validation.")
-    except Exception:
-        os.close(descriptor)
-        raise
-    return descriptor
+        current = Path(root.anchor)
+        parent_handles.append(
+            _windows_open_handle(current, expect_directory=True, namespace=namespace)
+        )
+        for component in (*root.parts[1:], *parts[:-1]):
+            current /= component
+            parent_handles.append(
+                _windows_open_handle(current, expect_directory=True, namespace=namespace)
+            )
+
+        final_path = current / parts[-1]
+        final_handle = _windows_open_handle(
+            final_path,
+            expect_directory=False,
+            namespace=namespace,
+        )
+        descriptor = msvcrt.open_osfhandle(
+            final_handle,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0),
+        )
+        final_handle = None
+        return descriptor
+    finally:
+        if final_handle is not None:
+            _windows_close_handle(final_handle)
+        for handle in reversed(parent_handles):
+            _windows_close_handle(handle)
 
 
-def _is_reparse_point(metadata: os.stat_result) -> bool:
-    attributes = getattr(metadata, "st_file_attributes", 0)
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-    return bool(attributes & reparse_flag)
+def _windows_open_handle(
+    path: Path,
+    *,
+    expect_directory: bool,
+    namespace: str,
+) -> int:
+    """Open one Windows path component without traversing its final reparse point."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    file_read_attributes = 0x00000080
+    generic_read = 0x80000000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    open_existing = 3
+    file_flag_open_reparse_point = 0x00200000
+    file_flag_backup_semantics = 0x02000000
+    file_attribute_directory = 0x00000010
+    file_attribute_device = 0x00000040
+    file_attribute_reparse_point = 0x00000400
+    file_attribute_tag_info_class = 9
+
+    class FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = [
+            ("file_attributes", wintypes.DWORD),
+            ("reparse_tag", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFileInformationByHandleEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
+
+    handle = kernel32.CreateFileW(
+        str(path),
+        file_read_attributes if expect_directory else generic_read,
+        file_share_read | file_share_write,
+        None,
+        open_existing,
+        file_flag_open_reparse_point | file_flag_backup_semantics,
+        None,
+    )
+    invalid_handle_value = ctypes.c_void_p(-1).value
+    if handle == invalid_handle_value:
+        error = ctypes.get_last_error()
+        if error in {2, 3}:
+            raise FileNotFoundError(error, "Windows path component is missing")
+        raise OSError(error, "Windows path component could not be opened safely")
+
+    raw_handle = int(handle)
+    info = FileAttributeTagInfo()
+    if not kernel32.GetFileInformationByHandleEx(
+        handle,
+        file_attribute_tag_info_class,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    ):
+        error = ctypes.get_last_error()
+        _windows_close_handle(raw_handle)
+        raise OSError(error, "Windows path component metadata could not be read safely")
+
+    attributes = int(info.file_attributes)
+    if attributes & file_attribute_reparse_point:
+        _windows_close_handle(raw_handle)
+        raise _read_error(
+            namespace,
+            "path_rejected",
+            "Registered artifact path failed safety validation.",
+        )
+    if expect_directory and not attributes & file_attribute_directory:
+        _windows_close_handle(raw_handle)
+        raise _read_error(
+            namespace,
+            "path_rejected",
+            "Registered artifact path failed safety validation.",
+        )
+    if not expect_directory and attributes & (file_attribute_directory | file_attribute_device):
+        _windows_close_handle(raw_handle)
+        raise _read_error(
+            namespace,
+            "not_regular",
+            "Registered artifact must be a regular file.",
+        )
+    return raw_handle
+
+
+def _windows_close_handle(handle: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle(handle)
 
 
 def _validate_json_complexity(payload: dict[str, Any], *, namespace: str) -> None:
@@ -606,6 +729,12 @@ def _validate_json_complexity(payload: dict[str, Any], *, namespace: str) -> Non
             stack.extend((item, depth + 1) for item in value)
         elif isinstance(value, str) and len(value) > MAX_JSON_STRING_LENGTH:
             raise _read_error(namespace, "string_limit_exceeded", "Registered JSON artifact contains an oversized string.", status_code=422)
+        elif isinstance(value, float) and not math.isfinite(value):
+            raise _read_error(
+                namespace,
+                "invalid_json",
+                "Registered artifact is not valid JSON.",
+            )
 
 
 def _safe_json_value(value: Any) -> Any:
@@ -623,13 +752,34 @@ def _safe_json_value(value: Any) -> Any:
         if _looks_like_absolute_path(value) or _looks_sensitive(value):
             return "[redacted]"
         return value
+    if isinstance(value, float) and not math.isfinite(value):
+        return "[unsupported]"
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return "[unsupported]"
 
 
 def _forbidden_key(key: str) -> bool:
-    normalized = key.strip().lower().replace("-", "_")
+    normalized = re.sub(r"[^a-z0-9]+", "_", key.strip().lower()).strip("_")
+    compact = normalized.replace("_", "")
+    if any(
+        marker in compact
+        for marker in (
+            "password",
+            "passwd",
+            "passphrase",
+            "credential",
+            "cookie",
+            "session",
+            "authheader",
+            "authorization",
+            "apikey",
+            "accesskey",
+            "privatekey",
+            "clientsecret",
+        )
+    ):
+        return True
     if normalized in {
         "path",
         "paths",
@@ -647,24 +797,83 @@ def _forbidden_key(key: str) -> bool:
         "secret",
         "token",
         "api_key",
+        "access_key",
+        "private_key",
+        "client_secret",
+        "password",
+        "passwd",
+        "passphrase",
+        "credential",
+        "credentials",
+        "cookie",
+        "cookies",
+        "session",
+        "session_id",
+        "sessionid",
+        "auth",
+        "authentication",
         "authorization",
+        "header",
         "headers",
+        "private",
     }:
         return True
-    return normalized.endswith(("_path", "_paths", "_root", "_token", "_secret", "_api_key"))
+    if re.search(
+        r"(?:^|_)(?:passwords?|passwd|passphrases?|credentials?|cookies?|sessions?|"
+        r"auth(?:entication|orization)?|headers?)(?:_|$)",
+        normalized,
+    ):
+        return True
+    return normalized.endswith(
+        (
+            "_path",
+            "_paths",
+            "_root",
+            "_token",
+            "_secret",
+            "_api_key",
+            "_access_key",
+            "_private_key",
+        )
+    )
 
 
 def _looks_like_absolute_path(value: str) -> bool:
     candidate = value.strip()
     return (
-        candidate.startswith(("/", "\\\\", "file://"))
-        or bool(re.match(r"^[A-Za-z]:[\\/]", candidate))
+        bool(re.search(r"(?i)file:(?://|\\\\)", candidate))
+        or bool(re.search(r"[A-Za-z]:[\\/]", candidate))
+        or bool(re.search(r"(?:\\\\|(?<!:)//)[^\\/\s]+[\\/][^\\/\s]+", candidate))
+        or bool(re.search(r"(?:^|[^A-Za-z0-9._~/])/(?![/\s])", candidate))
     )
 
 
 def _looks_sensitive(value: str) -> bool:
     lowered = value.lower()
-    return bool(re.search(r"\b(?:secret|token|api[-_ ]?key)\b", lowered)) or "bearer " in lowered
+    if re.search(
+        r"\b(?:secret|token|api[-_ ]?key|password|passphrase|credentials?|cookies?|sessionid)\b",
+        lowered,
+    ):
+        return True
+    return bool(
+        re.search(
+            r"(?i)(?:"
+            r"\bbearer\s+\S+|"
+            r"\bsessionid\s*[:=]\s*\S+|"
+            r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{8,}|"
+            r"(?<![A-Za-z0-9])gh[po]_[A-Za-z0-9]{8,}|"
+            r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{8,}|"
+            r"(?<![A-Za-z0-9])xox[a-z]-[A-Za-z0-9-]{8,}|"
+            r"(?<![A-Za-z0-9])AKIA[A-Z0-9]{16}|"
+            r"(?<![A-Za-z0-9])AIza[A-Za-z0-9_-]{20,}"
+            r")",
+            value,
+        )
+    )
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
 
 
 def _read_error(namespace: str, suffix: str, message: str, *, status_code: int = 400) -> ArtifactProjectionReadError:

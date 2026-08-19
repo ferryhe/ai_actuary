@@ -12,7 +12,23 @@ import pytest
 
 from developer_workflows.ai_actuary_developer import tools as adk_tools
 from reserving_workflow.adapters.control_plane import ReadOnlyControlPlaneClient
+from reserving_workflow.adapters.control_plane.contracts import (
+    ArtifactMetadata,
+    ArtifactProjection,
+    ToolSummary,
+    Workflow,
+)
+from reserving_workflow.adapters.control_plane.projections import (
+    project_artifact_metadata,
+    project_artifact_projection,
+    project_event,
+    project_review,
+    project_run,
+    project_tool,
+    project_workflow,
+)
 from reserving_workflow.api.app import ApiSettings, create_app
+from reserving_workflow.contracts import Review, Run, RunEvent
 from reserving_workflow.storage.local import LocalRunStore
 
 
@@ -303,6 +319,73 @@ def test_adk_tools_redact_sensitive_values_even_in_allowed_fields(tool_name: str
     assert result["ok"] is True
     assert sentinel not in serialized
     assert "C:/private" not in serialized
+
+
+def test_all_projection_entry_points_redact_embedded_paths_and_credentials() -> None:
+    unsafe_values = (
+        "prefix C:\\private\\record.json suffix",
+        "prefix \\\\server\\share\\record.json suffix",
+        "prefix file:///var/lib/private/record.json suffix",
+        "prefix /var/lib/private/record.json suffix",
+        "ghp_FAKE0000000000000000000000000000000000",
+        "Bearer FAKE000000000000000000000000",
+        "sessionid=FAKE000000000000000000000000",
+    )
+    outputs = (
+        project_run(Run(run_id="run-1", status="completed", summary=unsafe_values[0])),
+        project_event(
+            RunEvent(
+                type="run.completed",
+                run_id="run-1",
+                status="completed",
+                summary=unsafe_values[1],
+            )
+        ),
+        project_review(
+            Review(
+                status="review_required",
+                review_required=True,
+                reason_codes=[unsafe_values[2]],
+            )
+        ),
+        project_tool(
+            ToolSummary(
+                tool_id="tool-1",
+                method="method-1",
+                title="Title",
+                description="Description",
+                tags=[unsafe_values[3]],
+            )
+        ),
+        project_workflow(
+            Workflow(
+                workflow_id="workflow-1",
+                title="Title",
+                description=unsafe_values[4],
+                step_count=0,
+            )
+        ),
+        project_artifact_metadata(
+            ArtifactMetadata(
+                artifact_id="validated_input",
+                label=unsafe_values[5],
+                present=True,
+            )
+        ),
+        project_artifact_projection(
+            ArtifactProjection(
+                run_id="run-1",
+                artifact_id="validated_input",
+                status="available",
+                provenance="deterministic",
+                data={"inputs": {"note": unsafe_values[6]}},
+            )
+        ),
+    )
+
+    serialized = json.dumps(outputs)
+    assert not any(value in serialized for value in unsafe_values)
+    assert serialized.count("[redacted]") == len(unsafe_values)
 
 
 def _snapshot(roots: list[Path]) -> tuple[tuple[str, bool, tuple[tuple[str, str], ...]], ...]:

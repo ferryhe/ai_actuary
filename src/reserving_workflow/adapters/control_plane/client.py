@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from typing import Any, TypeVar
@@ -258,18 +259,40 @@ class ReadOnlyControlPlaneClient:
                 message="Control plane response was not valid UTF-8.",
             ) from exc
         try:
-            payload = json.loads(text)
-        except (json.JSONDecodeError, RecursionError) as exc:
+            payload = json.loads(text, parse_constant=_reject_json_constant)
+        except (json.JSONDecodeError, RecursionError, ValueError) as exc:
             raise ControlPlaneContractError(
                 code="invalid_json",
                 message="Control plane response was not valid JSON.",
             ) from exc
+        if _contains_non_finite_number(payload):
+            raise ControlPlaneContractError(
+                code="invalid_json",
+                message="Control plane response was not valid JSON.",
+            )
         if not isinstance(payload, dict):
             raise ControlPlaneContractError(
                 code="invalid_shape",
                 message="Control plane response must be a JSON object.",
             )
         return payload
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _contains_non_finite_number(payload: Any) -> bool:
+    stack = [payload]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, float) and not math.isfinite(value):
+            return True
+        if isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+    return False
 
 
 def _identifier(value: str, *, field_name: str) -> str:

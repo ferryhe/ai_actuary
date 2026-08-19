@@ -250,6 +250,30 @@ def test_client_errors_are_stable_and_redacted(response: httpx.Response, expecte
     assert response.text not in str(error)
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        b'{"ok":true,"value":' + (b"9" * 5_000) + b"}",
+        b'{"ok":true,"value":NaN}',
+        b'{"ok":true,"value":Infinity}',
+        b'{"ok":true,"value":-Infinity}',
+        b'{"ok":true,"value":1e999}',
+    ],
+    ids=("oversized-integer", "nan", "infinity", "negative-infinity", "overflow"),
+)
+def test_client_rejects_invalid_and_non_finite_json_numbers(content: bytes) -> None:
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=content)),
+        max_get_attempts=1,
+    )
+
+    with pytest.raises(ControlPlaneError) as exc_info:
+        client.get_health()
+
+    assert exc_info.value.code == "invalid_json"
+
+
 def test_client_maps_timeout_and_connection_failures_without_raw_exception_text() -> None:
     for failure, expected_code in (
         (httpx.ConnectError("secret-token C:/private"), "connection_failed"),
