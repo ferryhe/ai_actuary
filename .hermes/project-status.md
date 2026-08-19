@@ -64,6 +64,18 @@ Conclusion: PR7/PR8 are not worth continuing right now, so the autonomous rollou
 
 Next safe action: reopen PR7 only for a persistent-service/concurrency requirement; reopen PR8 only for a real MCP multi-agent discovery requirement.
 
+## ADK Multi-PR Route — PR2 Delivery (2026-08-19)
+
+- Scope: PR2 read-only ADK control-plane adapter only; PR3–PR6 capabilities remain out of scope.
+- Branch/worktree: `feat/adk-readonly-control-plane-adapter` in isolated worktree `C:\Project\ai_actuary_pr2_adk`.
+- Baseline: `origin/main` at `1670dd7c8bb1792ed8792357168548141adac0cc`; no open pull requests at start.
+- Stage: implementation complete; logical commits and fresh-context review/test gates pending.
+- Review cycles: `0/5`.
+- Task heartbeat: `ai-actuary-pr2-delivery-heartbeat` is `ACTIVE`, scoped to this PR2 delivery, and must be deleted after merge/cleanup or a confirmed stop-rule blocker.
+- TDD evidence: first shared-client collection failed with the expected missing-package error; final focused suite passed (`143 passed, 6 skipped`) and full suite passed (`322 passed, 10 skipped`).
+- Platform coverage note: POSIX FIFO/device/descriptor-race checks are present but skip on Windows and must run in Linux CI.
+- Updated: `2026-08-19T18:05:18.1966082-04:00`.
+
 ## ADK Multi-PR Route — PR1 Delivery Record — 2026-08-19
 
 - Base branch: `main`
