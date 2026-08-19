@@ -753,6 +753,327 @@ def test_post_run_executes_minimax_experience_study_tool(tmp_path):
     assert artifact_panel["decision_artifact_refs"] == []
 
 
+def test_experience_study_result_projection(tmp_path):
+    client = _client(tmp_path)
+    run = client.post(
+        "/runs",
+        json={
+            "case_id": "minimax-result-projection",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small", "dimensions": ["product"]},
+            "background": False,
+        },
+    ).json()
+
+    response = client.get(f"/runs/{run['run_id']}/results")
+
+    assert response.status_code == 200
+    panel = response.json()
+    assert panel["status"] == "available"
+    assert panel["tool_id"] == "minimax_experience_study_tool"
+    assert panel["model"] == "MiniMax-M3"
+    assert panel["method"] == "grouped_actual_to_expected"
+    assert panel["result_count"] == 8
+    assert panel["population_id"] == "Total"
+    assert panel["period"] == "2018-2019"
+    assert len(panel["results"]) == 8
+    assert panel["narrative_summary"].startswith("MiniMax-M3 produced 8")
+    assert len(panel["key_points"]) == 2
+    assert str(tmp_path) not in json.dumps(panel)
+
+    term_count = [
+        item
+        for item in panel["results"]
+        if item["group_values"] == [["product", "Term"]]
+        and item["metric_kind"] == "count"
+    ]
+    term_amount = [
+        item
+        for item in panel["results"]
+        if item["group_values"] == [["product", "Term"]]
+        and item["metric_kind"] == "amount"
+    ]
+    whole = [
+        item
+        for item in panel["results"]
+        if item["group_values"] == [["product", "Whole"]]
+    ]
+    assert [item["ratio"] for item in term_count] == ["1.5", "1.5"]
+    assert [item["ratio"] for item in term_amount] == ["1.25", "1.2"]
+    assert {item["reason_code"] for item in whole} == {"zero_expected_denominator"}
+    assert all(item["ratio"] is None for item in whole)
+
+
+def test_console_state_contains_experience_study_results(tmp_path):
+    client = _client(tmp_path)
+    run = client.post(
+        "/runs",
+        json={
+            "case_id": "minimax-console-results",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small"},
+        },
+    ).json()
+
+    response = client.get(f"/console/state?run_id={run['run_id']}")
+
+    assert response.status_code == 200
+    result_panel = response.json()["result_panel"]
+    assert result_panel["status"] == "available"
+    assert result_panel["result_count"] == 8
+    assert len(result_panel["results"]) == 8
+    assert result_panel["narrative_summary"].startswith("MiniMax-M3 produced 8")
+
+
+def test_result_projection_rejects_out_of_root_artifact(tmp_path):
+    client = _client(tmp_path)
+    run = client.post(
+        "/runs",
+        json={
+            "case_id": "minimax-out-of-root-result",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small"},
+        },
+    ).json()
+    artifact_root = Path(client.get(f"/runs/{run['run_id']}").json()["run"]["artifact_root"])
+    outside = tmp_path / "outside-result.json"
+    outside.write_text('{"results": [{"ratio": "999"}]}', encoding="utf-8")
+    manifest_path = artifact_root / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifact_paths"]["deterministic_result"] = str(outside)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    response = client.get(f"/runs/{run['run_id']}/results")
+
+    assert response.status_code == 200
+    panel = response.json()
+    assert panel["status"] == "error"
+    assert panel["results"] == []
+    assert any(
+        error["artifact_id"] == "deterministic_result"
+        and error["code"] == "artifact_path_rejected"
+        for error in panel["errors"]
+    )
+    serialized = json.dumps(panel)
+    assert str(outside) not in serialized
+    assert "999" not in serialized
+
+
+def test_result_projection_handles_missing_artifact(tmp_path):
+    client = _client(tmp_path)
+    run = client.post(
+        "/runs",
+        json={
+            "case_id": "minimax-missing-result",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small"},
+        },
+    ).json()
+    artifact_root = Path(client.get(f"/runs/{run['run_id']}").json()["run"]["artifact_root"])
+    (artifact_root / "deterministic_result.json").unlink()
+
+    response = client.get(f"/runs/{run['run_id']}/results")
+
+    assert response.status_code == 200
+    panel = response.json()
+    assert panel["status"] == "error"
+    assert panel["results"] == []
+    assert any(
+        error["artifact_id"] == "deterministic_result"
+        and error["code"] == "artifact_missing"
+        for error in panel["errors"]
+    )
+    assert str(artifact_root) not in json.dumps(panel)
+
+
+def test_result_projection_handles_corrupt_artifact_without_losing_valid_results(tmp_path):
+    client = _client(tmp_path)
+    run = client.post(
+        "/runs",
+        json={
+            "case_id": "minimax-corrupt-narrative",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small"},
+        },
+    ).json()
+    artifact_root = Path(client.get(f"/runs/{run['run_id']}").json()["run"]["artifact_root"])
+    (artifact_root / "narrative_draft.json").write_text("{not-json", encoding="utf-8")
+
+    response = client.get(f"/runs/{run['run_id']}/results")
+
+    assert response.status_code == 200
+    panel = response.json()
+    assert panel["status"] == "partial"
+    assert len(panel["results"]) == 8
+    assert panel["narrative_summary"] == "unavailable"
+    assert any(
+        error["artifact_id"] == "narrative_draft"
+        and error["code"] == "artifact_unreadable"
+        for error in panel["errors"]
+    )
+    assert str(artifact_root) not in json.dumps(panel)
+
+
+def test_result_projection_rejects_invalid_deterministic_shape(tmp_path):
+    client = _client(tmp_path)
+    run = client.post(
+        "/runs",
+        json={
+            "case_id": "minimax-invalid-result-shape",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small"},
+        },
+    ).json()
+    artifact_root = Path(client.get(f"/runs/{run['run_id']}").json()["run"]["artifact_root"])
+    (artifact_root / "deterministic_result.json").write_text("{}", encoding="utf-8")
+
+    panel = client.get(f"/runs/{run['run_id']}/results").json()
+
+    assert panel["status"] == "error"
+    assert panel["results"] == []
+    assert panel["result_count"] == "unavailable"
+    assert any(
+        error["artifact_id"] == "deterministic_result"
+        and error["code"] == "artifact_invalid_shape"
+        for error in panel["errors"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error_code"),
+    [
+        ("run_id", "other-run", "artifact_run_mismatch"),
+        ("tool_id", "chainladder", "artifact_tool_mismatch"),
+    ],
+)
+def test_result_projection_rejects_mismatched_artifact_identity(
+    tmp_path, field, value, error_code
+):
+    client = _client(tmp_path)
+    run = client.post(
+        "/runs",
+        json={
+            "case_id": f"minimax-mismatched-{field}",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small"},
+        },
+    ).json()
+    artifact_root = Path(client.get(f"/runs/{run['run_id']}").json()["run"]["artifact_root"])
+    result_path = artifact_root / "deterministic_result.json"
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    payload[field] = value
+    result_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    panel = client.get(f"/runs/{run['run_id']}/results").json()
+
+    assert panel["status"] == "error"
+    assert panel["results"] == []
+    assert panel["result_count"] == "unavailable"
+    assert any(
+        error["artifact_id"] == "deterministic_result"
+        and error["code"] == error_code
+        for error in panel["errors"]
+    )
+
+
+def test_result_projection_rejects_symlink_escape(tmp_path):
+    client = _client(tmp_path)
+    run = client.post(
+        "/runs",
+        json={
+            "case_id": "minimax-symlink-result",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small"},
+        },
+    ).json()
+    artifact_root = Path(client.get(f"/runs/{run['run_id']}").json()["run"]["artifact_root"])
+    outside = tmp_path / "symlink-target.json"
+    outside.write_text('{"results": [{"ratio": "999"}]}', encoding="utf-8")
+    link = artifact_root / "linked-result.json"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"File symlinks unavailable in this test environment: {exc}")
+    manifest_path = artifact_root / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifact_paths"]["deterministic_result"] = link.name
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    response = client.get(f"/runs/{run['run_id']}/results")
+
+    assert response.status_code == 200
+    panel = response.json()
+    assert panel["status"] == "error"
+    assert panel["results"] == []
+    assert any(error["code"] == "artifact_path_rejected" for error in panel["errors"])
+    assert str(outside) not in json.dumps(panel)
+    assert "999" not in json.dumps(panel)
+
+
+def test_result_projection_enforces_json_size_limit(tmp_path):
+    client = _client(tmp_path)
+    run = client.post(
+        "/runs",
+        json={
+            "case_id": "minimax-large-result-artifact",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small"},
+        },
+    ).json()
+    artifact_root = Path(client.get(f"/runs/{run['run_id']}").json()["run"]["artifact_root"])
+    (artifact_root / "deterministic_result.json").write_text(
+        " " * (api_app.MAX_RESULT_ARTIFACT_BYTES + 1),
+        encoding="utf-8",
+    )
+
+    panel = client.get(f"/runs/{run['run_id']}/results").json()
+
+    assert panel["status"] == "error"
+    assert panel["results"] == []
+    assert any(error["code"] == "artifact_size_exceeded" for error in panel["errors"])
+
+
+def test_result_projection_enforces_result_count_limit(tmp_path):
+    client = _client(tmp_path)
+    run = client.post(
+        "/runs",
+        json={
+            "case_id": "minimax-large-result-count",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small"},
+        },
+    ).json()
+    artifact_root = Path(client.get(f"/runs/{run['run_id']}").json()["run"]["artifact_root"])
+    result_path = artifact_root / "deterministic_result.json"
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    payload["result_count"] = api_app.MAX_PROJECTED_RESULTS + 1
+    payload["results"] = [{} for _ in range(api_app.MAX_PROJECTED_RESULTS + 1)]
+    result_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    panel = client.get(f"/runs/{run['run_id']}/results").json()
+
+    assert panel["status"] == "error"
+    assert panel["results"] == []
+    assert any(error["code"] == "result_limit_exceeded" for error in panel["errors"])
+
+
+def test_chainladder_console_remains_backward_compatible(tmp_path):
+    _reset_fake_runner_calls()
+    client = _client(tmp_path)
+    run = client.post("/runs", json={"case_id": "chainladder-result-compat"}).json()
+
+    results_response = client.get(f"/runs/{run['run_id']}/results")
+    console_response = client.get(f"/console/state?run_id={run['run_id']}")
+
+    assert results_response.status_code == 200
+    assert results_response.json()["status"] == "not_available"
+    assert results_response.json()["tool_id"] == "chainladder"
+    assert console_response.status_code == 200
+    state = console_response.json()
+    assert state["result_panel"]["status"] == "not_available"
+    assert state["artifact_panel"]["status"] == "ok"
+
+
 def test_minimax_experience_tool_supports_background_execution_and_rerun(tmp_path):
     scheduled = []
 
@@ -971,6 +1292,7 @@ def test_console_shell_serves_operator_console_html(tmp_path):
     assert "AI Actuary Operator Console" in html
     assert "Run Queue" in html
     assert "Timeline" in html
+    assert "Experience Study Results" in html
     assert "Artifact Evidence Panel" in html
     assert "Review Panel" in html
     assert "Review Inbox" in html
@@ -991,6 +1313,7 @@ def test_console_shell_serves_operator_console_html(tmp_path):
     assert "submitReviewDecision(" in html
     assert "loadToolCatalog()" in html
     assert "renderArtifactPanel(" in html
+    assert "renderResultPanel(" in html
     assert "renderReviewPanel(" in html
     assert "renderAdaptiveValue(" in html
     assert "Output" in html
@@ -1060,6 +1383,11 @@ def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path)
     assert "Export handoff report" in html
     assert "Decision / Export Evidence" in html
     assert "Raw artifact panel JSON" in html
+    assert "Narrative summary" in html
+    assert "A/E Ratio" in html
+    assert "zero_expected_denominator" not in html
+    assert "projectionText(result.ratio)" in html
+    assert "result.actual / result.expected" not in html
 
 
 def test_console_state_exposes_symphony_style_panels(tmp_path):
