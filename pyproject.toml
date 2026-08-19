@@ -29,5 +29,8 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"reserving_workflow.interfaces.operator_console" = ["console.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

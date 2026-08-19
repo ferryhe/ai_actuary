@@ -1,0 +1,1071 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Actuary Operator Console</title>
+  <style>
+    :root { color-scheme: light; --border: #d9e2ec; --muted: #52606d; --accent: #2457c5; --danger: #b42318; --ok: #027a48; }
+    body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f7fb; color: #102a43; }
+    header { padding: 24px 32px; background: #102a43; color: white; }
+    header p { margin: 8px 0 0; color: #bcccdc; }
+    main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px; }
+    section { background: white; border: 1px solid var(--border); border-radius: 12px; padding: 16px; box-shadow: 0 1px 2px rgba(16, 42, 67, 0.08); }
+    .workspace { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    h1, h2 { margin: 0 0 12px; }
+    h2 { font-size: 16px; }
+    label { display: block; margin: 10px 0; font-size: 13px; color: var(--muted); }
+    input, select, textarea { box-sizing: border-box; width: 100%; margin-top: 4px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; color: #102a43; background: white; font: inherit; }
+    input[type="checkbox"] { width: auto; margin-right: 6px; }
+    button, .pill { border: 1px solid var(--border); border-radius: 999px; padding: 6px 10px; background: #f8fafc; cursor: pointer; }
+    button.primary { border-color: var(--accent); background: var(--accent); color: white; }
+    button:disabled { cursor: not-allowed; opacity: 0.55; }
+    .run-card { display: block; width: 100%; margin: 0 0 8px; text-align: left; border-radius: 10px; }
+    .run-card[selected] { border-color: var(--accent); color: var(--accent); }
+    .review-link { box-sizing: border-box; border: 1px solid var(--border); padding: 8px 10px; background: #f8fafc; color: #102a43; text-decoration: none; }
+    .review-link:hover, .review-link:focus { border-color: var(--accent); color: var(--accent); }
+    .status { min-height: 18px; margin: 8px 0 16px; color: var(--muted); font-size: 13px; }
+    .status.error { color: var(--danger); }
+    .status.ok { color: var(--ok); }
+    pre, .panel-body { white-space: pre-wrap; word-break: break-word; background: #f8fafc; border-radius: 8px; padding: 12px; max-height: 360px; overflow: auto; }
+    .timeline-list { margin: 0; padding: 0; list-style: none; }
+    .timeline-list li { padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .timeline-list li:last-child { border-bottom: 0; }
+    .event-type { color: var(--accent); font-weight: 700; }
+    .event-time { display: block; color: var(--muted); font-size: 12px; }
+    .empty { color: var(--muted); }
+    .artifact-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; margin-bottom: 12px; }
+    .artifact-summary strong { display: block; font-size: 12px; color: var(--muted); font-weight: 600; }
+    .artifact-summary span { display: block; margin-top: 2px; }
+    .artifact-group { margin-top: 14px; }
+    .artifact-group h3 { margin: 0 0 8px; font-size: 14px; }
+    .artifact-list { display: grid; gap: 8px; }
+    .artifact-card { border: 1px solid var(--border); border-radius: 10px; padding: 10px; background: #fbfcfe; }
+    .artifact-card header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; padding: 0; background: transparent; color: inherit; }
+    .artifact-card h4 { margin: 0; font-size: 14px; color: #102a43; }
+    .artifact-chip { border-radius: 999px; padding: 2px 8px; font-size: 12px; border: 1px solid var(--border); background: white; }
+    .artifact-chip.present { color: var(--ok); border-color: #a6f4c5; background: #ecfdf3; }
+    .artifact-chip.missing { color: var(--danger); border-color: #fda29b; background: #fef3f2; }
+    .artifact-meta { font-size: 12px; color: var(--muted); }
+    .artifact-gaps { margin: 12px 0 0; padding-left: 18px; }
+    .artifact-gaps li { margin: 4px 0; }
+    details.raw-json { margin-top: 14px; }
+    .result-section { grid-column: 1 / -1; }
+    .result-panel { display: grid; gap: 14px; }
+    .result-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px 12px; }
+    .result-summary strong { display: block; font-size: 12px; color: var(--muted); font-weight: 600; }
+    .result-summary span { display: block; margin-top: 2px; word-break: break-word; }
+    .result-narrative { margin: 0; color: #243b53; }
+    .result-key-points { margin: 0; padding-left: 20px; }
+    .result-errors { margin: 0; padding: 10px 10px 10px 28px; border: 1px solid #fda29b; border-radius: 8px; background: #fef3f2; color: var(--danger); }
+    .result-table-wrap { overflow-x: auto; }
+    .result-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .result-table th, .result-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+    .result-table th { color: var(--muted); font-size: 12px; font-weight: 700; }
+    .result-table td:last-child { font-weight: 600; }
+    .review-section { grid-column: 1 / -1; }
+    .review-panel { display: grid; gap: 14px; }
+    .review-overview, .review-block, .review-decision-card { border: 1px solid var(--border); border-radius: 12px; background: #fbfcfe; padding: 14px; }
+    .review-overview header, .review-block header, .review-decision-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding: 0; background: transparent; color: inherit; }
+    .review-overview h3, .review-block h3, .review-decision-card h3 { margin: 0; font-size: 15px; }
+    .review-overview p, .review-block header p, .review-decision-card header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+    .review-status-chip { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 999px; padding: 3px 9px; background: white; color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .review-status-chip.passed, .review-status-chip.approved { border-color: #a6f4c5; background: #ecfdf3; color: var(--ok); }
+    .review-status-chip.pending, .review-status-chip.review-required, .review-status-chip.changes-requested { border-color: #fedf89; background: #fffaeb; color: #b54708; }
+    .review-status-chip.failed, .review-status-chip.rejected { border-color: #fda29b; background: #fef3f2; color: var(--danger); }
+    .review-meta-grid, .review-decision-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+    .review-meta-item, .adaptive-field { min-width: 0; }
+    .review-meta-item strong, .adaptive-field > strong { display: block; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; }
+    .review-meta-item span, .adaptive-field > span { display: block; margin-top: 3px; word-break: break-word; }
+    .review-block.output { border-left: 4px solid var(--accent); }
+    .review-block.suggestion { border-left: 4px solid #7f56d9; }
+    .review-block.human { border-left: 4px solid #dc6803; }
+    .adaptive-object { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
+    .adaptive-field.nested { grid-column: 1 / -1; border-top: 1px solid var(--border); padding-top: 8px; }
+    .adaptive-list { margin: 5px 0 0; padding-left: 20px; }
+    .adaptive-list li { margin: 5px 0; }
+    .review-checklist { display: grid; gap: 8px; }
+    .review-check { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start; border: 1px solid var(--border); border-radius: 9px; padding: 10px; background: white; }
+    .review-check-index { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: #fff4e5; color: #b54708; font-size: 12px; font-weight: 700; }
+    .review-check strong { display: block; font-size: 13px; }
+    .review-check p { margin: 3px 0 0; color: var(--muted); font-size: 13px; }
+    .review-reasons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .review-reason { border-radius: 999px; padding: 3px 8px; background: #fff4e5; color: #b54708; font-size: 12px; }
+    .review-decision-card { margin-top: 14px; }
+    .review-decision-card button { margin-top: 10px; }
+    .review-decision-card textarea { resize: vertical; min-height: 76px; }
+    .review-raw pre { max-height: 320px; }
+    @media (max-width: 900px) { main, .workspace { grid-template-columns: 1fr; } }
+    @media (max-width: 600px) { .result-summary, .review-meta-grid, .review-decision-grid, .adaptive-object { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>AI Actuary Operator Console</h1>
+    <p>Symphony-style shell over runs, timeline events, artifacts, review packets, actions, and operator handoff export. Data source: <code>/console/state</code>.</p>
+  </header>
+  <main>
+    <section aria-label="Run Queue">
+      <h2>Create Governed Run</h2>
+      <form id="create-run-form" onsubmit="createRun(event)">
+        <label>case_id<input name="case_id" required placeholder="demo-case"></label>
+        <label>sample_name<input id="sample-name-input" name="sample_name" value="RAA"></label>
+        <label>tool
+          <select id="tool-selector" name="tool_id" data-default-tool-id="chainladder" onchange="applyToolDefaults()">
+            <option value="chainladder">Loading tool catalog…</option>
+          </select>
+        </label>
+        <label>operator_id<input name="operator_id" value="local-actuary"></label>
+        <label>workspace_id<input name="workspace_id" value="default-workspace"></label>
+        <label>created_by<input name="created_by" placeholder="defaults to operator_id"></label>
+        <label>review_threshold_origin_count<input id="review-threshold-input" name="review_threshold_origin_count" type="number" min="0" step="1" placeholder="optional"></label>
+        <label><input name="background" type="checkbox" checked> background</label>
+        <button id="create-run-button" class="primary" type="submit">Create run</button>
+      </form>
+      <div id="operation-status" class="status" aria-live="polite"></div>
+      <h2>Workspace Filters</h2>
+      <form id="console-filter-form" onsubmit="applyConsoleFilters(event)">
+        <label>operator filter
+          <select id="operator-filter" name="operator_id">
+            <option value="">Loading…</option>
+          </select>
+        </label>
+        <label>workspace filter
+          <select id="workspace-filter" name="workspace_id">
+            <option value="">Loading…</option>
+          </select>
+        </label>
+        <button type="submit">Apply filters</button>
+      </form>
+      <h2>Run Queue</h2>
+      <div id="run-queue" class="empty">Loading runs…</div>
+      <h2>Review Inbox</h2>
+      <div id="review-inbox" class="empty">Loading reviews…</div>
+    </section>
+    <div class="workspace">
+      <section aria-label="Experience Study Results" class="result-section"><h2>Experience Study Results</h2><div id="result-panel" class="result-panel">Loading…</div></section>
+      <section aria-label="Timeline"><h2>Timeline</h2><div id="timeline" class="panel-body">Loading…</div></section>
+      <section aria-label="Artifact Evidence Panel"><h2>Artifact Evidence Panel</h2><div id="artifact-panel" class="panel-body">Loading…</div></section>
+      <section aria-label="Review Panel" class="review-section">
+        <h2>Review Panel</h2>
+        <div id="review-panel" class="review-panel">Loading…</div>
+        <div class="review-decision-card">
+          <header>
+            <div><h3>Human Review Decision</h3><p>Review the output and AI guidance, then record the final human decision.</p></div>
+            <span id="review-decision-status" class="review-status-chip pending">Pending review</span>
+          </header>
+          <form id="review-decision-form" onsubmit="submitReviewDecision(event)">
+          <input id="review-id-input" name="review_id" type="hidden">
+            <div class="review-decision-grid">
+              <label>Decision
+                <select name="decision">
+                  <option value="approved">Approve</option>
+                  <option value="changes_requested">Request changes</option>
+                  <option value="rejected">Reject</option>
+                </select>
+              </label>
+              <label>Reviewer<input name="decided_by" placeholder="actuary-001"></label>
+            </div>
+            <label>Review comment<textarea name="comment" placeholder="Record the rationale, requested changes, or approval scope"></textarea></label>
+            <button id="submit-review-decision" class="primary" type="submit">Submit review decision</button>
+          </form>
+        </div>
+      </section>
+      <section aria-label="Action Panel"><h2>Action Panel</h2><div class="status">Actions include rerun and Export handoff report through <code>/runs/{run_id}/report-export</code> when a run is selected.</div><div id="action-panel" class="panel-body">Loading…</div></section>
+    </div>
+  </main>
+  <script>
+    let selectedRunId = null;
+    let pollTimer = null;
+    let pollGeneration = 0;
+    let toolCatalogById = new Map();
+    const activeEventTypes = ["run.accepted", "run.queued", "run.running"];
+    const terminalEventTypes = ["run.completed", "run.failed", "run.needs_review"];
+
+    function setOperationStatus(message, statusClass = "") {
+      const status = document.getElementById("operation-status");
+      status.textContent = message || "";
+      status.className = statusClass ? `status ${statusClass}` : "status";
+    }
+
+    function renderConsoleError(message) {
+      const queue = document.getElementById("run-queue");
+      queue.textContent = message;
+      queue.className = "empty";
+      renderTimeline([{event_type: "run.failed", summary: message}]);
+      document.getElementById("result-panel").textContent = message;
+      document.getElementById("artifact-panel").textContent = message;
+      document.getElementById("review-panel").textContent = message;
+      document.getElementById("review-inbox").textContent = message;
+      document.getElementById("action-panel").textContent = message;
+    }
+
+    function getConsoleFilters() {
+      return {
+        operator_id: String(document.getElementById("operator-filter").value || "").trim(),
+        workspace_id: String(document.getElementById("workspace-filter").value || "").trim(),
+      };
+    }
+
+    function setFilterOptions(selectId, values, selectedValue) {
+      const select = document.getElementById(selectId);
+      select.innerHTML = "";
+      for (const value of values || []) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value;
+        if (value === selectedValue) option.selected = true;
+        select.appendChild(option);
+      }
+      if (!select.value && select.options.length) {
+        select.value = selectedValue || select.options[0].value;
+      }
+    }
+
+    function formatResponseDetail(detail) {
+      if (!detail) return "";
+      if (typeof detail === "string") return detail;
+      try {
+        return JSON.stringify(detail);
+      } catch (error) {
+        return String(detail);
+      }
+    }
+
+    async function parseJsonOrThrow(response, context) {
+      const body = await response.text();
+      let payload;
+      try {
+        payload = body ? JSON.parse(body) : {};
+      } catch (error) {
+        throw new Error(`${context} response was not valid JSON.`);
+      }
+      if (!response.ok) {
+        const detailMessage = formatResponseDetail(payload.detail);
+        const detail = detailMessage ? `: ${detailMessage}` : "";
+        throw new Error(`${context} failed (${response.status} ${response.statusText})${detail}`);
+      }
+      return payload;
+    }
+
+    async function loadToolCatalog() {
+      const selector = document.getElementById("tool-selector");
+      try {
+        const response = await fetch("/tools");
+        const payload = await parseJsonOrThrow(response, "Tool catalog");
+        const tools = payload.tools || [];
+        if (!tools.length) return;
+        toolCatalogById = new Map(tools.map((tool) => [tool.tool_id || tool.method, tool]));
+        selector.innerHTML = "";
+        for (const tool of tools) {
+          const option = document.createElement("option");
+          option.value = tool.tool_id || tool.method;
+          option.textContent = tool.title ? `${tool.title} (${tool.tool_id})` : (tool.tool_id || tool.method || "tool");
+          if ((tool.tool_id || tool.method) === selector.dataset.defaultToolId) {
+            option.selected = true;
+          }
+          selector.appendChild(option);
+        }
+        if (!selector.value && tools.length) {
+          selector.value = tools[0].tool_id || tools[0].method;
+        }
+        applyToolDefaults();
+      } catch (error) {
+        const fallback = selector.querySelector("option[value='chainladder']") || selector.options[0];
+        if (fallback) {
+          fallback.value = fallback.value || "chainladder";
+          fallback.textContent = "Chainladder (chainladder)";
+          fallback.selected = true;
+        }
+        const message = error instanceof Error ? error.message : "Tool catalog unavailable; using default tool.";
+        setOperationStatus(message, "error");
+      }
+    }
+
+    function renderTimeline(events) {
+      const timeline = document.getElementById("timeline");
+      timeline.innerHTML = "";
+      if (!events || events.length === 0) {
+        timeline.textContent = "No events recorded yet.";
+        timeline.className = "panel-body empty";
+        return;
+      }
+      timeline.className = "panel-body";
+      const list = document.createElement("ul");
+      list.className = "timeline-list";
+      for (const event of events) {
+        const item = document.createElement("li");
+        const type = document.createElement("span");
+        type.className = "event-type";
+        type.textContent = event.event_type || "run.unknown";
+        const time = document.createElement("span");
+        time.className = "event-time";
+        time.textContent = event.timestamp || "pending timestamp";
+        const summary = document.createElement("span");
+        summary.textContent = event.summary ? ` — ${event.summary}` : "";
+        item.append(type, summary, time);
+        list.appendChild(item);
+      }
+      timeline.appendChild(list);
+    }
+
+    function shouldPollEvents(events) {
+      if (!events || events.length === 0) return false;
+      if (events.some((event) => terminalEventTypes.includes(event.event_type))) return false;
+      return events.some((event) => activeEventTypes.includes(event.event_type));
+    }
+
+    function stopPolling() {
+      pollGeneration += 1;
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    }
+
+    function startPolling(runId, filterOptions = {}) {
+      stopPolling();
+      if (!runId) return;
+      selectedRunId = runId;
+      const generation = pollGeneration;
+      pollRunEvents(runId, generation, filterOptions);
+      pollTimer = setInterval(() => pollRunEvents(runId, generation, filterOptions), 2000);
+    }
+
+    async function pollRunEvents(runId, generation = pollGeneration, filterOptions = {}) {
+      const isCurrentPoll = () => generation === pollGeneration && runId === selectedRunId;
+      try {
+        const response = await fetch(`/runs/${encodeURIComponent(runId)}/events`);
+        const payload = await parseJsonOrThrow(response, "Run events");
+        if (!isCurrentPoll()) return;
+        renderTimeline(payload.events || []);
+        if (!shouldPollEvents(payload.events || [])) {
+          stopPolling();
+          await loadConsole(runId, { preservePolling: true, ...filterOptions });
+        }
+      } catch (error) {
+        if (!isCurrentPoll()) return;
+        stopPolling();
+        const message = error instanceof Error ? error.message : "Failed to poll run events.";
+        setOperationStatus(message, "error");
+      }
+    }
+
+    function renderRunQueue(state) {
+      const queue = document.getElementById("run-queue");
+      queue.innerHTML = "";
+      if (!state.run_cards.length) {
+        queue.textContent = "No runs recorded yet.";
+        queue.className = "empty";
+        return;
+      }
+      queue.className = "";
+      for (const card of state.run_cards) {
+        const button = document.createElement("button");
+        button.className = "run-card";
+        if (card.selected) button.setAttribute("selected", "selected");
+        button.textContent = `${card.case_id || "unknown case"} - ${card.status || "unknown"}`;
+        button.onclick = () => loadConsole(card.run_id);
+        queue.appendChild(button);
+      }
+    }
+
+    function renderReviewInbox(reviews) {
+      const inbox = document.getElementById("review-inbox");
+      inbox.innerHTML = "";
+      if (!reviews || reviews.length === 0) {
+        inbox.textContent = "No reviews recorded yet.";
+        inbox.className = "empty";
+        return;
+      }
+      inbox.className = "";
+      for (const review of reviews) {
+        const link = document.createElement("a");
+        link.className = "run-card review-link";
+        link.href = reviewDetailsUrl(review);
+        if (review.selected) link.setAttribute("selected", "selected");
+        link.textContent = `${review.case_id || "unknown case"} - Open review details`;
+        inbox.appendChild(link);
+      }
+    }
+
+    function applyToolDefaults() {
+      const selector = document.getElementById("tool-selector");
+      const sampleInput = document.getElementById("sample-name-input");
+      const thresholdInput = document.getElementById("review-threshold-input");
+      const backgroundInput = document.querySelector('input[name="background"]');
+      const tool = toolCatalogById.get(selector.value);
+      const defaults = tool && tool.console_defaults ? tool.console_defaults : {};
+      sampleInput.value = defaults.sample_name || (selector.value === "chainladder" ? "RAA" : "");
+      thresholdInput.disabled = selector.value !== "chainladder";
+      if (thresholdInput.disabled) thresholdInput.value = "";
+      if (typeof defaults.background === "boolean") {
+        backgroundInput.checked = defaults.background;
+      }
+    }
+
+    function reviewDetailsUrl(review) {
+      const params = new URLSearchParams();
+      const filters = getConsoleFilters();
+      if (review && review.run_id) params.set("run_id", review.run_id);
+      if (filters.operator_id || (review && review.assigned_to)) {
+        params.set("operator_id", filters.operator_id || review.assigned_to);
+      }
+      if (filters.workspace_id || (review && review.workspace_id)) {
+        params.set("workspace_id", filters.workspace_id || review.workspace_id);
+      }
+      return `/console?${params.toString()}#review-panel`;
+    }
+
+    const reviewFieldLabels = {
+      automated_result: "Automated evaluation",
+      deterministic_outputs: "Deterministic outputs",
+      component_candidate: "Component candidate",
+      machine_disposition: "Machine disposition",
+      promotion_eligible: "Promotion eligible",
+      static_scan: "Static scan",
+      strong_isolation: "Strong isolation",
+      test_gates: "Test gates",
+      reserve_summary: "Reserve summary",
+      diagnostics: "Diagnostics",
+      method: "Method",
+      summary: "Summary",
+      key_points: "Key points",
+      recommendation: "Recommendation",
+      decision_note: "Decision note",
+      model: "Model",
+      files: "Files",
+      path: "Path",
+      source_path: "Source path",
+      bytes: "Bytes",
+      status: "Status",
+    };
+
+    function reviewLabel(key) {
+      if (reviewFieldLabels[key]) return reviewFieldLabels[key];
+      return String(key || "field").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+    }
+
+    function reviewScalar(value) {
+      if (value === null || value === undefined || value === "") return "Not provided";
+      if (value === true) return "Yes";
+      if (value === false) return "No";
+      return String(value);
+    }
+
+    function reviewStatusClass(value) {
+      const normalized = String(value || "pending").toLowerCase().replaceAll("_", "-");
+      if (["passed", "approved", "completed"].includes(normalized)) return "passed";
+      if (["failed", "rejected", "blocked"].includes(normalized)) return "failed";
+      if (normalized === "changes-requested") return "changes-requested";
+      return "pending";
+    }
+
+    function makeReviewStatusChip(value, label) {
+      const chip = document.createElement("span");
+      chip.className = `review-status-chip ${reviewStatusClass(value)}`;
+      chip.textContent = label || reviewScalar(value);
+      return chip;
+    }
+
+    function renderAdaptiveValue(value) {
+      if (Array.isArray(value)) {
+        if (!value.length) {
+          const empty = document.createElement("span");
+          empty.className = "empty";
+          empty.textContent = "None";
+          return empty;
+        }
+        const list = document.createElement("ul");
+        list.className = "adaptive-list";
+        for (const itemValue of value) {
+          const item = document.createElement("li");
+          item.appendChild(renderAdaptiveValue(itemValue));
+          list.appendChild(item);
+        }
+        return list;
+      }
+      if (value && typeof value === "object") {
+        const objectGrid = document.createElement("div");
+        objectGrid.className = "adaptive-object";
+        for (const [key, itemValue] of Object.entries(value)) {
+          const field = document.createElement("div");
+          const nested = itemValue && typeof itemValue === "object";
+          field.className = nested ? "adaptive-field nested" : "adaptive-field";
+          const label = document.createElement("strong");
+          label.textContent = reviewLabel(key);
+          field.append(label, renderAdaptiveValue(itemValue));
+          objectGrid.appendChild(field);
+        }
+        return objectGrid;
+      }
+      const scalar = document.createElement("span");
+      scalar.textContent = reviewScalar(value);
+      return scalar;
+    }
+
+    function makeReviewBlock(kind, title, subtitle) {
+      const block = document.createElement("article");
+      block.className = `review-block ${kind}`;
+      const header = document.createElement("header");
+      const headingGroup = document.createElement("div");
+      const heading = document.createElement("h3");
+      heading.textContent = title;
+      const description = document.createElement("p");
+      description.textContent = subtitle;
+      headingGroup.append(heading, description);
+      header.appendChild(headingGroup);
+      block.appendChild(header);
+      return block;
+    }
+
+    function appendReviewMeta(container, label, value) {
+      const item = document.createElement("div");
+      item.className = "review-meta-item";
+      const title = document.createElement("strong");
+      title.textContent = label;
+      const content = document.createElement("span");
+      content.textContent = reviewScalar(value);
+      item.append(title, content);
+      container.appendChild(item);
+    }
+
+    function renderReviewChecklist(block, checklist, reasons) {
+      if (Array.isArray(checklist) && checklist.length) {
+        const list = document.createElement("div");
+        list.className = "review-checklist";
+        checklist.forEach((check, index) => {
+          const row = document.createElement("div");
+          row.className = "review-check";
+          const number = document.createElement("span");
+          number.className = "review-check-index";
+          number.textContent = String(index + 1);
+          const content = document.createElement("div");
+          const title = document.createElement("strong");
+          const question = document.createElement("p");
+          if (check && typeof check === "object") {
+            title.textContent = check.title || check.id || `Review item ${index + 1}`;
+            question.textContent = check.question || check.description || "Human confirmation required";
+          } else {
+            title.textContent = `Review item ${index + 1}`;
+            question.textContent = reviewScalar(check);
+          }
+          content.append(title, question);
+          row.append(number, content, makeReviewStatusChip("pending", "Pending"));
+          list.appendChild(row);
+        });
+        block.appendChild(list);
+      } else {
+        const empty = document.createElement("p");
+        empty.className = "empty";
+        empty.textContent = "This review packet has no dedicated checklist. Use the review reasons and source evidence to decide.";
+        block.appendChild(empty);
+      }
+      if (Array.isArray(reasons) && reasons.length) {
+        const reasonList = document.createElement("div");
+        reasonList.className = "review-reasons";
+        for (const reason of reasons) {
+          const chip = document.createElement("span");
+          chip.className = "review-reason";
+          chip.textContent = reviewScalar(reason);
+          reasonList.appendChild(chip);
+        }
+        block.appendChild(reasonList);
+      }
+    }
+
+    function renderReviewPanel(panel) {
+      const container = document.getElementById("review-panel");
+      container.innerHTML = "";
+      const packet = panel && panel.packet && typeof panel.packet === "object" ? panel.packet : {};
+      if (!panel || panel.status === "not_available" || panel.status === "not_required") {
+        container.textContent = "The selected run does not require human review.";
+        container.className = "review-panel empty";
+      } else {
+        container.className = "review-panel";
+        const overview = document.createElement("article");
+        overview.className = "review-overview";
+        const overviewHeader = document.createElement("header");
+        const overviewText = document.createElement("div");
+        const overviewTitle = document.createElement("h3");
+        overviewTitle.textContent = "Review overview";
+        const overviewSummary = document.createElement("p");
+        overviewSummary.textContent = packet.case_summary || "This run requires human review before it can proceed.";
+        overviewText.append(overviewTitle, overviewSummary);
+        overviewHeader.append(overviewText, makeReviewStatusChip(panel.status));
+        const meta = document.createElement("div");
+        meta.className = "review-meta-grid";
+        appendReviewMeta(meta, "Case", panel.case_id || packet.case_id);
+        appendReviewMeta(meta, "Run", panel.run_id || packet.run_id);
+        appendReviewMeta(meta, "Assignee", panel.assigned_to || packet.assigned_to);
+        appendReviewMeta(meta, "Workspace", panel.workspace_id || packet.workspace_id);
+        overview.append(overviewHeader, meta);
+        container.appendChild(overview);
+
+        const outputBlock = makeReviewBlock("output", "Output", "Primary results from machine execution and deterministic calculations.");
+        let outputPayload = packet.automated_result || packet.deterministic_outputs || packet.deterministic_result;
+        if (packet.component_candidate) {
+          outputPayload = {
+            ...(packet.automated_result ? {automated_result: packet.automated_result} : {}),
+            ...(packet.deterministic_outputs ? {deterministic_outputs: packet.deterministic_outputs} : {}),
+            component_candidate: packet.component_candidate,
+          };
+        }
+        outputBlock.appendChild(renderAdaptiveValue(outputPayload || {status: panel.status}));
+        container.appendChild(outputBlock);
+
+        const suggestionBlock = makeReviewBlock("suggestion", "AI guidance", "AI-generated explanations and review focus areas; these do not replace a human decision.");
+        const explicitSuggestion = packet.ai_suggestion || packet.ai_recommendation || packet.draft_narrative || packet.narrative_draft || packet.recommendation;
+        const suggestionPayload = explicitSuggestion || {
+          summary: packet.case_summary || "This run triggered human review.",
+          recommendation: packet.decision_note || "Verify the review focus areas and evidence before deciding.",
+          key_points: Array.isArray(packet.review_checklist) ? packet.review_checklist.map((item) => item.title || item.id || item.question) : [],
+        };
+        suggestionBlock.appendChild(renderAdaptiveValue(suggestionPayload));
+        container.appendChild(suggestionBlock);
+
+        const humanBlock = makeReviewBlock("human", "Human review focus", "Verify business rules, model output, and production-fit risks item by item.");
+        const reasons = panel.reason_codes || packet.review_reasons || packet.failed_checks || [];
+        renderReviewChecklist(humanBlock, packet.review_checklist, reasons);
+        if (panel.decision) {
+          const decisionDetails = document.createElement("details");
+          const decisionSummary = document.createElement("summary");
+          decisionSummary.textContent = "Recorded review decision";
+          decisionDetails.append(decisionSummary, renderAdaptiveValue(panel.decision));
+          humanBlock.appendChild(decisionDetails);
+        }
+        container.appendChild(humanBlock);
+
+        const consumedKeys = new Set([
+          "assigned_to", "automated_result", "case_id", "case_summary", "component_candidate",
+          "decision_note", "decision_options", "deterministic_outputs", "deterministic_result",
+          "draft_narrative", "failed_checks", "narrative_draft", "recommendation", "review_checklist",
+          "review_reasons", "run_id", "status", "workspace_id", "ai_suggestion", "ai_recommendation",
+        ]);
+        const extraPacket = Object.fromEntries(Object.entries(packet).filter(([key]) => !consumedKeys.has(key)));
+        if (Object.keys(extraPacket).length) {
+          const extraDetails = document.createElement("details");
+          extraDetails.className = "review-block";
+          const extraSummary = document.createElement("summary");
+          extraSummary.textContent = "Additional structured data (auto-adapted)";
+          extraDetails.append(extraSummary, renderAdaptiveValue(extraPacket));
+          container.appendChild(extraDetails);
+        }
+
+        const rawDetails = document.createElement("details");
+        rawDetails.className = "raw-json review-raw";
+        const rawSummary = document.createElement("summary");
+        rawSummary.textContent = "View raw review JSON";
+        const rawPre = document.createElement("pre");
+        rawPre.textContent = JSON.stringify(panel, null, 2);
+        rawDetails.append(rawSummary, rawPre);
+        container.appendChild(rawDetails);
+      }
+
+      const decision = panel && panel.decision;
+      const decisionValue = decision && decision.decision;
+      const decisionStatus = document.getElementById("review-decision-status");
+      decisionStatus.className = `review-status-chip ${reviewStatusClass(decisionValue)}`;
+      decisionStatus.textContent = decisionValue ? `Decision: ${decisionValue}` : "Pending review";
+      document.getElementById("review-id-input").value = panel && panel.review_id ? panel.review_id : "";
+      document.getElementById("submit-review-decision").disabled = !(panel && panel.review_id) || Boolean(decisionValue);
+    }
+
+    function renderActionPanel(actionPanel) {
+      const container = document.getElementById("action-panel");
+      container.innerHTML = "";
+      const actions = (actionPanel && actionPanel.actions) || [];
+      if (actions.length === 0) {
+        container.textContent = "No actions available.";
+        container.className = "panel-body empty";
+        return;
+      }
+      container.className = "panel-body";
+      for (const action of actions) {
+        const button = document.createElement("button");
+        button.textContent = action.label || action.action_id || "Run action";
+        button.disabled = !action.enabled;
+        button.onclick = () => runConsoleAction(action);
+        container.appendChild(button);
+      }
+    }
+
+    function appendSummaryCell(container, label, value) {
+      const cell = document.createElement("div");
+      const title = document.createElement("strong");
+      title.textContent = label;
+      const content = document.createElement("span");
+      content.textContent = value;
+      cell.append(title, content);
+      container.appendChild(cell);
+    }
+
+    function projectionText(value) {
+      return value === null || value === undefined || value === "" ? "unavailable" : String(value);
+    }
+
+    function formatResultGroup(groupValues) {
+      if (!Array.isArray(groupValues)) return projectionText(groupValues);
+      return groupValues.map((pair) => {
+        if (!Array.isArray(pair) || pair.length !== 2) return "unavailable";
+        return `${projectionText(pair[0])}=${projectionText(pair[1])}`;
+      }).join(", ");
+    }
+
+    function renderResultPanel(panel) {
+      const container = document.getElementById("result-panel");
+      container.innerHTML = "";
+      if (!panel || panel.status === "no_run_selected") {
+        container.textContent = "Select a run to inspect projected results.";
+        container.className = "result-panel empty";
+        return;
+      }
+      if (panel.status === "not_available") {
+        container.textContent = "Experience Study results are not applicable to this run.";
+        container.className = "result-panel empty";
+        return;
+      }
+      container.className = "result-panel";
+
+      const errors = Array.isArray(panel.errors) ? panel.errors : [];
+      if (errors.length) {
+        const list = document.createElement("ul");
+        list.className = "result-errors";
+        for (const error of errors) {
+          const item = document.createElement("li");
+          item.textContent = `${projectionText(error.artifact_id)}: ${projectionText(error.message)} (${projectionText(error.code)})`;
+          list.appendChild(item);
+        }
+        container.appendChild(list);
+      }
+
+      const summary = document.createElement("div");
+      summary.className = "result-summary";
+      appendSummaryCell(summary, "Model", projectionText(panel.model));
+      appendSummaryCell(summary, "Population", projectionText(panel.population_id));
+      appendSummaryCell(summary, "Period", projectionText(panel.period));
+      appendSummaryCell(summary, "Result count", projectionText(panel.result_count));
+      container.appendChild(summary);
+
+      const narrativeHeading = document.createElement("h3");
+      narrativeHeading.textContent = "Narrative summary";
+      const narrative = document.createElement("p");
+      narrative.className = "result-narrative";
+      narrative.textContent = projectionText(panel.narrative_summary);
+      container.append(narrativeHeading, narrative);
+
+      if (Array.isArray(panel.key_points) && panel.key_points.length) {
+        const keyPoints = document.createElement("ul");
+        keyPoints.className = "result-key-points";
+        for (const point of panel.key_points) {
+          const item = document.createElement("li");
+          item.textContent = projectionText(point);
+          keyPoints.appendChild(item);
+        }
+        container.appendChild(keyPoints);
+      }
+
+      const results = Array.isArray(panel.results) ? panel.results : [];
+      if (!results.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "No projected results are available.";
+        container.appendChild(empty);
+        return;
+      }
+      const tableWrap = document.createElement("div");
+      tableWrap.className = "result-table-wrap";
+      const table = document.createElement("table");
+      table.className = "result-table";
+      const head = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      for (const label of ["Group", "Metric", "MI", "Actual", "Expected", "A/E Ratio", "Status"]) {
+        const cell = document.createElement("th");
+        cell.scope = "col";
+        cell.textContent = label;
+        headRow.appendChild(cell);
+      }
+      head.appendChild(headRow);
+      const body = document.createElement("tbody");
+      for (const result of results) {
+        const row = document.createElement("tr");
+        const reasonCode = result.reason_code;
+        const values = [
+          formatResultGroup(result.group_values),
+          projectionText(result.metric_kind),
+          result.mortality_improvement === true ? "Yes" : result.mortality_improvement === false ? "No" : "unavailable",
+          projectionText(result.actual),
+          projectionText(result.expected),
+          projectionText(result.ratio),
+          reasonCode === null ? "ok" : projectionText(reasonCode),
+        ];
+        for (const value of values) {
+          const cell = document.createElement("td");
+          cell.textContent = value;
+          row.appendChild(cell);
+        }
+        body.appendChild(row);
+      }
+      table.append(head, body);
+      tableWrap.appendChild(table);
+      container.appendChild(tableWrap);
+    }
+
+    function renderArtifactGroup(container, title, items, emptyMessage) {
+      const section = document.createElement("div");
+      section.className = "artifact-group";
+      const heading = document.createElement("h3");
+      heading.textContent = title;
+      section.appendChild(heading);
+      if (!items || items.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = emptyMessage;
+        section.appendChild(empty);
+        container.appendChild(section);
+        return;
+      }
+      const list = document.createElement("div");
+      list.className = "artifact-list";
+      for (const item of items) {
+        const card = document.createElement("article");
+        card.className = "artifact-card";
+        const header = document.createElement("header");
+        const name = document.createElement("h4");
+        name.textContent = item.label || item.artifact_id || "artifact";
+        const chip = document.createElement("span");
+        chip.className = `artifact-chip ${item.present ? "present" : "missing"}`;
+        chip.textContent = item.present ? "present" : "missing";
+        header.append(name, chip);
+        const ref = document.createElement("div");
+        ref.className = "artifact-meta";
+        ref.textContent = `ref: ${item.ref || item.artifact_id || "n/a"}`;
+        const mtime = document.createElement("div");
+        mtime.className = "artifact-meta";
+        mtime.textContent = item.mtime ? `mtime: ${item.mtime}` : "mtime: unavailable";
+        card.append(header, ref, mtime);
+        list.appendChild(card);
+      }
+      section.appendChild(list);
+      container.appendChild(section);
+    }
+
+    function renderArtifactPanel(panel) {
+      const container = document.getElementById("artifact-panel");
+      container.innerHTML = "";
+      if (!panel) {
+        container.textContent = "Artifact evidence unavailable.";
+        container.className = "panel-body empty";
+        return;
+      }
+      if (panel.status === "no_run_selected") {
+        container.textContent = "Select a run to inspect evidence.";
+        container.className = "panel-body empty";
+        return;
+      }
+      container.className = "panel-body";
+      const summary = document.createElement("div");
+      summary.className = "artifact-summary";
+      appendSummaryCell(summary, "Manifest status", panel.present ? "present" : "missing");
+      appendSummaryCell(summary, "Artifact root", panel.artifact_root || "unavailable");
+      appendSummaryCell(summary, "Present artifacts", String((panel.freshness && panel.freshness.present_artifact_count) || 0));
+      appendSummaryCell(summary, "Latest mtime", (panel.freshness && panel.freshness.latest_mtime) || "unavailable");
+      container.appendChild(summary);
+
+      if (panel.status === "manifest_missing") {
+        const warning = document.createElement("div");
+        warning.className = "empty";
+        warning.textContent = "Run artifact root exists, but run_manifest.json is missing. Known evidence refs are still shown below.";
+        container.appendChild(warning);
+      } else if (panel.status === "manifest_unreadable") {
+        const warning = document.createElement("div");
+        warning.className = "status error";
+        warning.textContent = panel.error && panel.error.message ? panel.error.message : "Run manifest could not be read safely.";
+        container.appendChild(warning);
+      }
+
+      if (panel.missing_expected_artifacts && panel.missing_expected_artifacts.length) {
+        const heading = document.createElement("h3");
+        heading.textContent = "Evidence Gaps";
+        const list = document.createElement("ul");
+        list.className = "artifact-gaps";
+        for (const artifactId of panel.missing_expected_artifacts) {
+          const item = document.createElement("li");
+          item.textContent = artifactId;
+          list.appendChild(item);
+        }
+        container.append(heading, list);
+      }
+
+      renderArtifactGroup(container, "Primary Evidence", panel.primary_artifact_refs, "No primary evidence refs available.");
+      renderArtifactGroup(container, "Review Evidence", panel.review_artifact_refs, "No review evidence refs available.");
+      renderArtifactGroup(container, "Decision / Export Evidence", panel.decision_artifact_refs, "No decision or report-export refs available.");
+
+      const rawDetails = document.createElement("details");
+      rawDetails.className = "raw-json";
+      const rawSummary = document.createElement("summary");
+      rawSummary.textContent = "Raw artifact panel JSON";
+      const rawPre = document.createElement("pre");
+      rawPre.textContent = JSON.stringify(panel, null, 2);
+      rawDetails.append(rawSummary, rawPre);
+      container.appendChild(rawDetails);
+    }
+
+    async function loadConsole(runId, options = {}) {
+      if (!options.preservePolling) stopPolling();
+      const params = new URLSearchParams();
+      const currentFilters = getConsoleFilters();
+      const filters = {
+        ...currentFilters,
+        operator_id: Object.prototype.hasOwnProperty.call(options, "operator_id") ? options.operator_id : currentFilters.operator_id,
+        workspace_id: Object.prototype.hasOwnProperty.call(options, "workspace_id") ? options.workspace_id : currentFilters.workspace_id,
+      };
+      if (runId) params.set("run_id", runId);
+      if (filters.operator_id) params.set("operator_id", filters.operator_id);
+      if (filters.workspace_id) params.set("workspace_id", filters.workspace_id);
+      const suffix = params.toString() ? `?${params.toString()}` : "";
+      try {
+        const response = await fetch(`/console/state${suffix}`);
+        const state = await parseJsonOrThrow(response, "Console state");
+        selectedRunId = state.selected_run_id;
+        setFilterOptions("operator-filter", state.filters && state.filters.available_operator_ids, state.filters && state.filters.operator_id);
+        setFilterOptions("workspace-filter", state.filters && state.filters.available_workspace_ids, state.filters && state.filters.workspace_id);
+        renderRunQueue(state);
+        renderReviewInbox(state.review_inbox || []);
+        renderTimeline(state.timeline || []);
+        renderResultPanel(state.result_panel);
+        renderArtifactPanel(state.artifact_panel);
+        renderReviewPanel(state.review_panel);
+        renderActionPanel(state.action_panel);
+        if (!options.preservePolling && shouldPollEvents(state.timeline || [])) {
+          startPolling(state.selected_run_id);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to load console state.";
+        renderConsoleError(message);
+      }
+    }
+
+    async function createRun(event) {
+      event.preventDefault();
+      stopPolling();
+      const form = event.currentTarget;
+      const formData = new FormData(form);
+      const thresholdValue = formData.get("review_threshold_origin_count");
+      const toolId = String(formData.get("tool_id") || "chainladder").trim() || "chainladder";
+      const payload = {
+        case_id: String(formData.get("case_id") || "").trim(),
+        tool_id: toolId,
+        method: toolId,
+        inputs: {
+          sample_name: String(formData.get("sample_name") || "RAA").trim() || "RAA",
+        },
+        operator_id: String(formData.get("operator_id") || "").trim() || null,
+        workspace_id: String(formData.get("workspace_id") || "").trim() || null,
+        created_by: String(formData.get("created_by") || "").trim() || null,
+        background: formData.get("background") === "on",
+      };
+      if (toolId === "chainladder" && thresholdValue !== null && String(thresholdValue).trim() !== "") {
+        const thresholdNumber = Number(thresholdValue);
+        if (!Number.isInteger(thresholdNumber) || thresholdNumber < 0) {
+          setOperationStatus("review_threshold_origin_count must be a non-negative integer.", "error");
+          return;
+        }
+        payload.inputs.review_threshold_origin_count = thresholdNumber;
+      }
+      setOperationStatus("Creating governed run…");
+      try {
+        const response = await fetch("/runs", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const result = await parseJsonOrThrow(response, "Create run");
+        setOperationStatus(`${result.status || "created"}: ${result.run_id || result.case_id || "run"}`, "ok");
+        const runFilters = { operator_id: payload.operator_id, workspace_id: payload.workspace_id };
+        await loadConsole(result.run_id, runFilters);
+        if (result.run_id && (result.execution_mode === "background" || activeEventTypes.includes(`run.${result.status}`))) {
+          startPolling(result.run_id, runFilters);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to create run.";
+        setOperationStatus(message, "error");
+      }
+    }
+
+    async function applyConsoleFilters(event) {
+      event.preventDefault();
+      await loadConsole(null);
+    }
+
+    async function runConsoleAction(action) {
+      if (!action || !action.enabled) return;
+      stopPolling();
+      setOperationStatus(`Running action: ${action.label || action.action_id || "action"}…`);
+      try {
+        const response = await fetch(action.path, {
+          method: action.method || "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        });
+        const result = await parseJsonOrThrow(response, action.label || "Console action");
+        const runId = result.run_id || (result.report && result.report.run && result.report.run.run_id) || selectedRunId;
+        const status = result.status || (result.report && result.report.run && result.report.run.status) || "completed";
+        setOperationStatus(`${status}: ${runId || "action complete"}`, "ok");
+        if (runId) {
+          await loadConsole(runId);
+          if (activeEventTypes.includes(`run.${status}`)) {
+            startPolling(runId);
+          }
+        } else {
+          await loadConsole(selectedRunId);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to run console action.";
+        setOperationStatus(message, "error");
+      }
+    }
+
+    async function submitReviewDecision(event) {
+      event.preventDefault();
+      const formData = new FormData(event.currentTarget);
+      const reviewId = String(formData.get("review_id") || "").trim();
+      if (!reviewId) {
+        setOperationStatus("No review selected for decision submission.", "error");
+        return;
+      }
+      const payload = {
+        decision: String(formData.get("decision") || "").trim(),
+        decided_by: String(formData.get("decided_by") || "").trim() || null,
+        comment: String(formData.get("comment") || "").trim() || null,
+      };
+      setOperationStatus(`Submitting review decision for ${reviewId}…`);
+      try {
+        const response = await fetch(`/reviews/${encodeURIComponent(reviewId)}/decision`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const result = await parseJsonOrThrow(response, "Review decision");
+        setOperationStatus(`${result.decision.decision}: ${reviewId}`, "ok");
+        await loadConsole(result.review.run_id || selectedRunId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to submit review decision.";
+        setOperationStatus(message, "error");
+      }
+    }
+
+    const initialConsoleParams = new URLSearchParams(window.location.search);
+    const initialRunId = initialConsoleParams.get("run_id");
+    const initialFilters = {
+      operator_id: initialConsoleParams.get("operator_id"),
+      workspace_id: initialConsoleParams.get("workspace_id"),
+    };
+    Promise.all([loadToolCatalog(), loadConsole(initialRunId, initialFilters)]).catch((error) => {
+      const message = error instanceof Error ? error.message : "Failed to initialize console.";
+      renderConsoleError(message);
+      setOperationStatus(message, "error");
+    });
+  </script>
+</body>
+</html>
