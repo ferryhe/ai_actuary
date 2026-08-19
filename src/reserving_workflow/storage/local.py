@@ -297,7 +297,9 @@ class LocalArtifactStore:
         raise ValueError(f"Unsupported artifact format: {format!r}")
 
     def list_artifacts(self, root: str | Path) -> list[str]:
-        base = resolve_artifact_root(root)
+        base = Path(root).expanduser().resolve()
+        if not base.exists():
+            return []
         return sorted(
             str(path.relative_to(base)).replace("\\", "/")
             for path in base.rglob("*")
@@ -309,7 +311,7 @@ class LocalReviewStore:
     """Artifact-backed local placeholder for persistent review records."""
 
     def __init__(self, root: str | Path):
-        self.root = resolve_artifact_root(root)
+        self.root = Path(root).expanduser().resolve()
         self.artifact_store = LocalArtifactStore()
 
     def create_review(
@@ -430,9 +432,7 @@ class LocalReviewStore:
 
 
 def resolve_registry_path(path: str | Path) -> Path:
-    target = Path(path).expanduser().resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    return target
+    return Path(path).expanduser().resolve()
 
 
 def resolve_artifact_root(root: str | Path) -> Path:
@@ -470,6 +470,7 @@ def _read_registry_payload(path: Path) -> dict[str, Any]:
 
 
 def _write_registry_payload(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     serialized = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
     with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
         handle.write(serialized)

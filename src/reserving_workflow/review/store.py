@@ -38,6 +38,47 @@ def ensure_review_record(
     )
 
 
+def build_review_snapshot(
+    *,
+    review_store: LocalReviewStore,
+    run_entry: dict[str, Any],
+    review_packet_result: dict[str, Any] | None = None,
+    review_store_root: str | Path | None = None,
+    decision_artifacts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build a stable review view without creating a persistent record."""
+
+    review_packet_result = review_packet_result or {}
+    run_id = str(run_entry.get("run_id"))
+    record = review_store.get_review_for_run(run_id)
+    if record is not None:
+        return build_review_contract(
+            record,
+            review_packet_result=review_packet_result,
+            review_store_root=review_store_root,
+            decision_artifacts=decision_artifacts,
+        )
+
+    packet = review_packet_result.get("packet") if review_packet_result.get("present") else None
+    needs_review = _run_needs_review(run_entry, packet)
+    status = "review_required" if needs_review else "not_required"
+    packet_payload = packet if isinstance(packet, dict) else {}
+    return Review(
+        status=status,
+        review_id=build_review_id(run_id) if needs_review else None,
+        run_id=run_id,
+        case_id=run_entry.get("case_id"),
+        workspace_id=_run_workspace_id(run_entry),
+        review_required=needs_review,
+        reason_codes=_extract_reason_codes(run_entry, packet_payload) if needs_review else [],
+        assigned_to=_review_assignee(run_entry, packet_payload) if needs_review else None,
+        packet=packet if isinstance(packet, dict) else None,
+        json_path=review_packet_result.get("json_path"),
+        markdown_path=review_packet_result.get("markdown_path"),
+        review_delivery=run_entry.get("review_delivery"),
+    ).model_dump(exclude_none=True)
+
+
 def build_review_contract(
     record: dict[str, Any] | None,
     *,
@@ -145,7 +186,7 @@ def _decision_artifacts(record: dict[str, Any], *, review_store_root: str | Path
     if not review_store_root or not record.get("decision"):
         return []
     review_id = record.get("review_id")
-    review_root = resolve_artifact_root(review_store_root) / str(review_id)
+    review_root = Path(review_store_root).expanduser().resolve() / str(review_id)
     return [
         ReviewDecisionArtifact(
             artifact_id="review_decision",
@@ -201,7 +242,7 @@ def _run_workspace_id(run_entry: dict[str, Any]) -> str | None:
 
 
 def _review_record_path(review_store_root: str | Path, review_id: Any) -> Path:
-    return resolve_artifact_root(review_store_root) / str(review_id) / "review_record.json"
+    return Path(review_store_root).expanduser().resolve() / str(review_id) / "review_record.json"
 
 
 def _render_run_decision_markdown(run_entry: dict[str, Any], decision_record: dict[str, Any]) -> str:

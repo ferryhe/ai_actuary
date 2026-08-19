@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -602,7 +603,7 @@ def test_post_run_normalizes_tool_backed_request_and_writes_validated_input_arti
 
     run_manifest = Path(payload["final_output"]["artifact_manifest_path"])
     manifest_payload = json.loads(run_manifest.read_text(encoding="utf-8"))
-    assert manifest_payload["artifact_paths"]["validated_input"] == str(validated_input_path)
+    assert manifest_payload["artifact_paths"]["validated_input"] == "validated_input.json"
 
 
 def test_post_run_normalizes_legacy_method_alias_into_tool_backed_validated_input(tmp_path):
@@ -1569,7 +1570,7 @@ def test_review_packet_endpoint_returns_packet_metadata(tmp_path):
     assert payload["markdown_path"].endswith("review_packet.md")
 
 
-def test_review_endpoints_materialize_review_records_and_list_inbox(tmp_path):
+def test_review_endpoints_build_in_memory_snapshots_and_list_inbox(tmp_path):
     _reset_fake_runner_calls()
     client = _client(tmp_path, runner_module=ReviewRunnerModule)
     run = client.post("/runs", json={"case_id": "review-inbox-case"}).json()
@@ -1591,7 +1592,7 @@ def test_review_endpoints_materialize_review_records_and_list_inbox(tmp_path):
     assert detail.json()["review"]["assigned_to"] == DEFAULT_OPERATOR_ID
 
 
-def test_review_detail_materializes_record_when_fetched_directly_by_review_id(tmp_path):
+def test_review_detail_builds_snapshot_when_fetched_directly_by_review_id(tmp_path):
     _reset_fake_runner_calls()
     client = _client(tmp_path, runner_module=ReviewRunnerModule)
     run = client.post("/runs", json={"case_id": "direct-review-detail-case"}).json()
@@ -1725,6 +1726,101 @@ def test_run_review_returns_not_required_without_materializing_review_for_comple
     assert review_response.json()["review"]["status"] == "not_required"
     assert review_response.json()["review"]["run_id"] == run["run_id"]
     assert reviews_response.json()["review_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "route_template",
+    [
+        "/console/state?run_id={run_id}",
+        "/runs/{run_id}/review",
+        "/reviews",
+        "/reviews/review-{run_id}",
+    ],
+)
+@pytest.mark.parametrize(
+    ("runner_module", "expected_status"),
+    [
+        (FakeRunnerModule, "not_required"),
+        (ReviewRunnerModule, "review_required"),
+    ],
+)
+def test_every_review_get_preserves_registry_artifact_and_missing_review_store_bytes(
+    tmp_path,
+    route_template,
+    runner_module,
+    expected_status,
+):
+    settings = ApiSettings(
+        registry_path=tmp_path / "registry" / "runs.json",
+        artifact_root=tmp_path / "artifacts",
+        review_store_dir=tmp_path / "review-store-that-does-not-exist",
+    )
+    client = _client(tmp_path, runner_module=runner_module, settings=settings)
+    run = client.post("/runs", json={"case_id": f"invariance-{expected_status}"}).json()
+    artifact_root = Path(client.get(f"/runs/{run['run_id']}").json()["run"]["artifact_root"])
+    roots = [Path(settings.registry_path).parent, artifact_root, Path(settings.review_store_dir)]
+    before = _content_snapshot(roots)
+
+    response = client.get(route_template.format(run_id=run["run_id"]))
+
+    expected_http_status = (
+        404
+        if expected_status == "not_required" and route_template == "/reviews/review-{run_id}"
+        else 200
+    )
+    assert response.status_code == expected_http_status
+    serialized = json.dumps(response.json())
+    assert (
+        expected_status in serialized
+        or route_template == "/reviews"
+        or expected_http_status == 404
+    )
+    assert _content_snapshot(roots) == before
+    assert not Path(settings.review_store_dir).exists()
+
+
+def test_review_decision_post_materializes_record_without_prior_get_and_later_gets_are_read_only(tmp_path):
+    settings = ApiSettings(
+        registry_path=tmp_path / "registry" / "runs.json",
+        artifact_root=tmp_path / "artifacts",
+        review_store_dir=tmp_path / "reviews",
+    )
+    client = _client(tmp_path, runner_module=ReviewRunnerModule, settings=settings)
+    run = client.post("/runs", json={"case_id": "decision-without-get"}).json()
+    review_id = f"review-{run['run_id']}"
+    assert not Path(settings.review_store_dir).exists()
+
+    decision = client.post(
+        f"/reviews/{review_id}/decision",
+        json={"decision": "approved", "comment": "approved", "decided_by": "actuary"},
+    )
+
+    assert decision.status_code == 200
+    assert (Path(settings.review_store_dir) / review_id / "review_record.json").is_file()
+    artifact_root = Path(client.get(f"/runs/{run['run_id']}").json()["run"]["artifact_root"])
+    roots = [Path(settings.registry_path).parent, artifact_root, Path(settings.review_store_dir)]
+    before = _content_snapshot(roots)
+    assert client.get(f"/console/state?run_id={run['run_id']}").status_code == 200
+    assert client.get(f"/runs/{run['run_id']}/review").status_code == 200
+    assert client.get("/reviews").status_code == 200
+    assert client.get(f"/reviews/{review_id}").status_code == 200
+    assert _content_snapshot(roots) == before
+
+
+def _content_snapshot(roots):
+    snapshot = []
+    for root in roots:
+        files = []
+        if root.exists():
+            for path in sorted(item for item in root.rglob("*") if item.is_file()):
+                files.append(
+                    (
+                        path.relative_to(root).as_posix(),
+                        hashlib.sha256(path.read_bytes()).hexdigest(),
+                    )
+                )
+        snapshot.append((str(root), root.exists(), tuple(files)))
+    return tuple(snapshot)
 
 
 def test_replay_and_repeatability_endpoints_wrap_existing_helpers(tmp_path):

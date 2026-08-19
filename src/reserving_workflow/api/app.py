@@ -17,6 +17,13 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from reserving_workflow import operator_entrypoint
+from reserving_workflow.adapters.control_plane.projections import (
+    ARTIFACT_PROJECTION_SPECS,
+    ArtifactProjectionReadError,
+    build_artifact_projection,
+    provenance_for_artifact,
+    read_bounded_json_object,
+)
 from reserving_workflow.artifacts import replay as replay_helpers
 from reserving_workflow.artifacts.storage import read_json_artifact, resolve_artifact_path, write_json_artifact
 from reserving_workflow.contracts.control_plane import (
@@ -37,7 +44,12 @@ from reserving_workflow.model_tools import (
     ExperienceStudyToolInput,
     run_minimax_experience_study,
 )
-from reserving_workflow.review import build_review_contract, ensure_review_record, write_run_review_decision_artifacts
+from reserving_workflow.review import (
+    build_review_contract,
+    build_review_snapshot,
+    ensure_review_record,
+    write_run_review_decision_artifacts,
+)
 from reserving_workflow.reports import export_run_report
 from reserving_workflow.storage.local import LocalReviewStore, ReviewDecisionConflictError
 from reserving_workflow.runtime import build_preflight_report, run_registry
@@ -436,6 +448,33 @@ def create_app(
             "artifacts": _artifact_refs_from_manifest(manifest),
         }
 
+    @app.get("/runs/{run_id}/artifacts/{artifact_id}/projection")
+    async def get_artifact_projection(run_id: str, artifact_id: str) -> dict[str, Any]:
+        if artifact_id not in ARTIFACT_PROJECTION_SPECS:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "artifact_unsupported",
+                    "message": "Artifact projection is not supported.",
+                },
+            )
+        try:
+            entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "run_not_found", "message": "Run was not found."},
+            ) from exc
+        try:
+            return _artifact_projection_for_run(entry, artifact_id=artifact_id)
+        except ArtifactProjectionReadError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+
     @app.get("/runs/{run_id}/results")
     async def get_results(run_id: str) -> dict[str, Any]:
         entry = _get_registry_entry(resolved_settings.registry_path, run_id)
@@ -482,25 +521,28 @@ def create_app(
 
     @app.get("/reviews/{review_id}")
     async def get_review(review_id: str) -> dict[str, Any]:
+        run_id = _run_id_from_review_id(review_id)
+        if run_id is None:
+            raise HTTPException(status_code=404, detail="Review not found.")
         try:
             review_store = _get_review_store()
             record = review_store.get_review(review_id)
-        except ValueError as exc:
-            record = _materialize_review_record_from_id(
-                review_id,
-                registry_path=resolved_settings.registry_path,
+        except ValueError:
+            run_entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+            review = _review_payload_for_run(
+                run_entry,
                 review_store=review_store,
-            )
-            if record is None:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
-        run_entry = _get_registry_entry(resolved_settings.registry_path, str(record.get("run_id")))
-        review_packet = _load_review_packet_for_entry(run_entry)
-        return {
-            "review": build_review_contract(
-                record,
-                review_packet_result=review_packet,
                 review_store_root=resolved_settings.review_store_dir,
-                decision_artifacts=_decision_artifacts_for_run(run_entry),
+            )
+            if review.get("review_id") != review_id:
+                raise HTTPException(status_code=404, detail="Review not found.")
+            return {"review": review}
+        run_entry = _get_registry_entry(resolved_settings.registry_path, str(record.get("run_id")))
+        return {
+            "review": _review_payload_for_run(
+                run_entry,
+                review_store=review_store,
+                review_store_root=resolved_settings.review_store_dir,
             )
         }
 
@@ -1573,6 +1615,70 @@ def _empty_result_panel(
     }
 
 
+def _artifact_projection_for_run(entry: dict[str, Any], *, artifact_id: str) -> dict[str, Any]:
+    artifact_root = entry.get("artifact_root")
+    if not artifact_root:
+        raise ArtifactProjectionReadError(
+            "manifest_missing",
+            "Run manifest is unavailable.",
+            status_code=404,
+        )
+    root = Path(str(artifact_root)).expanduser().absolute()
+    manifest = read_bounded_json_object(root, "run_manifest.json", namespace="manifest")
+    run_id = str(entry.get("run_id"))
+    if manifest.get("run_id") != run_id:
+        raise ArtifactProjectionReadError(
+            "manifest_run_mismatch",
+            "Run manifest does not match the selected run.",
+            status_code=409,
+        )
+    artifact_paths = manifest.get("artifact_paths")
+    if not isinstance(artifact_paths, dict) or artifact_id not in artifact_paths:
+        raise ArtifactProjectionReadError(
+            "artifact_not_registered",
+            "Artifact is not registered in the run manifest.",
+            status_code=404,
+        )
+    raw_ref = artifact_paths.get(artifact_id)
+    if not isinstance(raw_ref, str) or not raw_ref:
+        raise ArtifactProjectionReadError(
+            "artifact_path_rejected",
+            "Registered artifact path failed safety validation.",
+        )
+    spec = ARTIFACT_PROJECTION_SPECS[artifact_id]
+    normalized_ref = raw_ref.replace("\\", "/")
+    if normalized_ref.rsplit("/", 1)[-1] != spec.filename:
+        raise ArtifactProjectionReadError(
+            "artifact_schema_mismatch",
+            "Registered artifact does not match the projection schema.",
+            status_code=422,
+        )
+    payload = read_bounded_json_object(root, raw_ref, namespace="artifact")
+    if "run_id" in payload and payload.get("run_id") != run_id:
+        raise ArtifactProjectionReadError(
+            "artifact_run_mismatch",
+            "Registered artifact does not match the selected run.",
+            status_code=409,
+        )
+    expected_tool_id = _registered_tool_id(entry)
+    if (
+        artifact_id in {"validated_input", "deterministic_result"}
+        and expected_tool_id is not None
+        and "tool_id" in payload
+        and str(payload.get("tool_id")) != expected_tool_id
+    ):
+        raise ArtifactProjectionReadError(
+            "artifact_tool_mismatch",
+            "Registered artifact does not match the selected tool.",
+            status_code=409,
+        )
+    return build_artifact_projection(
+        run_id=run_id,
+        artifact_id=artifact_id,
+        payload=payload,
+    ).model_dump()
+
+
 def _result_panel_projection(entry: dict[str, Any] | None) -> dict[str, Any]:
     """Project registered result artifacts into a path-free Console contract."""
 
@@ -1732,19 +1838,17 @@ def _load_result_manifest(
             "run_manifest", "artifact_root_missing", "Run artifact root is unavailable."
         )
     try:
-        root = Path(str(artifact_root)).expanduser().resolve()
-        manifest_path = (root / "run_manifest.json").resolve()
-        manifest_path.relative_to(root)
-    except (OSError, RuntimeError, ValueError):
-        return None, None, _result_projection_error(
-            "run_manifest", "artifact_path_rejected", "Run manifest path failed safety validation."
+        root = Path(str(artifact_root)).expanduser().absolute()
+        manifest = read_bounded_json_object(
+            root,
+            "run_manifest.json",
+            namespace="artifact",
+            max_bytes=MAX_RESULT_ARTIFACT_BYTES,
         )
-    manifest, error = _read_bounded_result_json(manifest_path, artifact_id="run_manifest")
-    if error is not None:
-        return root, None, error
-    if manifest is None:
-        return root, None, _result_projection_error(
-            "run_manifest", "artifact_unavailable", "Run manifest is unavailable."
+    except ArtifactProjectionReadError as exc:
+        code = "artifact_unreadable" if exc.code in {"artifact_invalid_encoding", "artifact_invalid_json"} else exc.code
+        return None, None, _result_projection_error(
+            "run_manifest", code, "Run manifest could not be read safely."
         )
     if manifest.get("run_id") not in {None, entry.get("run_id")}:
         return root, None, _result_projection_error(
@@ -1771,55 +1875,18 @@ def _read_registered_result_artifact(
         return None, _result_projection_error(
             artifact_id, "artifact_path_rejected", "Registered artifact path failed safety validation."
         )
-    relative_ref = Path(raw_ref)
-    if relative_ref.is_absolute() or ".." in relative_ref.parts:
-        return None, _result_projection_error(
-            artifact_id, "artifact_path_rejected", "Registered artifact path failed safety validation."
-        )
     try:
-        candidate = (artifact_root / relative_ref).resolve()
-        candidate.relative_to(artifact_root)
-    except (OSError, RuntimeError, ValueError):
+        return read_bounded_json_object(
+            artifact_root,
+            raw_ref,
+            namespace="artifact",
+            max_bytes=MAX_RESULT_ARTIFACT_BYTES,
+        ), None
+    except ArtifactProjectionReadError as exc:
+        code = "artifact_unreadable" if exc.code in {"artifact_invalid_encoding", "artifact_invalid_json"} else exc.code
         return None, _result_projection_error(
-            artifact_id, "artifact_path_rejected", "Registered artifact path failed safety validation."
+            artifact_id, code, "Registered result artifact could not be read safely."
         )
-    return _read_bounded_result_json(candidate, artifact_id=artifact_id)
-
-
-def _read_bounded_result_json(
-    path: Path,
-    *,
-    artifact_id: str,
-) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
-    try:
-        if not path.is_file():
-            return None, _result_projection_error(
-                artifact_id, "artifact_missing", "Registered result artifact is missing."
-            )
-        if path.stat().st_size > MAX_RESULT_ARTIFACT_BYTES:
-            return None, _result_projection_error(
-                artifact_id,
-                "artifact_size_exceeded",
-                "Registered result artifact exceeds the Console size limit.",
-            )
-        with path.open("rb") as artifact_file:
-            content = artifact_file.read(MAX_RESULT_ARTIFACT_BYTES + 1)
-        if len(content) > MAX_RESULT_ARTIFACT_BYTES:
-            return None, _result_projection_error(
-                artifact_id,
-                "artifact_size_exceeded",
-                "Registered result artifact exceeds the Console size limit.",
-            )
-        payload = json.loads(content.decode("utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return None, _result_projection_error(
-            artifact_id, "artifact_unreadable", "Registered result artifact could not be read safely."
-        )
-    if not isinstance(payload, dict):
-        return None, _result_projection_error(
-            artifact_id, "artifact_invalid_shape", "Registered result artifact must be a JSON object."
-        )
-    return payload, None
 
 
 def _result_artifact_identity_errors(
@@ -2044,26 +2111,9 @@ def _review_payload_for_run(
     review_store_root: str | Path,
 ) -> dict[str, Any]:
     review_packet = _load_review_packet_for_entry(entry)
-    record = ensure_review_record(
+    return build_review_snapshot(
         review_store=review_store,
         run_entry=entry,
-        review_packet=review_packet.get("packet") if review_packet.get("present") else None,
-    )
-    if record is None:
-        status = "review_required" if bool(entry.get("review_required")) or entry.get("status") == "needs_review" else "not_required"
-        return Review(
-            status=status,
-            review_required=status == "review_required",
-            run_id=str(entry.get("run_id")),
-            case_id=entry.get("case_id"),
-            workspace_id=entry.get("workspace_id"),
-            packet=review_packet.get("packet") if review_packet.get("present") else None,
-            json_path=review_packet.get("json_path"),
-            markdown_path=review_packet.get("markdown_path"),
-            review_delivery=entry.get("review_delivery"),
-        ).model_dump(exclude_none=True)
-    return build_review_contract(
-        record,
         review_packet_result=review_packet,
         review_store_root=review_store_root,
         decision_artifacts=_decision_artifacts_for_run(entry),
@@ -2205,14 +2255,22 @@ def _artifact_refs_from_manifest(manifest: dict[str, Any] | None) -> list[dict[s
         artifact_path = Path(str(path)).expanduser()
         if not artifact_path.is_absolute() and root is not None:
             artifact_path = root / artifact_path
-        artifacts.append(
-            ArtifactRef(
+        artifact = ArtifactRef(
                 artifact_id=str(artifact_id),
                 label=str(artifact_id).replace("_", " "),
                 path=str(artifact_path),
                 present=artifact_path.exists(),
             ).model_dump()
-        )
+        provenance = provenance_for_artifact(str(artifact_id))
+        if provenance is not None:
+            artifact["provenance"] = provenance
+            artifact["category"] = {
+                "system_manifest": "system",
+                "deterministic": "result",
+                "model_generated": "narrative",
+                "review": "review",
+            }[provenance]
+        artifacts.append(artifact)
     return artifacts
 
 

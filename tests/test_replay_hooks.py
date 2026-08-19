@@ -130,11 +130,10 @@ def test_replay_case_from_manifest_resolves_relative_artifact_paths(tmp_path):
     result = case_worker.run_case_worker(task)
     manifest_path = Path(result.artifact_paths["run_manifest"])
     manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    artifact_root = Path(manifest_payload["artifact_root"])
-    manifest_payload["artifact_paths"] = {
-        name: str(Path(path).resolve().relative_to(artifact_root)) for name, path in manifest_payload["artifact_paths"].items()
-    }
-    manifest_path.write_text(json.dumps(manifest_payload, indent=2, sort_keys=True), encoding="utf-8")
+    assert all(
+        not Path(path).is_absolute() and ".." not in Path(path).parts
+        for path in manifest_payload["artifact_paths"].values()
+    )
 
     proc = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / "replay_case.py"), "--manifest-path", str(manifest_path)],
