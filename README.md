@@ -123,6 +123,59 @@ The console can create runs, poll background events, inspect artifacts, view rev
 
 ---
 
+## Local Dual-Interface Developer Workbench
+
+The optional Google ADK Developer Web is a local development surface. It is
+not installed by the default `dev` extra and is not part of the control-plane
+runtime. Use Python 3.11 and install the independently pinned ADK extra:
+
+```bash
+pip install -e '.[dev,adk-dev]'
+adk --version  # pinned: 2.7.1
+python scripts/run_local_workbench.py
+```
+
+The launcher binds both unauthenticated development interfaces to loopback
+only:
+
+- Operator Console: `http://127.0.0.1:8000/console`
+- ADK Developer Web: `http://127.0.0.1:8001`
+
+The Developer Web header is labeled `AI Actuary Developer (DEV)` and displays
+the fixed Operator Console address so the return path is visible in the ADK UI.
+
+Use `python scripts/run_local_workbench.py --smoke` to start both processes,
+verify their health and discovery routes, and stop them. The launcher refuses
+occupied ports, reports a missing ADK extra clearly, and cleans up both child
+processes on startup failure, child failure, Ctrl-C, or SIGTERM.
+
+ADK session and artifact state is explicitly isolated under ignored local
+paths: `tmp/adk-dev/sessions/sessions.db` and `tmp/adk-dev/artifacts/`. It does
+not write runtime state into `developer_workflows/` or any published workflow
+directory.
+
+The PR1 `ai_actuary_developer` agent is code-first and read-only. It can only
+describe this development environment and inspect the fixed loopback
+`/health` and `/health/preflight` endpoints. It cannot call actuarial tools,
+create runs, make review decisions, or access the tool/workflow catalogs. Its
+model is fixed to Gemini `gemini-2.5-flash`. Importing the agent and opening
+Developer Web do not require credentials; chatting with it requires a Gemini
+Developer API credential, for example local `GOOGLE_API_KEY` with
+`GOOGLE_GENAI_USE_VERTEXAI=FALSE`. Do not commit credentials.
+
+Compatibility was verified against `google-adk==2.7.1` on Python 3.11: the
+code-first app loads through ADK app-info and build-graph endpoints. Visual
+Builder / Agent Config YAML is not generated for this code-first agent (the
+`/builder` view is empty), and PR1 does not add YAML drafts or publishing.
+ADK's built-in trace/evaluation UI also does not mean this project has wired
+trace or evaluation capabilities; PR1 configures neither. Upgrade ADK only in
+a dedicated compatibility PR.
+
+This workbench is not authenticated, externally hosted, CORS-enabled, or a
+production deployment.
+
+---
+
 ## Quick Start: Create a Run by API
 
 Synchronous run:

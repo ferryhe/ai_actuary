@@ -63,3 +63,20 @@ Conclusion: PR7/PR8 are not worth continuing right now, so the autonomous rollou
 - Scheduler: Hermes cron job `b32233a7eddf` was paused to avoid unnecessary follow-up ticks.
 
 Next safe action: reopen PR7 only for a persistent-service/concurrency requirement; reopen PR8 only for a real MCP multi-agent discovery requirement.
+
+## ADK Multi-PR Route — PR1 Delivery Record — 2026-08-19
+
+- Base branch: `main`
+- Base SHA: `c802af9211a5c5718d74c7cf9e6e082c45e79022`
+- Gate 0: `PASSED`
+- Delivery branch: `feat/adk-dual-interface-foundation`
+- PR1 scope: mechanical Console resource extraction, optional pinned ADK development dependency, a read-only health-only Developer Agent, a two-process launcher, and reciprocal Console/Developer Web entry points.
+- Explicitly deferred to PR2–PR5: Tool Registry, Workflow Catalog, actuarial tool execution, write tools, Capability, Visual Builder draft publishing, Trace, and Evaluation.
+- Managed review cycles: `4/5`
+- Progress heartbeat: task-scoped automation `adk-pr1-progress-heartbeat`; it is not repository state and must be removed and verified stopped when the delivery task ends.
+- Commit 1: `756abc0` (`refactor: extract operator console assets`), verified byte-for-byte against the embedded baseline before the required Developer Web link was added in commit 2.
+- Local verification: default focused suite `91 passed, 4 skipped`; isolated ADK 2.7.1 focused suite `27 passed`; default-port dual-process smoke passed all seven HTTP checks and released both ports; missing-extra and occupied-port failures are explicit and leave no API child.
+- Browser verification: Console renders the visible loopback Developer Web link with no JavaScript errors; ADK Web visibly shows `AI Actuary Developer (DEV)` and the Console address; code-first agent is discoverable while the Visual Builder edit control remains unavailable as documented.
+- Review/test status: specification review passed; independent Tester passed. Code-quality cycle 1 found a Windows external-termination orphan risk. Cycle 2 then found the remaining `Popen`-to-child-assignment race. The final fix places the launcher itself in a kill-on-close Job Object before any child is created, so Windows atomically inherits containment; both steady-state and delayed-first-`Popen` parent-death tests pass. Final targeted re-review passed with no Critical or Important findings; its single stale-wording Minor was corrected.
+- Final Tester re-check: passed on the two-commit product head with no blocker; default/ADK dependency boundaries, seven-route smoke, Windows steady-state termination, and delayed-first-`Popen` parent-death cleanup all passed.
+- Remote review record: PR #35 was opened for this delivery. Its first `adk-dev` Linux job exposed one test-portability issue: the Windows error-path test assumed `ctypes.get_last_error` already existed on POSIX; the test-only monkeypatch now permits that Windows-only attribute to be created. Copilot reviewed 17/17 files and raised five comments: normalized child-exit messaging, remaining smoke timeout budget, and the duplicated model name were accepted and fixed; two custom-port link observations were classified as non-actionable because the published PR1 contract is fixed to `8000/8001` and the suppressed alternate-port arguments exist only for process-isolated integration tests. GitHub remains the source of truth for the PR's final CI, review, and merge state.

@@ -25,5 +25,46 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      - name: Assert default dev excludes Google ADK
+        run: |
+          python - <<'PY'
+          import importlib.util
+
+          try:
+              spec = importlib.util.find_spec("google.adk")
+          except ModuleNotFoundError:
+              spec = None
+          assert spec is None, "google.adk must not be installed by .[dev]"
+          PY
+
       - name: Run tests
         run: python -m pytest -q
+
+  adk-dev:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install ADK developer dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,adk-dev]"
+
+      - name: Verify pinned ADK and developer agent
+        run: |
+          adk --version
+          python -c "from developer_workflows.ai_actuary_developer import root_agent; assert root_agent.name == 'ai_actuary_developer'"
+
+      - name: Run ADK foundation tests
+        run: python -m pytest tests/test_adk_developer_foundation.py tests/test_operator_console_assets.py -q
+
+      - name: Smoke dual-interface launcher
+        run: python scripts/run_local_workbench.py --smoke
