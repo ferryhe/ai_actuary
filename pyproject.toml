@@ -25,9 +25,15 @@ dev = [
   "fastapi>=0.115,<1",
   "uvicorn[standard]>=0.30,<1",
 ]
+adk-dev = [
+  "google-adk==2.7.1; python_version == '3.11'",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"reserving_workflow.interfaces.operator_console" = ["console.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
