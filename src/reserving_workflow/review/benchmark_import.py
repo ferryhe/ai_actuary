@@ -714,7 +714,7 @@ def _render_review_markdown(packet: dict[str, Any]) -> str:
         "",
     ]
     for item in packet["review_checklist"]:
-        lines.append(f"- [ ] **{item['title']}**：{item['question']}")
+        lines.append(f"- [ ] **{item['title']}**: {item['question']}")
     lines.extend(
         [
             "",

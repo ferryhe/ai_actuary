@@ -180,6 +180,7 @@ def test_import_creates_needs_review_run_and_review_snapshot(tmp_path: Path):
         artifact_root / "review_packet.md"
     ).read_text(encoding="utf-8")
     assert re.search(r"[\u4e00-\u9fff]", visible_review_text) is None
+    assert "：" not in visible_review_text
 
 
 def test_import_is_idempotent_for_identical_evidence(tmp_path: Path):

@@ -812,8 +812,54 @@ def test_minimax_experience_tool_records_unexpected_synchronous_failure(
     runs = LocalRunStore(tmp_path / "run-registry.json").list_runs()
     assert len(runs) == 1
     assert runs[0]["status"] == "failed"
+    assert runs[0]["summary"] == (
+        "Synchronous operator run failed for minimax-failure-case"
+    )
+    assert runs[0]["error_category"] == "synchronous_runtime"
     assert runs[0]["errors"] == ["injected model tool failure"]
     assert Path(runs[0]["artifact_root"]).name == runs[0]["run_id"]
+
+
+def test_minimax_experience_tool_records_background_failure_metadata(
+    tmp_path, monkeypatch
+):
+    scheduled = []
+
+    def capture_background_task(fn, *args, **kwargs):
+        scheduled.append((fn, args, kwargs))
+
+    def fail_runner(**kwargs):
+        raise RuntimeError("injected background model tool failure")
+
+    monkeypatch.setitem(
+        api_app.MODEL_COMPARISON_TOOL_RUNNERS,
+        "minimax_experience_study_tool",
+        fail_runner,
+    )
+    client = _client(tmp_path, background_task_runner=capture_background_task)
+
+    accepted = client.post(
+        "/runs",
+        json={
+            "case_id": "minimax-background-failure-case",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small"},
+            "background": True,
+        },
+    )
+
+    assert accepted.status_code == 202
+    fn, args, kwargs = scheduled.pop()
+    fn(*args, **kwargs)
+
+    runs = LocalRunStore(tmp_path / "run-registry.json").list_runs()
+    assert len(runs) == 1
+    assert runs[0]["status"] == "failed"
+    assert runs[0]["summary"] == (
+        "Background operator run failed for minimax-background-failure-case"
+    )
+    assert runs[0]["error_category"] == "background_runtime"
+    assert runs[0]["errors"] == ["injected background model tool failure"]
 
 
 def test_post_run_can_accept_background_execution_and_poll_events(tmp_path):

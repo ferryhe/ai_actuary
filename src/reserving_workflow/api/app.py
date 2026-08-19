@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -293,7 +293,12 @@ def create_app(
                 scheduler = background_task_runner or background_tasks.add_task
                 scheduler(_run_model_tool_background, model_tool_params)
                 return JSONResponse(status_code=202, content=accepted_payload)
-            return JSONResponse(content=_run_registered_model_tool(model_tool_params))
+            return JSONResponse(
+                content=_run_registered_model_tool(
+                    model_tool_params,
+                    execution_mode="synchronous",
+                )
+            )
         operator_params = _operator_params_from_request(
             request,
             validated_tool_input=validated_tool_input,
@@ -393,7 +398,8 @@ def create_app(
                     "operator_id": str(entry.get("operator_id") or DEFAULT_OPERATOR_ID),
                     "workspace_id": str(entry.get("workspace_id") or DEFAULT_WORKSPACE_ID),
                     "tool_id": model_tool_id,
-                }
+                },
+                execution_mode="synchronous",
             )
             result["rerun"] = RerunSemantics(source_run_id=run_id).model_dump()
             return JSONResponse(content=result)
@@ -770,10 +776,14 @@ def _run_operator_flow_background(operator_params: dict[str, Any]) -> None:
     try:
         operator_entrypoint.run_operator_flow(**operator_params)
     except Exception as exc:
-        _record_background_failure(operator_params, exc)
+        _record_run_failure(operator_params, exc, execution_mode="background")
 
 
-def _run_registered_model_tool(operator_params: dict[str, Any]) -> dict[str, Any]:
+def _run_registered_model_tool(
+    operator_params: dict[str, Any],
+    *,
+    execution_mode: Literal["synchronous", "background"],
+) -> dict[str, Any]:
     params = dict(operator_params)
     tool_id = str(params.pop("tool_id"))
     try:
@@ -783,13 +793,13 @@ def _run_registered_model_tool(operator_params: dict[str, Any]) -> dict[str, Any
     try:
         return runner(**params)
     except Exception as exc:
-        _record_background_failure(operator_params, exc)
+        _record_run_failure(operator_params, exc, execution_mode=execution_mode)
         raise
 
 
 def _run_model_tool_background(operator_params: dict[str, Any]) -> None:
     try:
-        _run_registered_model_tool(operator_params)
+        _run_registered_model_tool(operator_params, execution_mode="background")
     except Exception:
         return
 
@@ -798,19 +808,26 @@ def _run_workflow_background(operator_params: dict[str, Any]) -> None:
     try:
         _run_sequential_workflow(**operator_params)
     except Exception as exc:
-        _record_background_failure(operator_params, exc)
+        _record_run_failure(operator_params, exc, execution_mode="background")
 
 
-def _record_background_failure(operator_params: dict[str, Any], exc: Exception) -> None:
+def _record_run_failure(
+    operator_params: dict[str, Any],
+    exc: Exception,
+    *,
+    execution_mode: Literal["synchronous", "background"],
+) -> None:
     registry_path = operator_params.get("registry_path")
     if registry_path is None:
         return
     case_id = operator_params.get("case_id")
     run_id = operator_params.get("run_id") or _generate_api_run_id(str(case_id or "case"))
-    artifact_dir = operator_params.get("artifact_dir") or "./tmp/api-artifacts/background-failed"
+    default_failure_dir = f"./tmp/api-artifacts/{execution_mode}-failed"
+    artifact_dir = operator_params.get("artifact_dir") or default_failure_dir
     artifact_root = Path(artifact_dir).expanduser().resolve()
     if operator_params.get("tool_id") in MODEL_COMPARISON_TOOL_RUNNERS:
         artifact_root = (artifact_root / str(run_id)).resolve()
+    execution_label = execution_mode.capitalize()
     run_registry.record_run_event(
         registry_path=registry_path,
         task_id=f"operator-{case_id or 'unknown-case'}",
@@ -818,12 +835,12 @@ def _record_background_failure(operator_params: dict[str, Any], exc: Exception) 
         run_id=str(run_id),
         status="failed",
         artifact_root=str(artifact_root),
-        summary=f"Background operator run failed for {case_id or 'unknown-case'}",
+        summary=f"{execution_label} operator run failed for {case_id or 'unknown-case'}",
         created_by=operator_params.get("created_by"),
         operator_id=operator_params.get("operator_id"),
         workspace_id=operator_params.get("workspace_id"),
         review_required=False,
-        error_category="background_runtime",
+        error_category=f"{execution_mode}_runtime",
         errors=[str(exc)],
     )
 
