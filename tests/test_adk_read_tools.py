@@ -15,6 +15,8 @@ from reserving_workflow.adapters.control_plane import ReadOnlyControlPlaneClient
 from reserving_workflow.adapters.control_plane.contracts import (
     ArtifactMetadata,
     ArtifactProjection,
+    HealthStatus,
+    PreflightStatus,
     ToolSummary,
     Workflow,
 )
@@ -22,13 +24,15 @@ from reserving_workflow.adapters.control_plane.projections import (
     project_artifact_metadata,
     project_artifact_projection,
     project_event,
+    project_health,
+    project_preflight,
     project_review,
     project_run,
     project_tool,
     project_workflow,
 )
 from reserving_workflow.api.app import ApiSettings, create_app
-from reserving_workflow.contracts import Review, Run, RunEvent
+from reserving_workflow.contracts import Review, Run, RunEvent, is_terminal_run_status
 from reserving_workflow.storage.local import LocalRunStore
 
 
@@ -158,6 +162,7 @@ def _tool_fixture(tmp_path: Path) -> tuple[dict[str, Any], list[Path]]:
         "run_id": run_id,
         "sentinel": sentinel,
         "client_factory": client_factory,
+        "app": app,
     }, [registry_path.parent, artifact_root, Path(settings.review_store_dir)]
 
 
@@ -330,8 +335,34 @@ def test_all_projection_entry_points_redact_embedded_paths_and_credentials() -> 
         "ghp_FAKE0000000000000000000000000000000000",
         "Bearer FAKE000000000000000000000000",
         "sessionid=FAKE000000000000000000000000",
+        "Authorization: Basic ZmFrZTpzZWNyZXQ=",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmYWtlLXVzZXIifQ.FAKESIGNATURE000000000000",
+        r"\Users\private\record.json",
+        r"\Device\HarddiskVolume1\private\record.json",
+        r"\\?\C:\private\record.json",
+        r"\??\C:\private\record.json",
     )
     outputs = (
+        project_health(HealthStatus(ok=True, service=unsafe_values[11])),
+        project_preflight(
+            PreflightStatus(
+                ok=True,
+                service="control-plane",
+                status="ok",
+                readiness="ready",
+                warnings=[],
+                errors=[],
+                summary={},
+                configuration={
+                    "catalog": {
+                        "accessToken": "SENTINEL-CATALOG-ACCESS-TOKEN",
+                        "note": unsafe_values[12],
+                    }
+                },
+                runtime={},
+                checks=[],
+            )
+        ),
         project_run(Run(run_id="run-1", status="completed", summary=unsafe_values[0])),
         project_event(
             RunEvent(
@@ -345,7 +376,7 @@ def test_all_projection_entry_points_redact_embedded_paths_and_credentials() -> 
             Review(
                 status="review_required",
                 review_required=True,
-                reason_codes=[unsafe_values[2]],
+                reason_codes=[unsafe_values[2], unsafe_values[7]],
             )
         ),
         project_tool(
@@ -354,21 +385,21 @@ def test_all_projection_entry_points_redact_embedded_paths_and_credentials() -> 
                 method="method-1",
                 title="Title",
                 description="Description",
-                tags=[unsafe_values[3]],
+                tags=[unsafe_values[3], unsafe_values[5], unsafe_values[8]],
             )
         ),
         project_workflow(
             Workflow(
                 workflow_id="workflow-1",
                 title="Title",
-                description=unsafe_values[4],
+                description=unsafe_values[9],
                 step_count=0,
             )
         ),
         project_artifact_metadata(
             ArtifactMetadata(
                 artifact_id="validated_input",
-                label=unsafe_values[5],
+                label=unsafe_values[10],
                 present=True,
             )
         ),
@@ -378,14 +409,84 @@ def test_all_projection_entry_points_redact_embedded_paths_and_credentials() -> 
                 artifact_id="validated_input",
                 status="available",
                 provenance="deterministic",
-                data={"inputs": {"note": unsafe_values[6]}},
+                data={"inputs": {"note": unsafe_values[6], "rooted": unsafe_values[4]}},
             )
         ),
     )
 
     serialized = json.dumps(outputs)
     assert not any(value in serialized for value in unsafe_values)
+    assert "SENTINEL-CATALOG-ACCESS-TOKEN" not in serialized
+    assert "accessToken" not in serialized
     assert serialized.count("[redacted]") == len(unsafe_values)
+
+
+def test_isolated_asgi_console_api_and_adk_share_authoritative_read_state(
+    tmp_path: Path,
+) -> None:
+    fixture, roots = _tool_fixture(tmp_path)
+    run_id = fixture["run_id"]
+    before = _snapshot(roots)
+
+    async def fetch(path: str) -> dict[str, Any]:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=fixture["app"]),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path)
+            assert response.status_code == 200
+            return response.json()
+
+    api_run = asyncio.run(fetch(f"/runs/{run_id}"))
+    api_events = asyncio.run(fetch(f"/runs/{run_id}/events"))
+    api_artifacts = asyncio.run(fetch(f"/runs/{run_id}/artifacts"))
+    api_review = asyncio.run(fetch(f"/runs/{run_id}/review"))
+    console = asyncio.run(fetch(f"/console/state?run_id={run_id}"))
+    with adk_tools.use_read_client_factory(fixture["client_factory"]):
+        adk_workflows = adk_tools.list_workflows()
+        adk_registry_tools = adk_tools.list_tools()
+        adk_run = adk_tools.get_run(run_id)
+        adk_events = adk_tools.get_run_events(run_id)
+        adk_artifacts = adk_tools.get_run_artifacts(run_id)
+        adk_review = adk_tools.get_run_review_snapshot(run_id)
+
+    assert {"chainladder-basic", "chainladder-validated"} <= {
+        item["workflow_id"] for item in adk_workflows["data"]
+    }
+    assert {"chainladder", "minimax_experience_study_tool"} <= {
+        item["tool_id"] for item in adk_registry_tools["data"]
+    }
+    assert (
+        api_run["run"]["status"]
+        == console["selected_run"]["status"]
+        == adk_run["data"]["status"]
+        == "needs_review"
+    )
+    api_event_types = [item["type"] for item in api_events["events"]]
+    assert api_event_types == [item["event_type"] for item in console["timeline"]]
+    assert api_event_types == [item["type"] for item in adk_events["data"]]
+    assert api_events["events"][-1]["status"] == adk_run["data"]["status"]
+    assert is_terminal_run_status(api_events["events"][-1]["status"])
+    api_artifact_ids = {
+        item["artifact_id"] for item in api_artifacts["artifacts"] if item["present"]
+    }
+    console_artifact_ids = {
+        item["artifact_id"]
+        for item in console["artifact_panel"]["evidence_items"]
+        if item["present"]
+    }
+    adk_artifact_ids = {
+        item["artifact_id"] for item in adk_artifacts["data"] if item["present"]
+    }
+    assert api_artifact_ids == console_artifact_ids == adk_artifact_ids
+    assert (
+        api_review["review"]["status"]
+        == console["review_panel"]["status"]
+        == adk_review["data"]["status"]
+        == "review_required"
+    )
+    assert _snapshot(roots) == before
+    assert not roots[-1].exists()
 
 
 def _snapshot(roots: list[Path]) -> tuple[tuple[str, bool, tuple[tuple[str, str], ...]], ...]:

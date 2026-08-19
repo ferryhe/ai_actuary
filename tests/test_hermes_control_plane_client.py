@@ -235,9 +235,16 @@ def test_hermes_legacy_import_is_a_thin_shared_client_facade() -> None:
     module = _load_module("control_plane_client_thin", CLIENT_MODULE_PATH)
 
     assert issubclass(module.HermesControlPlaneClient, ReadOnlyControlPlaneClient)
+    assert (
+        module.HermesControlPlaneClient.wait_for_terminal_run
+        is ReadOnlyControlPlaneClient.wait_for_terminal_run
+    )
+    assert module.HermesControlPlaneClient.summarize_run is ReadOnlyControlPlaneClient.summarize_run
     assert "_request_json" not in module.HermesControlPlaneClient.__dict__
     assert "close" not in module.HermesControlPlaneClient.__dict__
     assert "get_run_events" not in module.HermesControlPlaneClient.__dict__
+    assert "wait_for_terminal_run" not in module.HermesControlPlaneClient.__dict__
+    assert "summarize_run" not in module.HermesControlPlaneClient.__dict__
 
 
 def test_hermes_post_is_not_retried_implicitly() -> None:

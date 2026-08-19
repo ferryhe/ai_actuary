@@ -250,6 +250,60 @@ def test_projection_security_failures_have_stable_non_disclosing_codes(
     assert "Traceback" not in serialized
 
 
+def test_projection_rejects_nested_windows_drive_component_through_http(
+    tmp_path: Path,
+) -> None:
+    client, root, _, run_id = _projection_fixture(tmp_path)
+    outside = tmp_path / "outside-drive-component"
+    outside.mkdir()
+    _write_json(
+        outside / "validated_input.json",
+        {"run_id": run_id, "tool_id": "chainladder", "inputs": {"identity": "outside"}},
+    )
+    manifest_path = root / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifact_paths"]["validated_input"] = (
+        f"x/D:{outside}/validated_input.json"
+    )
+    _write_json(manifest_path, manifest)
+
+    response = client.get(f"/runs/{run_id}/artifacts/validated_input/projection")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "code": "artifact_path_rejected",
+        "message": "Registered artifact path failed safety validation.",
+    }
+
+
+@pytest.mark.parametrize(
+    "registered_path",
+    (
+        "nested/name:stream/validated_input.json",
+        "nested/D:/validated_input.json",
+        "nested/?/validated_input.json",
+        "nested/??/validated_input.json",
+        "nested/Device/validated_input.json",
+        "nested/GLOBALROOT/validated_input.json",
+        "nested/UNC/validated_input.json",
+    ),
+)
+def test_projection_rejects_colon_and_windows_namespace_in_any_component(
+    tmp_path: Path,
+    registered_path: str,
+) -> None:
+    client, root, _, run_id = _projection_fixture(tmp_path)
+    manifest_path = root / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifact_paths"]["validated_input"] = registered_path
+    _write_json(manifest_path, manifest)
+
+    response = client.get(f"/runs/{run_id}/artifacts/validated_input/projection")
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "artifact_path_rejected"
+
+
 def test_projection_rejects_intermediate_and_final_symlinks(tmp_path: Path) -> None:
     client, root, _, run_id = _projection_fixture(tmp_path)
     outside = tmp_path / "outside"
@@ -285,27 +339,44 @@ def test_projection_rejects_intermediate_and_final_symlinks(tmp_path: Path) -> N
 
 
 @pytest.mark.skipif(os.name != "nt", reason="junction swap regression requires Windows")
-def test_windows_reader_rejects_repeatable_intermediate_junction_swap(
+def test_windows_endpoint_confines_file_after_intermediate_handle_returns(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from reserving_workflow.adapters.control_plane import projections
 
-    root = tmp_path / "root"
+    client, root, _, run_id = _projection_fixture(tmp_path)
     intermediate = root / "slot"
     outside = tmp_path / "outside"
-    intermediate.mkdir(parents=True)
+    intermediate.mkdir()
     outside.mkdir()
-    _write_json(intermediate / "validated_input.json", {"identity": "original"})
-    _write_json(outside / "validated_input.json", {"identity": "outside"})
+    (root / "validated_input.json").replace(intermediate / "validated_input.json")
+    _write_json(
+        outside / "validated_input.json",
+        {"run_id": run_id, "tool_id": "chainladder", "inputs": {"identity": "outside"}},
+    )
+    manifest_path = root / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifact_paths"]["validated_input"] = "slot/validated_input.json"
+    _write_json(manifest_path, manifest)
     parked = root / "parked"
     original_open_handle = projections._windows_open_handle
     swapped = False
+    sharing_blocked = False
 
-    def open_after_swap(path: Path, *, expect_directory: bool, namespace: str) -> int:
-        nonlocal swapped
+    def open_then_swap(path: Path, *, expect_directory: bool, namespace: str) -> int:
+        nonlocal sharing_blocked, swapped
+        handle = original_open_handle(
+            path,
+            expect_directory=expect_directory,
+            namespace=namespace,
+        )
         if not swapped and path == intermediate:
-            intermediate.rename(parked)
+            try:
+                intermediate.rename(parked)
+            except OSError:
+                sharing_blocked = True
+                return handle
             completed = subprocess.run(
                 ["cmd", "/c", "mklink", "/J", str(intermediate), str(outside)],
                 capture_output=True,
@@ -313,21 +384,22 @@ def test_windows_reader_rejects_repeatable_intermediate_junction_swap(
                 check=False,
             )
             if completed.returncode != 0:
+                projections._windows_close_handle(handle)
                 pytest.skip("junction creation is unavailable in this Windows environment")
             swapped = True
-        return original_open_handle(
-            path,
-            expect_directory=expect_directory,
-            namespace=namespace,
-        )
+        return handle
 
-    monkeypatch.setattr(projections, "_windows_open_handle", open_after_swap)
+    monkeypatch.setattr(projections, "_windows_open_handle", open_then_swap)
 
-    with pytest.raises(ArtifactProjectionReadError) as exc_info:
-        read_bounded_json_object(root, "slot/validated_input.json")
+    response = client.get(f"/runs/{run_id}/artifacts/validated_input/projection")
 
-    assert swapped is True
-    assert exc_info.value.code == "artifact_path_rejected"
+    assert sharing_blocked or swapped
+    if sharing_blocked:
+        assert response.status_code == 200
+        assert response.json()["data"]["inputs"]["sample_name"] == "RAA"
+    else:
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "artifact_path_rejected"
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO creation is unavailable")
@@ -501,6 +573,16 @@ def test_nested_free_map_sanitizer_redacts_sensitive_keys_paths_and_credentials(
         "access-key",
         "privateAccessKey",
         "authHeader",
+        "accessToken",
+        "refreshToken",
+        "sharedSecret",
+        "registryPath",
+        "/var/lib/private/key.json",
+        r"C:\private\key.json",
+        r"\\server\share\key.json",
+        r"\Users\private\key.json",
+        r"\Device\HarddiskVolume1\key.json",
+        r"\\?\C:\private\key.json",
     )
     sensitive_values = (
         "prefix C:\\private\\validated_input.json suffix",
@@ -515,7 +597,11 @@ def test_nested_free_map_sanitizer_redacts_sensitive_keys_paths_and_credentials(
         "AKIAFAKE000000000000",
         "AIzaFAKE000000000000000000000000000000000",
         "Bearer FAKE000000000000000000000000",
+        "Authorization: Basic ZmFrZTpzZWNyZXQ=",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmYWtlLXVzZXIifQ.FAKESIGNATURE000000000000",
         "sessionid=FAKE000000000000000000000000",
+        r"\Users\private\validated_input.json",
+        r"\Device\HarddiskVolume1\private\validated_input.json",
     )
     inputs = {
         "safe_nested": {"label": "safe"},

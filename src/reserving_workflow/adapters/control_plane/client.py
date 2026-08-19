@@ -11,7 +11,13 @@ from typing import Any, TypeVar
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from reserving_workflow.contracts import Review, Run, RunEvent
+from reserving_workflow.contracts import (
+    AgentRunSummary,
+    Review,
+    Run,
+    RunEvent,
+    is_terminal_run_status,
+)
 
 from .contracts import (
     ArtifactListEnvelope,
@@ -175,6 +181,45 @@ class ReadOnlyControlPlaneClient:
             "GET",
             f"/runs/{safe_run_id}/artifacts/{safe_artifact_id}/projection",
             ArtifactProjection,
+        )
+
+    def wait_for_terminal_run(
+        self,
+        run_id: str,
+        *,
+        poll_interval_seconds: float = 0.0,
+        max_polls: int = 20,
+    ) -> AgentRunSummary:
+        """Poll read-only run surfaces until a terminal summary is observed."""
+
+        if max_polls < 1:
+            raise ValueError("max_polls must be at least 1")
+        for attempt in range(max_polls):
+            summary = self.summarize_run(run_id)
+            if summary.terminal:
+                return summary
+            if poll_interval_seconds > 0 and attempt + 1 < max_polls:
+                time.sleep(poll_interval_seconds)
+        return summary
+
+    def summarize_run(self, run_id: str) -> AgentRunSummary:
+        """Combine authoritative read endpoints into the legacy run summary."""
+
+        run = self.get_run(run_id)
+        events = self.get_run_events(run_id)
+        artifacts = self.get_run_artifacts(run_id)
+        review = self.get_run_review(run_id)
+        return AgentRunSummary(
+            run_id=run.run_id,
+            case_id=run.case_id,
+            status=run.status,
+            summary=run.summary,
+            terminal=is_terminal_run_status(run.status),
+            event_count=len(events),
+            last_event_type=(events[-1].type if events else None),
+            artifact_ids=[artifact.artifact_id for artifact in artifacts],
+            review_status=review.status,
+            review_required=bool(run.review_required or review.review_required),
         )
 
     def _request_model(

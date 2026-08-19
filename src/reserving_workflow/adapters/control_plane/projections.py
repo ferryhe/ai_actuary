@@ -5,11 +5,12 @@ from __future__ import annotations
 import errno
 import json
 import math
+import ntpath
 import os
 import re
 import stat
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from reserving_workflow.contracts import Review, Run, RunEvent
@@ -504,12 +505,17 @@ def _category_for_artifact(artifact_id: str) -> str:
 
 def _safe_relative_parts(relative_path: str, *, namespace: str) -> tuple[str, ...]:
     raw = str(relative_path)
-    path = PurePosixPath(raw.replace("\\", "/"))
-    if not raw or raw.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", raw):
+    parts = raw.replace("\\", "/").split("/")
+    if (
+        not raw
+        or any(part in {"", ".", ".."} or ":" in part for part in parts)
+        or any(
+            part.casefold() in {"?", "??", "device", "globalroot", "unc"}
+            for part in parts
+        )
+    ):
         raise _read_error(namespace, "path_rejected", "Registered artifact path failed safety validation.")
-    if any(part in {"", ".", ".."} for part in path.parts):
-        raise _read_error(namespace, "path_rejected", "Registered artifact path failed safety validation.")
-    return tuple(path.parts)
+    return tuple(parts)
 
 
 def _open_descriptor_no_follow(root: Path, parts: tuple[str, ...], *, namespace: str) -> int:
@@ -566,7 +572,13 @@ def _open_descriptor_fallback(root: Path, parts: tuple[str, ...], *, namespace: 
         parent_handles.append(
             _windows_open_handle(current, expect_directory=True, namespace=namespace)
         )
-        for component in (*root.parts[1:], *parts[:-1]):
+        for component in root.parts[1:]:
+            current /= component
+            parent_handles.append(
+                _windows_open_handle(current, expect_directory=True, namespace=namespace)
+            )
+        trusted_root_handle = parent_handles[-1]
+        for component in parts[:-1]:
             current /= component
             parent_handles.append(
                 _windows_open_handle(current, expect_directory=True, namespace=namespace)
@@ -576,6 +588,11 @@ def _open_descriptor_fallback(root: Path, parts: tuple[str, ...], *, namespace: 
         final_handle = _windows_open_handle(
             final_path,
             expect_directory=False,
+            namespace=namespace,
+        )
+        _windows_verify_handle_within_root(
+            final_handle,
+            trusted_root_handle,
             namespace=namespace,
         )
         descriptor = msvcrt.open_osfhandle(
@@ -606,6 +623,7 @@ def _windows_open_handle(
     generic_read = 0x80000000
     file_share_read = 0x00000001
     file_share_write = 0x00000002
+    file_share_delete = 0x00000004
     open_existing = 3
     file_flag_open_reparse_point = 0x00200000
     file_flag_backup_semantics = 0x02000000
@@ -642,7 +660,7 @@ def _windows_open_handle(
     handle = kernel32.CreateFileW(
         str(path),
         file_read_attributes if expect_directory else generic_read,
-        file_share_read | file_share_write,
+        file_share_read | file_share_write | file_share_delete,
         None,
         open_existing,
         file_flag_open_reparse_point | file_flag_backup_semantics,
@@ -690,6 +708,63 @@ def _windows_open_handle(
             "Registered artifact must be a regular file.",
         )
     return raw_handle
+
+
+def _windows_verify_handle_within_root(
+    final_handle: int,
+    trusted_root_handle: int,
+    *,
+    namespace: str,
+) -> None:
+    """Check the fixed final object against the fixed trusted root object."""
+
+    root_path = _windows_final_path_for_handle(trusted_root_handle)
+    final_path = _windows_final_path_for_handle(final_handle)
+    try:
+        common = ntpath.commonpath((root_path, final_path))
+    except ValueError as exc:
+        raise _read_error(
+            namespace,
+            "path_rejected",
+            "Registered artifact path failed safety validation.",
+        ) from exc
+    if ntpath.normcase(common) != ntpath.normcase(root_path):
+        raise _read_error(
+            namespace,
+            "path_rejected",
+            "Registered artifact path failed safety validation.",
+        )
+
+
+def _windows_final_path_for_handle(handle: int) -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetFinalPathNameByHandleW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+    size = 512
+    while True:
+        buffer = ctypes.create_unicode_buffer(size)
+        length = kernel32.GetFinalPathNameByHandleW(handle, buffer, size, 0)
+        if length == 0:
+            error = ctypes.get_last_error()
+            raise OSError(error, "Windows handle path could not be verified safely")
+        if length < size:
+            value = buffer.value
+            break
+        size = int(length) + 1
+
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\") or value.startswith("\\??\\"):
+        value = value[4:]
+    return ntpath.normpath(value)
 
 
 def _windows_close_handle(handle: int) -> None:
@@ -760,7 +835,11 @@ def _safe_json_value(value: Any) -> Any:
 
 
 def _forbidden_key(key: str) -> bool:
-    normalized = re.sub(r"[^a-z0-9]+", "_", key.strip().lower()).strip("_")
+    candidate = key.strip()
+    if _looks_like_absolute_path(candidate) or _looks_sensitive(candidate):
+        return True
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", candidate)
+    normalized = re.sub(r"[^a-z0-9]+", "_", separated.lower()).strip("_")
     compact = normalized.replace("_", "")
     if any(
         marker in compact
@@ -844,6 +923,12 @@ def _looks_like_absolute_path(value: str) -> bool:
         bool(re.search(r"(?i)file:(?://|\\\\)", candidate))
         or bool(re.search(r"[A-Za-z]:[\\/]", candidate))
         or bool(re.search(r"(?:\\\\|(?<!:)//)[^\\/\s]+[\\/][^\\/\s]+", candidate))
+        or bool(
+            re.search(
+                r"(?:^|[^A-Za-z0-9._~\\/])\\(?![\\\s])[^\\/\s]+(?:[\\/][^\\/\s]+)*",
+                candidate,
+            )
+        )
         or bool(re.search(r"(?:^|[^A-Za-z0-9._~/])/(?![/\s])", candidate))
     )
 
@@ -858,7 +943,9 @@ def _looks_sensitive(value: str) -> bool:
     return bool(
         re.search(
             r"(?i)(?:"
+            r"\bauthorization\s*:?\s*basic\s+\S+|"
             r"\bbearer\s+\S+|"
+            r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])|"
             r"\bsessionid\s*[:=]\s*\S+|"
             r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{8,}|"
             r"(?<![A-Za-z0-9])gh[po]_[A-Za-z0-9]{8,}|"

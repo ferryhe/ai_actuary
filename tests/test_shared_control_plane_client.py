@@ -216,6 +216,24 @@ def test_read_only_client_covers_all_public_read_surfaces_with_typed_contracts()
         assert not hasattr(client, "create_run")
 
 
+def test_read_only_client_owns_shared_run_polling_and_summary_behavior() -> None:
+    with ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(_response_for),
+    ) as client:
+        summary = client.summarize_run("run-1")
+        waited = client.wait_for_terminal_run("run-1", max_polls=1)
+
+    assert summary.status == "needs_review"
+    assert summary.terminal is True
+    assert summary.event_count == 2
+    assert summary.last_event_type == "run.needs_review"
+    assert summary.artifact_ids == ["run_manifest"]
+    assert summary.review_status == "review_required"
+    assert summary.review_required is True
+    assert waited == summary
+
+
 @pytest.mark.parametrize(
     ("response", "expected_code"),
     [
