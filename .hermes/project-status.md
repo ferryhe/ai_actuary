@@ -69,8 +69,8 @@ Next safe action: reopen PR7 only for a persistent-service/concurrency requireme
 - Scope: PR2 read-only ADK control-plane adapter only; PR3–PR6 capabilities remain out of scope.
 - Branch/worktree: `feat/adk-readonly-control-plane-adapter` in isolated worktree `C:\Project\ai_actuary_pr2_adk`.
 - Baseline: `origin/main` at `1670dd7c8bb1792ed8792357168548141adac0cc`; no open pull requests at start.
-- Stage: review cycle 2 remediation complete; fresh Reviewer 1/Reviewer 2/Tester rerun pending on the new HEAD.
-- Review cycles: `2/5`.
+- Stage: review cycle 3 remediation complete; fresh Reviewer 1/Reviewer 2/Tester rerun pending on the new committed HEAD.
+- Review cycles: `3/5`.
 - Task heartbeat: `ai-actuary-pr2-delivery-heartbeat` is `ACTIVE`, scoped to this PR2 delivery, and must be deleted after merge/cleanup or a confirmed stop-rule blocker.
 - TDD evidence: first shared-client collection failed with the expected missing-package error; final focused suite passed (`143 passed, 6 skipped`) and full suite passed (`322 passed, 10 skipped`).
 - Platform coverage note: POSIX FIFO/device/descriptor-race checks are present but skip on Windows and must run in Linux CI.
@@ -78,6 +78,9 @@ Next safe action: reopen PR7 only for a persistent-service/concurrency requireme
 - Cycle 1 verification: focused `163 passed, 6 skipped`; PR1/ADK regression `24 passed, 3 skipped`; Windows junction-swap/handle-leak `2 passed`; isolated Linux full suite `347 passed, 5 skipped`; `git diff --check` passed.
 - Cycle 2 blockers: nested Windows drive component escape; post-intermediate-handle junction race; dictionary-key/camelCase/JWT/Basic/rooted-path redaction gaps; Hermes polling/summary not yet shared; missing explicit ADK/API/Console minimum-acceptance parity assertions.
 - Cycle 2 verification: focused `173 passed, 6 skipped`; Hermes + isolated ASGI acceptance `5 passed`; Windows adversarial `3 passed`; PR1/ADK regression `24 passed, 3 skipped`; Python 3.11 Linux/LF full suite `357 passed, 5 skipped`; `git diff --check` passed.
+- Cycle 3 blockers: Windows trusted-root ancestor junction race; compressed-response expansion before byte cap; standalone Basic/all-caps/fileName sanitizer variants; server-safe run_manifest rejected by client revalidation; per-artifact required schema and identity gaps.
+- Cycle 3 verification: TDD RED `25 failed`; focused `207 passed, 6 skipped`; PR1/ADK regression `24 passed, 3 skipped`; Windows trusted-root races `2 passed`; Windows race/handle-leak group `4 passed`; artifact schema/identity and authoritative fixtures `29 passed`; Python 3.11 Linux/LF full suite `389 passed, 7 skipped`; `git diff --check` passed.
+- Updated: `2026-08-19T19:54:16.3437495-04:00`.
 - Updated: `2026-08-19T19:14:17.9354550-04:00`.
 - Updated: `2026-08-19T18:36:25.3388224-04:00`.
 - Updated: `2026-08-19T18:05:18.1966082-04:00`.

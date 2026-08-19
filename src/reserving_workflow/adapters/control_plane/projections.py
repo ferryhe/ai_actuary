@@ -209,8 +209,12 @@ def validate_artifact_projection_schema(artifact_id: str, payload: dict[str, Any
     """Validate the container shapes consumed by each fixed projection."""
 
     required_shapes: dict[str, dict[str, type | tuple[type, ...]]] = {
-        "run_manifest": {"run_id": str, "artifact_paths": dict},
-        "validated_input": {"inputs": dict},
+        "run_manifest": {"case_id": str, "run_id": str, "artifact_paths": dict},
+        "validated_input": {"case_id": str, "tool_id": str, "inputs": dict},
+        "deterministic_result": {"case_id": str, "method": str},
+        "narrative_draft": {"case_id": str, "summary": str},
+        "constitution_check": {"case_id": str, "status": str},
+        "review_packet": {"case_id": str, "run_id": str, "status": str},
     }
     optional_shapes: dict[str, dict[str, type | tuple[type, ...]]] = {
         "run_manifest": {
@@ -280,6 +284,42 @@ def validate_artifact_projection_schema(artifact_id: str, payload: dict[str, Any
                 "Registered artifact does not match the projection schema.",
                 status_code=422,
             )
+
+
+def validate_projected_artifact_payload_schema(
+    artifact_id: str,
+    payload: dict[str, Any],
+) -> None:
+    """Validate an already allowlisted, path-free server projection."""
+
+    try:
+        spec = ARTIFACT_PROJECTION_SPECS[artifact_id]
+    except KeyError as exc:
+        raise ArtifactProjectionReadError(
+            "artifact_schema_mismatch",
+            "Artifact projection does not match the expected safe schema.",
+            status_code=422,
+        ) from exc
+    if set(payload) - set(spec.fields):
+        raise ArtifactProjectionReadError(
+            "artifact_schema_mismatch",
+            "Artifact projection does not match the expected safe schema.",
+            status_code=422,
+        )
+    try:
+        validate_artifact_projection_schema(
+            artifact_id,
+            {
+                **payload,
+                **({"artifact_paths": {}} if artifact_id == "run_manifest" else {}),
+            },
+        )
+    except ArtifactProjectionReadError as exc:
+        raise ArtifactProjectionReadError(
+            "artifact_schema_mismatch",
+            "Artifact projection does not match the expected safe schema.",
+            status_code=422,
+        ) from exc
 
 
 def build_artifact_projection(
@@ -423,12 +463,13 @@ def project_artifact_metadata(value: ArtifactMetadata) -> dict[str, Any]:
 
 
 def project_artifact_projection(value: ArtifactProjection) -> dict[str, Any]:
+    validate_projected_artifact_payload_schema(value.artifact_id, value.data)
     return {
         "run_id": _safe_json_value(value.run_id),
         "artifact_id": _safe_json_value(value.artifact_id),
         "status": value.status,
         "provenance": value.provenance,
-        "data": project_artifact_payload(value.artifact_id, value.data),
+        "data": _safe_json_value(value.data),
         "errors": [
             {
                 "code": _safe_json_value(error.code),
@@ -578,6 +619,11 @@ def _open_descriptor_fallback(root: Path, parts: tuple[str, ...], *, namespace: 
                 _windows_open_handle(current, expect_directory=True, namespace=namespace)
             )
         trusted_root_handle = parent_handles[-1]
+        _windows_verify_configured_root_handle(
+            trusted_root_handle,
+            root,
+            namespace=namespace,
+        )
         for component in parts[:-1]:
             current /= component
             parent_handles.append(
@@ -718,8 +764,15 @@ def _windows_verify_handle_within_root(
 ) -> None:
     """Check the fixed final object against the fixed trusted root object."""
 
-    root_path = _windows_final_path_for_handle(trusted_root_handle)
-    final_path = _windows_final_path_for_handle(final_handle)
+    try:
+        root_path = _windows_normalized_path(_windows_final_path_for_handle(trusted_root_handle))
+        final_path = _windows_normalized_path(_windows_final_path_for_handle(final_handle))
+    except OSError as exc:
+        raise _read_error(
+            namespace,
+            "path_rejected",
+            "Registered artifact path failed safety validation.",
+        ) from exc
     try:
         common = ntpath.commonpath((root_path, final_path))
     except ValueError as exc:
@@ -728,12 +781,48 @@ def _windows_verify_handle_within_root(
             "path_rejected",
             "Registered artifact path failed safety validation.",
         ) from exc
-    if ntpath.normcase(common) != ntpath.normcase(root_path):
+    if common != root_path:
         raise _read_error(
             namespace,
             "path_rejected",
             "Registered artifact path failed safety validation.",
         )
+
+
+def _windows_verify_configured_root_handle(
+    trusted_root_handle: int,
+    configured_root: Path,
+    *,
+    namespace: str,
+) -> None:
+    """Require the fixed root object to be the configured lexical root."""
+
+    try:
+        actual_root = _windows_normalized_path(
+            _windows_final_path_for_handle(trusted_root_handle)
+        )
+        lexical_root = _windows_normalized_path(str(configured_root))
+    except OSError as exc:
+        raise _read_error(
+            namespace,
+            "path_rejected",
+            "Registered artifact path failed safety validation.",
+        ) from exc
+    if actual_root != lexical_root:
+        raise _read_error(
+            namespace,
+            "path_rejected",
+            "Registered artifact path failed safety validation.",
+        )
+
+
+def _windows_normalized_path(value: str) -> str:
+    candidate = value
+    if candidate.startswith("\\\\?\\UNC\\"):
+        candidate = "\\\\" + candidate[8:]
+    elif candidate.startswith("\\\\?\\") or candidate.startswith("\\??\\"):
+        candidate = candidate[4:]
+    return ntpath.normcase(ntpath.normpath(ntpath.abspath(candidate)))
 
 
 def _windows_final_path_for_handle(handle: int) -> str:
@@ -856,8 +945,14 @@ def _forbidden_key(key: str) -> bool:
             "accesskey",
             "privatekey",
             "clientsecret",
+            "accesstoken",
+            "refreshtoken",
+            "sharedsecret",
+            "registrypath",
         )
     ):
+        return True
+    if compact in {"filename", "basicvalue"}:
         return True
     if normalized in {
         "path",
@@ -936,7 +1031,9 @@ def _looks_like_absolute_path(value: str) -> bool:
 def _looks_sensitive(value: str) -> bool:
     lowered = value.lower()
     if re.search(
-        r"\b(?:secret|token|api[-_ ]?key|password|passphrase|credentials?|cookies?|sessionid)\b",
+        r"\b(?:secret|token|api[-_ ]?key|password|passphrase|credentials?|cookies?|sessionid|"
+        r"access[-_ ]?token|refresh[-_ ]?token|shared[-_ ]?secret|registry[-_ ]?path|"
+        r"file[-_ ]?name|basic[-_ ]?value)\b",
         lowered,
     ):
         return True
@@ -944,6 +1041,7 @@ def _looks_sensitive(value: str) -> bool:
         re.search(
             r"(?i)(?:"
             r"\bauthorization\s*:?\s*basic\s+\S+|"
+            r"\bbasic\s+[A-Za-z0-9+/=_-]+|"
             r"\bbearer\s+\S+|"
             r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])|"
             r"\bsessionid\s*[:=]\s*\S+|"
@@ -990,4 +1088,5 @@ __all__ = [
     "provenance_for_artifact",
     "read_bounded_json_object",
     "validate_artifact_projection_schema",
+    "validate_projected_artifact_payload_schema",
 ]

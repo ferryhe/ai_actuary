@@ -23,6 +23,7 @@ from reserving_workflow.adapters.control_plane.projections import (
     build_artifact_projection,
     provenance_for_artifact,
     read_bounded_json_object,
+    validate_artifact_projection_schema,
 )
 from reserving_workflow.artifacts import replay as replay_helpers
 from reserving_workflow.artifacts.storage import read_json_artifact, resolve_artifact_path, write_json_artifact
@@ -1625,11 +1626,30 @@ def _artifact_projection_for_run(entry: dict[str, Any], *, artifact_id: str) -> 
         )
     root = Path(str(artifact_root)).expanduser().absolute()
     manifest = read_bounded_json_object(root, "run_manifest.json", namespace="manifest")
+    validate_artifact_projection_schema("run_manifest", manifest)
     run_id = str(entry.get("run_id"))
     if manifest.get("run_id") != run_id:
         raise ArtifactProjectionReadError(
             "manifest_run_mismatch",
             "Run manifest does not match the selected run.",
+            status_code=409,
+        )
+    expected_case_id = entry.get("case_id")
+    if expected_case_id is not None and manifest.get("case_id") != str(expected_case_id):
+        raise ArtifactProjectionReadError(
+            "manifest_case_mismatch",
+            "Run manifest does not match the selected case.",
+            status_code=409,
+        )
+    expected_tool_id = _registered_tool_id(entry)
+    if (
+        expected_tool_id is not None
+        and "tool_id" in manifest
+        and str(manifest.get("tool_id")) != expected_tool_id
+    ):
+        raise ArtifactProjectionReadError(
+            "manifest_tool_mismatch",
+            "Run manifest does not match the selected tool.",
             status_code=409,
         )
     artifact_paths = manifest.get("artifact_paths")
@@ -1654,22 +1674,38 @@ def _artifact_projection_for_run(entry: dict[str, Any], *, artifact_id: str) -> 
             status_code=422,
         )
     payload = read_bounded_json_object(root, raw_ref, namespace="artifact")
+    validate_artifact_projection_schema(artifact_id, payload)
+    if expected_case_id is not None and payload.get("case_id") != str(expected_case_id):
+        raise ArtifactProjectionReadError(
+            "artifact_case_mismatch",
+            "Registered artifact does not match the selected case.",
+            status_code=409,
+        )
     if "run_id" in payload and payload.get("run_id") != run_id:
         raise ArtifactProjectionReadError(
             "artifact_run_mismatch",
             "Registered artifact does not match the selected run.",
             status_code=409,
         )
-    expected_tool_id = _registered_tool_id(entry)
     if (
-        artifact_id in {"validated_input", "deterministic_result"}
-        and expected_tool_id is not None
+        expected_tool_id is not None
         and "tool_id" in payload
         and str(payload.get("tool_id")) != expected_tool_id
     ):
         raise ArtifactProjectionReadError(
             "artifact_tool_mismatch",
             "Registered artifact does not match the selected tool.",
+            status_code=409,
+        )
+    if (
+        artifact_id == "deterministic_result"
+        and expected_tool_id is not None
+        and "tool_id" not in payload
+        and str(payload.get("method")) != expected_tool_id
+    ):
+        raise ArtifactProjectionReadError(
+            "artifact_method_mismatch",
+            "Registered artifact does not match the selected method.",
             status_code=409,
         )
     return build_artifact_projection(

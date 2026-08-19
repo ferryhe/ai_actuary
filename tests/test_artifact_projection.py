@@ -27,6 +27,9 @@ from reserving_workflow.api.app import ApiSettings, create_app
 from reserving_workflow.storage.local import LocalRunStore
 
 
+GOLDEN_RUN_DIR = Path(__file__).parent / "fixtures" / "tool_contracts" / "golden_run"
+
+
 class LocalApiClient:
     def __init__(self, app: Any):
         self._app = app
@@ -159,6 +162,70 @@ def test_allowlisted_json_artifacts_have_independent_path_free_projections(
     assert "artifact_root" not in serialized
 
 
+def test_authoritative_chainladder_fixtures_remain_projectable(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "artifacts" / "golden-raa-20260520T120000Z"
+    artifact_root.mkdir(parents=True)
+    for artifact_id in (
+        "deterministic_result",
+        "narrative_draft",
+        "constitution_check",
+        "review_packet",
+    ):
+        _write_json(
+            artifact_root / f"{artifact_id}.json",
+            json.loads((GOLDEN_RUN_DIR / f"{artifact_id}.json").read_text(encoding="utf-8")),
+        )
+    _write_json(
+        artifact_root / "validated_input.json",
+        {
+            "case_id": "golden-raa",
+            "tool_id": "chainladder",
+            "inputs": {"sample_name": "RAA", "method_variant": "chainladder"},
+        },
+    )
+    manifest = json.loads((GOLDEN_RUN_DIR / "run_manifest.json").read_text(encoding="utf-8"))
+    manifest["artifact_paths"]["validated_input"] = "validated_input.json"
+    _write_json(artifact_root / "run_manifest.json", manifest)
+    registry_path = tmp_path / "registry" / "runs.json"
+    LocalRunStore(registry_path).create_run(
+        task_id="golden-task",
+        case_id="golden-raa",
+        run_id="golden-raa-20260520T120000Z",
+        status="needs_review",
+        artifact_root=str(artifact_root),
+        operator_params={"method": "chainladder"},
+        review_required=True,
+    )
+    client = LocalApiClient(
+        create_app(
+            settings=ApiSettings(
+                registry_path=registry_path,
+                artifact_root=tmp_path / "unused-artifacts",
+                review_store_dir=tmp_path / "reviews",
+            )
+        )
+    )
+
+    responses = {
+        artifact_id: client.get(
+            "/runs/golden-raa-20260520T120000Z/"
+            f"artifacts/{artifact_id}/projection"
+        )
+        for artifact_id in (
+            "run_manifest",
+            "validated_input",
+            "deterministic_result",
+            "narrative_draft",
+            "constitution_check",
+            "review_packet",
+        )
+    }
+
+    assert {artifact_id: response.status_code for artifact_id, response in responses.items()} == {
+        artifact_id: 200 for artifact_id in responses
+    }
+
+
 def test_projection_rejects_unknown_artifact_and_missing_run(tmp_path: Path) -> None:
     client, _, _, run_id = _projection_fixture(tmp_path)
 
@@ -225,11 +292,35 @@ def test_projection_security_failures_have_stable_non_disclosing_codes(
     elif mutation == "artifact_corrupt":
         target.write_text("{broken", encoding="utf-8")
     elif mutation == "artifact_schema_mismatch":
-        _write_json(target, {"run_id": run_id, "tool_id": "chainladder", "inputs": []})
+        _write_json(
+            target,
+            {
+                "case_id": "case-projection-1",
+                "run_id": run_id,
+                "tool_id": "chainladder",
+                "inputs": [],
+            },
+        )
     elif mutation == "artifact_run_mismatch":
-        _write_json(target, {"run_id": "other-run", "tool_id": "chainladder", "inputs": {}})
+        _write_json(
+            target,
+            {
+                "case_id": "case-projection-1",
+                "run_id": "other-run",
+                "tool_id": "chainladder",
+                "inputs": {},
+            },
+        )
     elif mutation == "artifact_tool_mismatch":
-        _write_json(target, {"run_id": run_id, "tool_id": "other-tool", "inputs": {}})
+        _write_json(
+            target,
+            {
+                "case_id": "case-projection-1",
+                "run_id": run_id,
+                "tool_id": "other-tool",
+                "inputs": {},
+            },
+        )
     elif mutation == "absolute_path":
         manifest["artifact_paths"]["validated_input"] = str(target)
         _write_json(manifest_path, manifest)
@@ -402,6 +493,82 @@ def test_windows_endpoint_confines_file_after_intermediate_handle_returns(
         assert response.json()["detail"]["code"] == "artifact_path_rejected"
 
 
+@pytest.mark.parametrize("race_namespace", ("manifest", "artifact"))
+@pytest.mark.skipif(os.name != "nt", reason="junction swap regression requires Windows")
+def test_windows_endpoint_rejects_trusted_root_ancestor_junction_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    race_namespace: str,
+) -> None:
+    from reserving_workflow.adapters.control_plane import projections
+
+    client, root, _, run_id = _projection_fixture(tmp_path)
+    configured_ancestor = root.parent
+    parked_ancestor = tmp_path / "parked-artifacts"
+    outside_ancestor = tmp_path / "outside-artifacts"
+    outside_root = outside_ancestor / run_id
+    outside_root.mkdir(parents=True)
+    _write_json(
+        outside_root / "validated_input.json",
+        {
+            "case_id": "case-projection-1",
+            "run_id": run_id,
+            "tool_id": "chainladder",
+            "inputs": {"identity": "outside"},
+        },
+    )
+    _write_json(
+        outside_root / "run_manifest.json",
+        {
+            "case_id": "case-projection-1",
+            "run_id": run_id,
+            "artifact_paths": {
+                "run_manifest": "run_manifest.json",
+                "validated_input": "validated_input.json",
+            },
+        },
+    )
+    original_open_handle = projections._windows_open_handle
+    swapped = False
+
+    def open_then_swap(path: Path, *, expect_directory: bool, namespace: str) -> int:
+        nonlocal swapped
+        handle = original_open_handle(
+            path,
+            expect_directory=expect_directory,
+            namespace=namespace,
+        )
+        if not swapped and namespace == race_namespace and path == configured_ancestor:
+            configured_ancestor.rename(parked_ancestor)
+            completed = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(configured_ancestor), str(outside_ancestor)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if completed.returncode != 0:
+                projections._windows_close_handle(handle)
+                parked_ancestor.rename(configured_ancestor)
+                pytest.skip("junction creation is unavailable in this Windows environment")
+            swapped = True
+        return handle
+
+    monkeypatch.setattr(projections, "_windows_open_handle", open_then_swap)
+    try:
+        response = client.get(f"/runs/{run_id}/artifacts/validated_input/projection")
+    finally:
+        if swapped:
+            os.rmdir(configured_ancestor)
+            parked_ancestor.rename(configured_ancestor)
+
+    assert swapped
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "code": f"{race_namespace}_path_rejected",
+        "message": "Registered artifact path failed safety validation.",
+    }
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO creation is unavailable")
 def test_projection_rejects_fifo_without_blocking(tmp_path: Path) -> None:
     client, root, _, run_id = _projection_fixture(tmp_path)
@@ -457,6 +624,7 @@ def test_projection_enforces_node_and_projected_output_limits(tmp_path: Path) ->
     node_response = client.get(f"/runs/{run_id}/artifacts/deterministic_result/projection")
 
     oversized_projection = {
+        "case_id": "case-projection-1",
         "run_id": run_id,
         "tool_id": "chainladder",
         "inputs": {
@@ -503,6 +671,7 @@ def test_projection_removes_paths_secret_fields_and_sensitive_values(tmp_path: P
     _write_json(
         root / "validated_input.json",
         {
+            "case_id": "case-projection-1",
             "run_id": run_id,
             "tool_id": "chainladder",
             "inputs": {
@@ -542,12 +711,12 @@ def test_each_artifact_projection_has_an_independent_top_level_allowlist(
     artifact_id: str,
 ) -> None:
     payloads = {
-        "run_manifest": {"run_id": "run-1", "artifact_paths": {}},
-        "validated_input": {"inputs": {}},
-        "deterministic_result": {"reserve_summary": {}},
-        "narrative_draft": {"summary": "safe"},
-        "constitution_check": {"status": "pass"},
-        "review_packet": {"status": "review_required"},
+        "run_manifest": {"case_id": "case-1", "run_id": "run-1", "artifact_paths": {}},
+        "validated_input": {"case_id": "case-1", "tool_id": "chainladder", "inputs": {}},
+        "deterministic_result": {"case_id": "case-1", "method": "chainladder", "reserve_summary": {}},
+        "narrative_draft": {"case_id": "case-1", "summary": "safe"},
+        "constitution_check": {"case_id": "case-1", "status": "pass"},
+        "review_packet": {"case_id": "case-1", "run_id": "run-1", "status": "review_required"},
     }
     payload = {
         **payloads[artifact_id],
@@ -577,6 +746,13 @@ def test_nested_free_map_sanitizer_redacts_sensitive_keys_paths_and_credentials(
         "refreshToken",
         "sharedSecret",
         "registryPath",
+        "ACCESSTOKEN",
+        "REFRESHTOKEN",
+        "SHAREDSECRET",
+        "REGISTRYPATH",
+        "fileName",
+        "file_name",
+        "BasicValue",
         "/var/lib/private/key.json",
         r"C:\private\key.json",
         r"\\server\share\key.json",
@@ -598,6 +774,13 @@ def test_nested_free_map_sanitizer_redacts_sensitive_keys_paths_and_credentials(
         "AIzaFAKE000000000000000000000000000000000",
         "Bearer FAKE000000000000000000000000",
         "Authorization: Basic ZmFrZTpzZWNyZXQ=",
+        "Basic ZmFrZTpzZWNyZXQ=",
+        "ACCESSTOKEN=SENTINEL-CONCATENATED-ACCESS",
+        "REFRESHTOKEN=SENTINEL-CONCATENATED-REFRESH",
+        "SHAREDSECRET=SENTINEL-CONCATENATED-SHARED",
+        "REGISTRYPATH=SENTINEL-CONCATENATED-REGISTRY",
+        "fileName=SENTINEL-CONCATENATED-FILENAME",
+        "BasicValue=SENTINEL-CONCATENATED-BASIC",
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmYWtlLXVzZXIifQ.FAKESIGNATURE000000000000",
         "sessionid=FAKE000000000000000000000000",
         r"\Users\private\validated_input.json",
@@ -611,11 +794,138 @@ def test_nested_free_map_sanitizer_redacts_sensitive_keys_paths_and_credentials(
         },
     }
 
-    projected = project_artifact_payload("validated_input", {"inputs": inputs})
+    projected = project_artifact_payload(
+        "validated_input",
+        {"case_id": "case-1", "tool_id": "chainladder", "inputs": inputs},
+    )
 
     assert projected["inputs"]["safe_nested"] == {"label": "safe"}
     assert projected["inputs"]["sensitive_keys"] == {}
     assert set(projected["inputs"]["sensitive_values"].values()) == {"[redacted]"}
+
+
+@pytest.mark.parametrize(
+    ("artifact_id", "missing_field"),
+    (
+        ("run_manifest", "case_id"),
+        ("validated_input", "inputs"),
+        ("deterministic_result", "method"),
+        ("narrative_draft", "summary"),
+        ("constitution_check", "status"),
+        ("review_packet", "status"),
+    ),
+)
+@pytest.mark.parametrize("mutation", ("empty", "missing"))
+def test_each_allowlisted_artifact_rejects_empty_or_missing_required_schema(
+    tmp_path: Path,
+    artifact_id: str,
+    missing_field: str,
+    mutation: str,
+) -> None:
+    client, root, _, run_id = _projection_fixture(tmp_path)
+    target = root / f"{artifact_id}.json"
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    if mutation == "empty":
+        payload = {}
+    else:
+        payload.pop(missing_field)
+    _write_json(target, payload)
+
+    response = client.get(f"/runs/{run_id}/artifacts/{artifact_id}/projection")
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "artifact_schema_mismatch"
+
+
+@pytest.mark.parametrize(
+    "artifact_id",
+    (
+        "run_manifest",
+        "validated_input",
+        "deterministic_result",
+        "narrative_draft",
+        "constitution_check",
+        "review_packet",
+    ),
+)
+def test_each_allowlisted_artifact_rejects_wrong_case_identity(
+    tmp_path: Path,
+    artifact_id: str,
+) -> None:
+    client, root, _, run_id = _projection_fixture(tmp_path)
+    target = root / f"{artifact_id}.json"
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload["case_id"] = "other-case"
+    _write_json(target, payload)
+
+    response = client.get(f"/runs/{run_id}/artifacts/{artifact_id}/projection")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == (
+        "manifest_case_mismatch" if artifact_id == "run_manifest" else "artifact_case_mismatch"
+    )
+
+
+@pytest.mark.parametrize(
+    "artifact_id",
+    (
+        "run_manifest",
+        "validated_input",
+        "deterministic_result",
+        "narrative_draft",
+        "constitution_check",
+        "review_packet",
+    ),
+)
+def test_each_allowlisted_artifact_rejects_wrong_run_identity_when_present(
+    tmp_path: Path,
+    artifact_id: str,
+) -> None:
+    client, root, _, run_id = _projection_fixture(tmp_path)
+    target = root / f"{artifact_id}.json"
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload["run_id"] = "other-run"
+    _write_json(target, payload)
+
+    response = client.get(f"/runs/{run_id}/artifacts/{artifact_id}/projection")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == (
+        "manifest_run_mismatch" if artifact_id == "run_manifest" else "artifact_run_mismatch"
+    )
+
+
+@pytest.mark.parametrize("artifact_id", ("run_manifest", "validated_input", "deterministic_result"))
+def test_applicable_artifacts_reject_wrong_tool_identity(
+    tmp_path: Path,
+    artifact_id: str,
+) -> None:
+    client, root, _, run_id = _projection_fixture(tmp_path)
+    target = root / f"{artifact_id}.json"
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload["tool_id"] = "other-tool"
+    _write_json(target, payload)
+
+    response = client.get(f"/runs/{run_id}/artifacts/{artifact_id}/projection")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == (
+        "manifest_tool_mismatch" if artifact_id == "run_manifest" else "artifact_tool_mismatch"
+    )
+
+
+def test_legacy_deterministic_result_rejects_wrong_method_identity(tmp_path: Path) -> None:
+    client, root, _, run_id = _projection_fixture(tmp_path)
+    target = root / "deterministic_result.json"
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload.pop("tool_id")
+    payload["method"] = "other-method"
+    _write_json(target, payload)
+
+    response = client.get(f"/runs/{run_id}/artifacts/deterministic_result/projection")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "artifact_method_mismatch"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="descriptor replacement semantics require POSIX")

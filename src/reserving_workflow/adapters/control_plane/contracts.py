@@ -116,6 +116,8 @@ class ProjectionError(ResponseContract):
 
 
 class ArtifactProjection(ResponseContract):
+    model_config = ConfigDict(extra="forbid")
+
     run_id: str
     artifact_id: str
     status: Literal["available"]

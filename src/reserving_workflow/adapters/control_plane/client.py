@@ -43,6 +43,10 @@ from .errors import (
     ControlPlaneTransportError,
     error_for_status,
 )
+from .projections import (
+    ArtifactProjectionReadError,
+    validate_projected_artifact_payload_schema,
+)
 
 
 DEFAULT_MAX_RESPONSE_BYTES = 1_000_000
@@ -73,9 +77,12 @@ class ReadOnlyControlPlaneClient:
         if retry_backoff_seconds < 0:
             raise ValueError("retry_backoff_seconds must not be negative")
         self._owns_client = client is None
+        client_headers = httpx.Headers(headers)
+        if "accept-encoding" not in client_headers:
+            client_headers["accept-encoding"] = "identity"
         self._client = client or httpx.Client(
             base_url=base_url.rstrip("/"),
-            headers=headers,
+            headers=client_headers,
             timeout=timeout,
             transport=transport,
         )
@@ -234,8 +241,14 @@ class ReadOnlyControlPlaneClient:
 
     def _validate_contract(self, model: type[_ModelT], payload: Any) -> _ModelT:
         try:
-            return model.model_validate(payload, strict=True)
-        except (TypeError, ValueError, ValidationError) as exc:
+            validated = model.model_validate(payload, strict=True)
+            if isinstance(validated, ArtifactProjection):
+                validate_projected_artifact_payload_schema(
+                    validated.artifact_id,
+                    validated.data,
+                )
+            return validated
+        except (ArtifactProjectionReadError, KeyError, TypeError, ValueError, ValidationError) as exc:
             raise ControlPlaneContractError(
                 code="invalid_contract",
                 message="Control plane returned an invalid response contract.",
@@ -255,10 +268,19 @@ class ReadOnlyControlPlaneClient:
         raise AssertionError("bounded request loop exhausted")
 
     def _request_json_once(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        request_headers = httpx.Headers(kwargs.pop("headers", None))
+        if "accept-encoding" not in request_headers:
+            request_headers["accept-encoding"] = "identity"
         try:
-            with self._client.stream(method, path, **kwargs) as response:
+            with self._client.stream(method, path, headers=request_headers, **kwargs) as response:
                 if response.status_code >= 400:
                     raise error_for_status(response.status_code)
+                content_encoding = response.headers.get("content-encoding")
+                if content_encoding is not None and content_encoding.strip().casefold() != "identity":
+                    raise ControlPlaneResponseError(
+                        code="unsupported_content_encoding",
+                        message="Control plane returned an unsupported content encoding.",
+                    )
                 declared_length = response.headers.get("content-length")
                 if declared_length is not None:
                     try:
@@ -274,7 +296,12 @@ class ReadOnlyControlPlaneClient:
                             message="Control plane response exceeded the bounded response limit.",
                         )
                 content = bytearray()
-                for chunk in response.iter_bytes():
+                if response.is_stream_consumed:
+                    chunks = (response.content,)
+                else:
+                    chunk_size = min(64 * 1024, self._max_response_bytes + 1)
+                    chunks = response.iter_raw(chunk_size=chunk_size)
+                for chunk in chunks:
                     if len(content) + len(chunk) > self._max_response_bytes:
                         raise ControlPlaneResponseError(
                             code="response_too_large",

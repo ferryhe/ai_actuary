@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 from typing import Iterator
 
@@ -18,6 +19,16 @@ class ChunkedStream(httpx.SyncByteStream):
 
     def __iter__(self) -> Iterator[bytes]:
         yield from self._chunks
+
+
+class GzipBombStream(httpx.SyncByteStream):
+    def __init__(self) -> None:
+        self.iterated = False
+        self._compressed = gzip.compress(b'{"ok":true,"padding":"' + b"x" * 1_000_000 + b'"}')
+
+    def __iter__(self) -> Iterator[bytes]:
+        self.iterated = True
+        yield self._compressed
 
 
 def _response_for(request: httpx.Request) -> httpx.Response:
@@ -334,6 +345,62 @@ def test_client_rejects_declared_and_streamed_oversized_responses_before_unbound
     with pytest.raises(ControlPlaneError) as streamed_error:
         streamed.get_health()
     assert streamed_error.value.code == "response_too_large"
+
+
+def test_client_requests_identity_and_rejects_compressed_response_without_iterating() -> None:
+    stream = GzipBombStream()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(
+            200,
+            headers={"content-encoding": "gzip"},
+            stream=stream,
+        )
+
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(handler),
+        max_response_bytes=32,
+        max_get_attempts=1,
+    )
+
+    with pytest.raises(ControlPlaneError) as exc_info:
+        client.get_health()
+
+    assert exc_info.value.code == "unsupported_content_encoding"
+    assert stream.iterated is False
+
+
+def test_client_rejects_unknown_raw_fields_in_safe_artifact_projection() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "run_id": "run-1",
+                "artifact_id": "validated_input",
+                "status": "available",
+                "provenance": "deterministic",
+                "data": {
+                    "case_id": "case-1",
+                    "tool_id": "chainladder",
+                    "inputs": {},
+                    "artifact_paths": {"validated_input": "C:/private/input.json"},
+                },
+                "errors": [],
+            },
+        )
+
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(handler),
+        max_get_attempts=1,
+    )
+
+    with pytest.raises(ControlPlaneError) as exc_info:
+        client.get_artifact_projection("run-1", "validated_input")
+
+    assert exc_info.value.code == "invalid_contract"
 
 
 def test_get_retry_is_bounded_and_only_for_transient_failures() -> None:

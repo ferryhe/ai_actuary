@@ -752,6 +752,17 @@ def test_post_run_executes_minimax_experience_study_tool(tmp_path):
     assert artifact_panel["missing_expected_artifacts"] == []
     assert artifact_panel["review_artifact_refs"] == []
     assert artifact_panel["decision_artifact_refs"] == []
+    for artifact_id in (
+        "run_manifest",
+        "validated_input",
+        "deterministic_result",
+        "narrative_draft",
+        "constitution_check",
+    ):
+        projection = client.get(
+            f"/runs/{payload['run_id']}/artifacts/{artifact_id}/projection"
+        )
+        assert projection.status_code == 200, (artifact_id, projection.json())
 
 
 def test_experience_study_result_projection(tmp_path):

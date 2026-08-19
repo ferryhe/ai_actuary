@@ -301,6 +301,8 @@ def test_adk_tools_redact_sensitive_values_even_in_allowed_fields(tool_name: str
                 "status": "available",
                 "provenance": "deterministic",
                 "data": {
+                    "case_id": "case-1",
+                    "tool_id": "chainladder",
                     "inputs": {"note": f"C:/private/{sentinel}"},
                 },
                 "errors": [],
@@ -326,6 +328,33 @@ def test_adk_tools_redact_sensitive_values_even_in_allowed_fields(tool_name: str
     assert "C:/private" not in serialized
 
 
+def test_adk_run_manifest_accepts_the_server_safe_projection_without_raw_paths(
+    tmp_path: Path,
+) -> None:
+    fixture, roots = _tool_fixture(tmp_path)
+    before = _snapshot(roots)
+
+    with adk_tools.use_read_client_factory(fixture["client_factory"]):
+        result = adk_tools.get_artifact_projection(fixture["run_id"], "run_manifest")
+
+    assert result == {
+        "ok": True,
+        "data": {
+            "run_id": fixture["run_id"],
+            "artifact_id": "run_manifest",
+            "status": "available",
+            "provenance": "system_manifest",
+            "data": {
+                "case_id": "case-adk-read-1",
+                "run_id": fixture["run_id"],
+                "created_by": "test",
+            },
+            "errors": [],
+        },
+    }
+    assert _snapshot(roots) == before
+
+
 def test_all_projection_entry_points_redact_embedded_paths_and_credentials() -> None:
     unsafe_values = (
         "prefix C:\\private\\record.json suffix",
@@ -336,6 +365,7 @@ def test_all_projection_entry_points_redact_embedded_paths_and_credentials() -> 
         "Bearer FAKE000000000000000000000000",
         "sessionid=FAKE000000000000000000000000",
         "Authorization: Basic ZmFrZTpzZWNyZXQ=",
+        "Basic ZmFrZTpzZWNyZXQ=",
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmYWtlLXVzZXIifQ.FAKESIGNATURE000000000000",
         r"\Users\private\record.json",
         r"\Device\HarddiskVolume1\private\record.json",
@@ -343,7 +373,7 @@ def test_all_projection_entry_points_redact_embedded_paths_and_credentials() -> 
         r"\??\C:\private\record.json",
     )
     outputs = (
-        project_health(HealthStatus(ok=True, service=unsafe_values[11])),
+        project_health(HealthStatus(ok=True, service=unsafe_values[12])),
         project_preflight(
             PreflightStatus(
                 ok=True,
@@ -356,7 +386,7 @@ def test_all_projection_entry_points_redact_embedded_paths_and_credentials() -> 
                 configuration={
                     "catalog": {
                         "accessToken": "SENTINEL-CATALOG-ACCESS-TOKEN",
-                        "note": unsafe_values[12],
+                        "note": unsafe_values[13],
                     }
                 },
                 runtime={},
@@ -385,21 +415,21 @@ def test_all_projection_entry_points_redact_embedded_paths_and_credentials() -> 
                 method="method-1",
                 title="Title",
                 description="Description",
-                tags=[unsafe_values[3], unsafe_values[5], unsafe_values[8]],
+                tags=[unsafe_values[3], unsafe_values[5], unsafe_values[9]],
             )
         ),
         project_workflow(
             Workflow(
                 workflow_id="workflow-1",
                 title="Title",
-                description=unsafe_values[9],
+                description=unsafe_values[10],
                 step_count=0,
             )
         ),
         project_artifact_metadata(
             ArtifactMetadata(
                 artifact_id="validated_input",
-                label=unsafe_values[10],
+                label=unsafe_values[11],
                 present=True,
             )
         ),
@@ -409,7 +439,15 @@ def test_all_projection_entry_points_redact_embedded_paths_and_credentials() -> 
                 artifact_id="validated_input",
                 status="available",
                 provenance="deterministic",
-                data={"inputs": {"note": unsafe_values[6], "rooted": unsafe_values[4]}},
+                data={
+                    "case_id": "case-1",
+                    "tool_id": "chainladder",
+                    "inputs": {
+                        "note": unsafe_values[6],
+                        "rooted": unsafe_values[4],
+                        "basic": unsafe_values[8],
+                    },
+                },
             )
         ),
     )
