@@ -780,14 +780,18 @@ def _run_registered_model_tool(operator_params: dict[str, Any]) -> dict[str, Any
         runner = MODEL_COMPARISON_TOOL_RUNNERS[tool_id]
     except KeyError as exc:
         raise ValueError(f"Unknown model comparison tool_id: {tool_id}") from exc
-    return runner(**params)
+    try:
+        return runner(**params)
+    except Exception as exc:
+        _record_background_failure(operator_params, exc)
+        raise
 
 
 def _run_model_tool_background(operator_params: dict[str, Any]) -> None:
     try:
         _run_registered_model_tool(operator_params)
-    except Exception as exc:
-        _record_background_failure(operator_params, exc)
+    except Exception:
+        return
 
 
 def _run_workflow_background(operator_params: dict[str, Any]) -> None:
@@ -804,13 +808,16 @@ def _record_background_failure(operator_params: dict[str, Any], exc: Exception) 
     case_id = operator_params.get("case_id")
     run_id = operator_params.get("run_id") or _generate_api_run_id(str(case_id or "case"))
     artifact_dir = operator_params.get("artifact_dir") or "./tmp/api-artifacts/background-failed"
+    artifact_root = Path(artifact_dir).expanduser().resolve()
+    if operator_params.get("tool_id") in MODEL_COMPARISON_TOOL_RUNNERS:
+        artifact_root = (artifact_root / str(run_id)).resolve()
     run_registry.record_run_event(
         registry_path=registry_path,
         task_id=f"operator-{case_id or 'unknown-case'}",
         case_id=str(case_id) if case_id is not None else None,
         run_id=str(run_id),
         status="failed",
-        artifact_root=str(Path(artifact_dir).expanduser().resolve()),
+        artifact_root=str(artifact_root),
         summary=f"Background operator run failed for {case_id or 'unknown-case'}",
         created_by=operator_params.get("created_by"),
         operator_id=operator_params.get("operator_id"),
@@ -1847,6 +1854,12 @@ def _console_expected_artifact_refs(
     for spec in _CONSOLE_ARTIFACT_SPECS:
         if spec["category"] != category:
             continue
+        if (
+            manifest is not None
+            and category != "primary"
+            and spec["artifact_id"] not in manifest_paths
+        ):
+            continue
         artifact_path = _console_artifact_path(
             artifact_root,
             manifest_paths.get(spec["artifact_id"]),
@@ -2052,7 +2065,7 @@ def _operator_console_html() -> str:
         <label>operator_id<input name="operator_id" value="local-actuary"></label>
         <label>workspace_id<input name="workspace_id" value="default-workspace"></label>
         <label>created_by<input name="created_by" placeholder="defaults to operator_id"></label>
-        <label>review_threshold_origin_count<input name="review_threshold_origin_count" type="number" min="0" step="1" placeholder="optional"></label>
+        <label>review_threshold_origin_count<input id="review-threshold-input" name="review_threshold_origin_count" type="number" min="0" step="1" placeholder="optional"></label>
         <label><input name="background" type="checkbox" checked> background</label>
         <button id="create-run-button" class="primary" type="submit">Create run</button>
       </form>
@@ -2324,9 +2337,16 @@ def _operator_console_html() -> str:
     function applyToolDefaults() {
       const selector = document.getElementById("tool-selector");
       const sampleInput = document.getElementById("sample-name-input");
+      const thresholdInput = document.getElementById("review-threshold-input");
+      const backgroundInput = document.querySelector('input[name="background"]');
       const tool = toolCatalogById.get(selector.value);
       const defaults = tool && tool.console_defaults ? tool.console_defaults : {};
       sampleInput.value = defaults.sample_name || (selector.value === "chainladder" ? "RAA" : "");
+      thresholdInput.disabled = selector.value !== "chainladder";
+      if (thresholdInput.disabled) thresholdInput.value = "";
+      if (typeof defaults.background === "boolean") {
+        backgroundInput.checked = defaults.background;
+      }
     }
 
     function reviewDetailsUrl(review) {

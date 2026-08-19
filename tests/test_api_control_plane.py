@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import httpx
+import pytest
 from reserving_workflow.api import app as api_app
 
 from reserving_workflow.api.app import (
@@ -16,6 +17,7 @@ from reserving_workflow.api.app import (
     create_app,
 )
 from reserving_workflow.schemas import RunArtifactManifest
+from reserving_workflow.storage.local import LocalRunStore
 from reserving_workflow.tools import ToolRegistry
 from reserving_workflow.workflows import WorkflowCatalog, WorkflowCatalogEntry, WorkflowStepEntry
 
@@ -744,6 +746,12 @@ def test_post_run_executes_minimax_experience_study_tool(tmp_path):
     assert deterministic_result["model"] == "MiniMax-M3"
     assert deterministic_result["result_count"] == 8
 
+    console_state = client.get(f"/console/state?run_id={payload['run_id']}").json()
+    artifact_panel = console_state["artifact_panel"]
+    assert artifact_panel["missing_expected_artifacts"] == []
+    assert artifact_panel["review_artifact_refs"] == []
+    assert artifact_panel["decision_artifact_refs"] == []
+
 
 def test_minimax_experience_tool_supports_background_execution_and_rerun(tmp_path):
     scheduled = []
@@ -776,6 +784,36 @@ def test_minimax_experience_tool_supports_background_execution_and_rerun(tmp_pat
     assert rerun.json()["status"] == "completed"
     assert rerun.json()["run_id"] != run_id
     assert rerun.json()["rerun"]["source_run_id"] == run_id
+
+
+def test_minimax_experience_tool_records_unexpected_synchronous_failure(
+    tmp_path, monkeypatch
+):
+    def fail_runner(**kwargs):
+        raise RuntimeError("injected model tool failure")
+
+    monkeypatch.setitem(
+        api_app.MODEL_COMPARISON_TOOL_RUNNERS,
+        "minimax_experience_study_tool",
+        fail_runner,
+    )
+    client = _client(tmp_path)
+
+    with pytest.raises(RuntimeError, match="injected model tool failure"):
+        client.post(
+            "/runs",
+            json={
+                "case_id": "minimax-failure-case",
+                "tool_id": "minimax_experience_study_tool",
+                "inputs": {"sample_name": "ae_small"},
+            },
+        )
+
+    runs = LocalRunStore(tmp_path / "run-registry.json").list_runs()
+    assert len(runs) == 1
+    assert runs[0]["status"] == "failed"
+    assert runs[0]["errors"] == ["injected model tool failure"]
+    assert Path(runs[0]["artifact_root"]).name == runs[0]["run_id"]
 
 
 def test_post_run_can_accept_background_execution_and_poll_events(tmp_path):
@@ -946,6 +984,7 @@ def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path)
     assert "method: toolId" in html
     assert "applyToolDefaults()" in html
     assert "defaults.sample_name" in html
+    assert 'thresholdInput.disabled = selector.value !== "chainladder"' in html
     assert "Tool catalog" in html
     assert "fetch(`/runs/${encodeURIComponent(runId)}/events`)" in html
     assert "review-inbox" in html

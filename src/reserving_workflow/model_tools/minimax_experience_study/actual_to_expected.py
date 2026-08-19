@@ -19,10 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from decimal import Decimal
-from typing import Iterable
-
-import polars as pl
+from decimal import Decimal, InvalidOperation
 
 from .interfaces import (
     AMOUNT_METRICS,
@@ -49,12 +46,6 @@ __all__ = [
 # Stable reason code returned alongside null ratios for groups whose
 # expected total is exactly zero.
 ZERO_DENOMINATOR_REASON = "zero_expected_denominator"
-
-# Internal fixed-point representation for additive measures. Precision
-# 38 is the maximum supported by Polars Decimal128; scale 28 preserves
-# the fractional digits used by expected counts and is well above the
-# precision of the supplied fixture values.
-_DECIMAL_TYPE = pl.Decimal(precision=38, scale=28)
 
 # Documented publication boundary. The calculation module retains full
 # precision; the publication layer is expected to round displayed
@@ -115,23 +106,29 @@ def _stable_id(prefix: str, *parts: object) -> str:
     return f"{prefix}-{digest}"
 
 
-def _cast_numeric_columns(
-    frame: pl.LazyFrame, columns: Iterable[str]
-) -> pl.LazyFrame:
-    """Cast a set of string columns to the internal Decimal representation."""
-    return frame.with_columns(
-        [pl.col(c).cast(_DECIMAL_TYPE) for c in columns]
-    )
+def _non_negative_decimal(value: object, *, field: str) -> Decimal:
+    """Return one exact input value while enforcing the calculation domain."""
+
+    try:
+        decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{field} must be numeric") from exc
+    if not decimal_value.is_finite():
+        raise ValueError(f"{field} must be finite")
+    if decimal_value < 0:
+        raise ValueError(f"{field} must be non-negative")
+    if field == "Death_Count" and decimal_value != decimal_value.to_integral_value():
+        raise ValueError("Death_Count must be an integer")
+    return decimal_value
 
 
-def _row_decimal(row_dict: dict, alias: str) -> Decimal:
-    """Convert a collected Polars row value into a Python Decimal."""
-    value = row_dict[alias]
-    if value is None:
-        return Decimal("0")
-    if isinstance(value, Decimal):
-        return value
-    return Decimal(str(value))
+def _group_value(value: object, *, field: str) -> str:
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        raise ValueError(f"{field} must be a non-empty scalar")
+    text = str(value).strip()
+    if not text:
+        raise ValueError(f"{field} must be a non-empty scalar")
+    return text
 
 
 def _credibility(row_count: int) -> str:
@@ -251,11 +248,17 @@ def compute_grouped_actual_to_expected(
     rows = experience_input.rows
     schema = rows.collect_schema().names()
     group_cols = list(grouping.dimensions)
+    if any(not column.strip() for column in group_cols) or len(set(group_cols)) != len(
+        group_cols
+    ):
+        raise ValueError("grouping dimensions must be unique, non-empty column names")
 
-    required_columns: set[str] = set()
+    numeric_cols: list[str] = []
     for metric in (*COUNT_METRICS, *AMOUNT_METRICS):
-        required_columns.add(metric.actual_field)
-        required_columns.add(metric.expected_field)
+        for field in (metric.actual_field, metric.expected_field):
+            if field not in numeric_cols:
+                numeric_cols.append(field)
+    required_columns = set(numeric_cols) | set(group_cols)
     missing = required_columns - set(schema)
     if missing:
         raise KeyError(
@@ -263,48 +266,39 @@ def compute_grouped_actual_to_expected(
             f"{sorted(missing)}"
         )
 
-    numeric_cols: list[str] = []
-    for metric in (*COUNT_METRICS, *AMOUNT_METRICS):
-        for fld in (metric.actual_field, metric.expected_field):
-            if fld not in numeric_cols:
-                numeric_cols.append(fld)
-    numeric_cols = [c for c in numeric_cols if c in schema]
+    selected_columns = list(dict.fromkeys([*group_cols, *numeric_cols]))
+    frame = rows.select(selected_columns).collect()
+    if frame.height == 0:
+        raise ValueError("ExperienceInput rows must not be empty")
 
-    cast_rows = _cast_numeric_columns(rows, numeric_cols)
-
-    sum_exprs: list[pl.Expr] = [pl.len().alias("_row_count")]
-    metric_aliases: list[tuple[MetricDefinition, str, str, str]] = []
-    for metric in COUNT_METRICS:
-        a_alias = f"a::{metric.actual_field}::{metric.expected_field}"
-        e_alias = f"e::{metric.expected_field}"
-        sum_exprs.append(pl.col(metric.actual_field).sum().alias(a_alias))
-        sum_exprs.append(pl.col(metric.expected_field).sum().alias(e_alias))
-        metric_aliases.append((metric, "count", a_alias, e_alias))
-    for metric in AMOUNT_METRICS:
-        a_alias = f"a::{metric.actual_field}::{metric.expected_field}"
-        e_alias = f"e::{metric.expected_field}"
-        sum_exprs.append(pl.col(metric.actual_field).sum().alias(a_alias))
-        sum_exprs.append(pl.col(metric.expected_field).sum().alias(e_alias))
-        metric_aliases.append((metric, "amount", a_alias, e_alias))
-
-    if group_cols:
-        grouped = (
-            cast_rows.group_by(group_cols)
-            .agg(sum_exprs)
-            .sort(group_cols)
+    grouped_totals: dict[
+        tuple[tuple[str, str], ...], dict[str, Decimal | int]
+    ] = {}
+    for row in frame.iter_rows(named=True):
+        group_values = tuple(
+            (column, _group_value(row[column], field=column)) for column in group_cols
         )
-    else:
-        grouped = cast_rows.select(sum_exprs)
-
-    frame = grouped.collect()
+        totals = grouped_totals.setdefault(
+            group_values,
+            {"_row_count": 0, **{column: Decimal("0") for column in numeric_cols}},
+        )
+        totals["_row_count"] = int(totals["_row_count"]) + 1
+        for column in numeric_cols:
+            totals[column] = Decimal(totals[column]) + _non_negative_decimal(
+                row[column], field=column
+            )
 
     results: list[ActualToExpectedResult] = []
-    for row in frame.iter_rows(named=True):
-        row_count = int(row["_row_count"])
-        group_values = tuple((col, str(row[col])) for col in group_cols)
-        for metric, kind, a_alias, e_alias in metric_aliases:
-            actual_total = _row_decimal(row, a_alias)
-            expected_total = _row_decimal(row, e_alias)
+    metric_kinds = [
+        *((metric, "count") for metric in COUNT_METRICS),
+        *((metric, "amount") for metric in AMOUNT_METRICS),
+    ]
+    for group_values in sorted(grouped_totals):
+        totals = grouped_totals[group_values]
+        row_count = int(totals["_row_count"])
+        for metric, kind in metric_kinds:
+            actual_total = Decimal(totals[metric.actual_field])
+            expected_total = Decimal(totals[metric.expected_field])
             results.append(
                 _build_result(
                     experience_input=experience_input,

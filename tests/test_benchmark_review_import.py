@@ -290,6 +290,41 @@ def test_import_retry_recovers_an_orphaned_snapshot(tmp_path: Path, monkeypatch)
     assert LocalReviewStore(tmp_path / "ai" / "reviews").get_review(result["review_id"])
 
 
+def test_import_retry_rejects_a_tampered_orphaned_snapshot(tmp_path: Path, monkeypatch):
+    manifest_path = _benchmark_fixture(tmp_path)
+
+    def fail_registry(self, **kwargs):
+        raise OSError("injected registry failure")
+
+    monkeypatch.setattr(benchmark_import.LocalRunStore, "create_run", fail_registry)
+    with pytest.raises(OSError, match="injected registry failure"):
+        _import(tmp_path, manifest_path)
+
+    snapshot_packet = next(
+        (tmp_path / "ai" / "artifacts").glob("*/benchmark-*/review_packet.json")
+    )
+    snapshot_packet.write_text('{"status":"tampered"}\n', encoding="utf-8")
+
+    with pytest.raises(BenchmarkImportError, match="review_packet"):
+        _import(tmp_path, manifest_path)
+
+
+def test_import_rejects_symlinked_repository_evidence(tmp_path: Path):
+    manifest_path = _benchmark_fixture(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    policy_path = tmp_path / "benchmark" / payload["policy"]["path"]
+    linked_policy = policy_path.with_name("linked-policy.json")
+    try:
+        linked_policy.symlink_to(policy_path)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+    payload["policy"]["path"] = linked_policy.relative_to(tmp_path / "benchmark").as_posix()
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(BenchmarkImportError, match="symlink is not allowed"):
+        _import(tmp_path, manifest_path)
+
+
 def test_imported_review_text_uses_verified_provider_metadata(tmp_path: Path):
     manifest_path = _benchmark_fixture(tmp_path)
 

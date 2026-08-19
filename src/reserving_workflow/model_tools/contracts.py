@@ -48,6 +48,7 @@ class ExperienceStudyToolInput(BaseModel):
         if self.rows is not None:
             if not self.rows:
                 raise ValueError("rows must not be empty")
+            normalized_rows: list[dict[str, Any]] = []
             for row_number, row in enumerate(self.rows, start=1):
                 missing = [
                     field
@@ -56,6 +57,7 @@ class ExperienceStudyToolInput(BaseModel):
                 ]
                 if missing:
                     raise ValueError(f"row {row_number} is missing required columns: {missing}")
+                normalized_row = dict(row)
                 for field in EXPERIENCE_NUMERIC_FIELDS:
                     try:
                         value = Decimal(str(row[field]))
@@ -65,4 +67,27 @@ class ExperienceStudyToolInput(BaseModel):
                         ) from exc
                     if not value.is_finite():
                         raise ValueError(f"row {row_number} column {field} must be finite")
+                    if value < 0:
+                        raise ValueError(
+                            f"row {row_number} column {field} must be non-negative"
+                        )
+                    if field == "Death_Count" and value != value.to_integral_value():
+                        raise ValueError(
+                            f"row {row_number} column Death_Count must be an integer"
+                        )
+                    normalized_row[field] = format(value, "f")
+                for field in self.dimensions:
+                    raw_value = normalized_row[field]
+                    if raw_value is None or isinstance(raw_value, (dict, list, tuple, set)):
+                        raise ValueError(
+                            f"row {row_number} column {field} must be a non-empty scalar"
+                        )
+                    value = str(raw_value).strip()
+                    if not value:
+                        raise ValueError(
+                            f"row {row_number} column {field} must be a non-empty scalar"
+                        )
+                    normalized_row[field] = value
+                normalized_rows.append(normalized_row)
+            self.rows = normalized_rows
         return self

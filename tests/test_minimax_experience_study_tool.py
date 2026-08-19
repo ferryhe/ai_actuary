@@ -52,3 +52,48 @@ def test_shared_experience_input_rejects_non_numeric_comparison_rows():
                 ],
             }
         )
+
+
+@pytest.mark.parametrize("death_count", ["-1", "1.5"])
+def test_shared_experience_input_rejects_invalid_death_counts(death_count: str):
+    with pytest.raises(ValidationError, match="Death_Count must be"):
+        ExperienceStudyToolInput.model_validate(
+            {
+                "rows": [
+                    {
+                        "Death_Count": death_count,
+                        "Death_Claim_Amount": "1",
+                        "ExpDth_VBT2015_Cnt": "1",
+                        "ExpDth_VBT2015wMI_Cnt": "1",
+                        "ExpDth_VBT2015_Amt": "1",
+                        "ExpDth_VBT2015wMI_Amt": "1",
+                        "product": "Term",
+                    }
+                ]
+            }
+        )
+
+
+def test_large_amount_totals_do_not_overflow_decimal128():
+    row = {
+        "Death_Count": "1",
+        "Death_Claim_Amount": "1000000000",
+        "ExpDth_VBT2015_Cnt": "1",
+        "ExpDth_VBT2015wMI_Cnt": "1",
+        "ExpDth_VBT2015_Amt": "1000000000",
+        "ExpDth_VBT2015wMI_Amt": "1000000000",
+        "product": "Term",
+    }
+
+    results = execute_minimax_experience_study(
+        ExperienceStudyToolInput(rows=[dict(row) for _ in range(100)])
+    )
+
+    amount_result = next(
+        item
+        for item in results
+        if item["metric_kind"] == "amount" and not item["mortality_improvement"]
+    )
+    assert amount_result["actual_total"] == "100000000000"
+    assert amount_result["expected_total"] == "100000000000"
+    assert amount_result["ratio"] == "1"

@@ -69,6 +69,8 @@ def import_benchmark_review(
     source_manifest_path = Path(manifest_path).expanduser()
     if source_manifest_path.name != "sandbox_evaluation_manifest.json":
         raise BenchmarkImportError("manifest must be named sandbox_evaluation_manifest.json")
+    if source_manifest_path.is_symlink():
+        raise BenchmarkImportError("benchmark manifest must be a regular, non-symlink file")
     try:
         source_manifest_path = source_manifest_path.resolve(strict=True)
     except OSError as exc:
@@ -254,24 +256,38 @@ def _verify_import_snapshot(
         for key, value in artifact_paths.items()
     ):
         raise BenchmarkImportError("snapshot artifact_paths must map strings to strings")
+    artifact_sha256 = run_manifest.get("artifact_sha256")
+    expected_checksum_ids = set(artifact_paths) - {"run_manifest"}
+    if not isinstance(artifact_sha256, dict) or set(artifact_sha256) != expected_checksum_ids:
+        raise BenchmarkImportError(
+            "snapshot artifact_sha256 must cover every non-manifest artifact"
+        )
+    seen_paths: set[Path] = set()
+    for artifact_id in sorted(expected_checksum_ids):
+        artifact_path = _safe_repo_path(
+            destination,
+            artifact_paths[artifact_id],
+            label=f"snapshot artifact {artifact_id}",
+        )
+        if artifact_path in seen_paths:
+            raise BenchmarkImportError("snapshot artifact paths must be unique")
+        seen_paths.add(artifact_path)
+        if not artifact_path.is_file():
+            raise BenchmarkImportError(f"snapshot artifact is missing: {artifact_id}")
+        expected_hash = _validated_sha256(
+            artifact_sha256[artifact_id], f"snapshot artifact {artifact_id} sha256"
+        )
+        if _sha256(artifact_path.read_bytes()) != expected_hash:
+            raise BenchmarkImportError(
+                f"snapshot artifact sha256 does not match: {artifact_id}"
+            )
     source_manifest_path = _safe_repo_path(
         destination,
         artifact_paths.get("sandbox_evaluation_manifest"),
         label="snapshot sandbox evaluation manifest",
     )
-    _assert_no_symlinks(destination, source_manifest_path)
-    if not source_manifest_path.is_file():
-        raise BenchmarkImportError("snapshot sandbox evaluation manifest is missing")
     if _sha256(source_manifest_path.read_bytes()) != expected_manifest_sha256:
         raise BenchmarkImportError("snapshot sandbox evaluation manifest sha256 does not match")
-    review_packet_path = _safe_repo_path(
-        destination,
-        artifact_paths.get("review_packet"),
-        label="snapshot review packet",
-    )
-    _assert_no_symlinks(destination, review_packet_path)
-    if not review_packet_path.is_file():
-        raise BenchmarkImportError("snapshot review packet is missing")
     return dict(artifact_paths)
 
 
@@ -635,6 +651,13 @@ def _write_snapshot(
         "imported_at_utc": datetime.now(timezone.utc).isoformat(),
         "benchmark_evaluation_manifest_sha256": manifest_sha256,
     }
+    run_manifest["artifact_sha256"] = {
+        artifact_id: _sha256(
+            _safe_repo_path(staging, relative_path, label=f"artifact {artifact_id}").read_bytes()
+        )
+        for artifact_id, relative_path in artifact_paths.items()
+        if artifact_id != "run_manifest"
+    }
     _write_json(staging / "run_manifest.json", run_manifest)
     return artifact_paths
 
@@ -757,9 +780,11 @@ def _verified_repo_file(
 
 def _safe_repo_path(repository_root: Path, value: Any, *, label: str) -> Path:
     relative_text = _safe_posix_path(value, label=label)
-    path = (repository_root / Path(*PurePosixPath(relative_text).parts)).resolve()
-    _require_within(path, repository_root, label=label)
-    return path
+    path = repository_root / Path(*PurePosixPath(relative_text).parts)
+    _assert_no_symlinks(repository_root, path)
+    resolved_path = path.resolve()
+    _require_within(resolved_path, repository_root, label=label)
+    return resolved_path
 
 
 def _safe_posix_path(value: Any, *, label: str) -> str:
