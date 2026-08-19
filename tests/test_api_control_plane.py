@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 
 import httpx
+import pytest
 from reserving_workflow.api import app as api_app
 
 from reserving_workflow.api.app import (
@@ -15,6 +17,7 @@ from reserving_workflow.api.app import (
     create_app,
 )
 from reserving_workflow.schemas import RunArtifactManifest
+from reserving_workflow.storage.local import LocalRunStore
 from reserving_workflow.tools import ToolRegistry
 from reserving_workflow.workflows import WorkflowCatalog, WorkflowCatalogEntry, WorkflowStepEntry
 
@@ -335,7 +338,10 @@ def test_preflight_endpoint_reports_ready_runtime_when_paths_and_catalogs_are_co
     assert payload["readiness"] == "ready"
     assert payload["summary"]["warning_count"] == 0
     assert payload["summary"]["error_count"] == 0
-    assert payload["configuration"]["catalog"]["tool_ids"] == ["chainladder"]
+    assert payload["configuration"]["catalog"]["tool_ids"] == [
+        "chainladder",
+        "minimax_experience_study_tool",
+    ]
     assert payload["configuration"]["catalog"]["workflow_ids"] == ["chainladder-basic", "chainladder-validated"]
     assert payload["configuration"]["defaults"]["operator_id"] == DEFAULT_OPERATOR_ID
     assert payload["configuration"]["defaults"]["workspace_id"] == DEFAULT_WORKSPACE_ID
@@ -696,20 +702,164 @@ def test_post_run_rejects_invalid_chainladder_method_variant_with_http_400(tmp_p
     assert "chainladder" in str(response.json()["detail"])
 
 
-def test_tool_catalog_endpoints_expose_builtin_chainladder(tmp_path):
+def test_tool_catalog_endpoints_expose_builtin_tools(tmp_path):
     _reset_fake_runner_calls()
     client = _client(tmp_path)
 
     tools = client.get("/tools")
     tool = client.get("/tools/chainladder")
+    minimax_tool = client.get("/tools/minimax_experience_study_tool")
 
     assert tools.status_code == 200
-    assert tools.json()["tool_count"] == 1
+    assert tools.json()["tool_count"] == 2
     assert tools.json()["tools"][0]["tool_id"] == "chainladder"
     assert tool.status_code == 200
     assert tool.json()["method"] == "chainladder"
     assert tool.json()["input_schema"]["properties"]["sample_name"]["default"] == "RAA"
     assert tool.json()["input_schema"]["properties"]["method_variant"]["const"] == "chainladder"
+    assert minimax_tool.status_code == 200
+    assert minimax_tool.json()["method"] == "minimax_experience_study_tool"
+    assert minimax_tool.json()["console_defaults"]["sample_name"] == "ae_small"
+
+
+def test_post_run_executes_minimax_experience_study_tool(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/runs",
+        json={
+            "case_id": "minimax-experience-case",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small", "dimensions": ["product"]},
+            "background": False,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "completed"
+    assert payload["tool_id"] == "minimax_experience_study_tool"
+    assert payload["result_count"] == 8
+    detail = client.get(f"/runs/{payload['run_id']}").json()
+    result_path = Path(detail["run"]["artifact_root"]) / "deterministic_result.json"
+    deterministic_result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert deterministic_result["model"] == "MiniMax-M3"
+    assert deterministic_result["result_count"] == 8
+
+    console_state = client.get(f"/console/state?run_id={payload['run_id']}").json()
+    artifact_panel = console_state["artifact_panel"]
+    assert artifact_panel["missing_expected_artifacts"] == []
+    assert artifact_panel["review_artifact_refs"] == []
+    assert artifact_panel["decision_artifact_refs"] == []
+
+
+def test_minimax_experience_tool_supports_background_execution_and_rerun(tmp_path):
+    scheduled = []
+
+    def capture_background_task(fn, *args, **kwargs):
+        scheduled.append((fn, args, kwargs))
+
+    client = _client(tmp_path, background_task_runner=capture_background_task)
+    accepted = client.post(
+        "/runs",
+        json={
+            "case_id": "minimax-background-case",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small"},
+            "background": True,
+        },
+    )
+
+    assert accepted.status_code == 202
+    assert len(scheduled) == 1
+    fn, args, kwargs = scheduled[0]
+    fn(*args, **kwargs)
+    run_id = accepted.json()["run_id"]
+    events = client.get(f"/runs/{run_id}/events").json()["events"]
+    assert [event["status"] for event in events] == ["accepted", "running", "completed"]
+
+    rerun = client.post(f"/runs/{run_id}/rerun", json={})
+
+    assert rerun.status_code == 200
+    assert rerun.json()["status"] == "completed"
+    assert rerun.json()["run_id"] != run_id
+    assert rerun.json()["rerun"]["source_run_id"] == run_id
+
+
+def test_minimax_experience_tool_records_unexpected_synchronous_failure(
+    tmp_path, monkeypatch
+):
+    def fail_runner(**kwargs):
+        raise RuntimeError("injected model tool failure")
+
+    monkeypatch.setitem(
+        api_app.MODEL_COMPARISON_TOOL_RUNNERS,
+        "minimax_experience_study_tool",
+        fail_runner,
+    )
+    client = _client(tmp_path)
+
+    with pytest.raises(RuntimeError, match="injected model tool failure"):
+        client.post(
+            "/runs",
+            json={
+                "case_id": "minimax-failure-case",
+                "tool_id": "minimax_experience_study_tool",
+                "inputs": {"sample_name": "ae_small"},
+            },
+        )
+
+    runs = LocalRunStore(tmp_path / "run-registry.json").list_runs()
+    assert len(runs) == 1
+    assert runs[0]["status"] == "failed"
+    assert runs[0]["summary"] == (
+        "Synchronous operator run failed for minimax-failure-case"
+    )
+    assert runs[0]["error_category"] == "synchronous_runtime"
+    assert runs[0]["errors"] == ["injected model tool failure"]
+    assert Path(runs[0]["artifact_root"]).name == runs[0]["run_id"]
+
+
+def test_minimax_experience_tool_records_background_failure_metadata(
+    tmp_path, monkeypatch
+):
+    scheduled = []
+
+    def capture_background_task(fn, *args, **kwargs):
+        scheduled.append((fn, args, kwargs))
+
+    def fail_runner(**kwargs):
+        raise RuntimeError("injected background model tool failure")
+
+    monkeypatch.setitem(
+        api_app.MODEL_COMPARISON_TOOL_RUNNERS,
+        "minimax_experience_study_tool",
+        fail_runner,
+    )
+    client = _client(tmp_path, background_task_runner=capture_background_task)
+
+    accepted = client.post(
+        "/runs",
+        json={
+            "case_id": "minimax-background-failure-case",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small"},
+            "background": True,
+        },
+    )
+
+    assert accepted.status_code == 202
+    fn, args, kwargs = scheduled.pop()
+    fn(*args, **kwargs)
+
+    runs = LocalRunStore(tmp_path / "run-registry.json").list_runs()
+    assert len(runs) == 1
+    assert runs[0]["status"] == "failed"
+    assert runs[0]["summary"] == (
+        "Background operator run failed for minimax-background-failure-case"
+    )
+    assert runs[0]["error_category"] == "background_runtime"
+    assert runs[0]["errors"] == ["injected background model tool failure"]
 
 
 def test_post_run_can_accept_background_execution_and_poll_events(tmp_path):
@@ -841,6 +991,19 @@ def test_console_shell_serves_operator_console_html(tmp_path):
     assert "submitReviewDecision(" in html
     assert "loadToolCatalog()" in html
     assert "renderArtifactPanel(" in html
+    assert "renderReviewPanel(" in html
+    assert "renderAdaptiveValue(" in html
+    assert "Output" in html
+    assert "AI guidance" in html
+    assert "Human review focus" in html
+    assert "Human Review Decision" in html
+    assert "Additional structured data (auto-adapted)" in html
+    assert "View raw review JSON" in html
+    assert "reviewDetailsUrl(" in html
+    assert "Open review details" in html
+    assert "#review-panel" in html
+    assert "initialRunId" in html
+    assert re.search(r"[\u4e00-\u9fff]", html) is None
     assert "Evidence Gaps" in html
     assert "fetch(\"/tools\")" in html
     assert "fetch(`/reviews/${encodeURIComponent(reviewId)}/decision`" in html
@@ -864,7 +1027,10 @@ def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path)
     assert "fetch(\"/runs\"" in html
     assert "tool_id:" in html
     assert "inputs:" in html
-    assert "method: String(formData.get(\"tool_id\") || \"chainladder\")" in html
+    assert "method: toolId" in html
+    assert "applyToolDefaults()" in html
+    assert "defaults.sample_name" in html
+    assert 'thresholdInput.disabled = selector.value !== "chainladder"' in html
     assert "Tool catalog" in html
     assert "fetch(`/runs/${encodeURIComponent(runId)}/events`)" in html
     assert "review-inbox" in html
@@ -889,6 +1055,8 @@ def test_console_actionable_html_exposes_ai_facing_operation_contracts(tmp_path)
     assert "pollRunEvents(runId, generation, filterOptions)" in html
     assert "await loadConsole(runId, { preservePolling: true, ...filterOptions })" in html
     assert "No review selected for decision submission." in html
+    assert 'name="comment"' in html
+    assert "Record the rationale, requested changes, or approval scope" in html
     assert "Export handoff report" in html
     assert "Decision / Export Evidence" in html
     assert "Raw artifact panel JSON" in html

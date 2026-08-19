@@ -6,6 +6,11 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from reserving_workflow.model_tools.contracts import (
+    MINIMAX_EXPERIENCE_STUDY_TOOL_ID,
+    ExperienceStudyToolInput,
+)
+
 
 class ToolCatalogEntry(BaseModel):
     """Metadata and schema for one operator-visible tool."""
@@ -50,7 +55,12 @@ class ToolRegistry:
 
 
 def build_builtin_tool_registry() -> ToolRegistry:
-    return ToolRegistry(entries=[_builtin_chainladder_tool()])
+    return ToolRegistry(
+        entries=[
+            _builtin_chainladder_tool(),
+            _builtin_minimax_experience_study_tool(),
+        ]
+    )
 
 
 def _builtin_chainladder_tool() -> ToolCatalogEntry:
@@ -127,4 +137,25 @@ def _builtin_chainladder_tool() -> ToolCatalogEntry:
             "required": [],
             "additionalProperties": False,
         },
+    )
+
+
+def _builtin_minimax_experience_study_tool() -> ToolCatalogEntry:
+    return ToolCatalogEntry(
+        tool_id=MINIMAX_EXPERIENCE_STUDY_TOOL_ID,
+        method=MINIMAX_EXPERIENCE_STUDY_TOOL_ID,
+        title="MiniMax-M3 Experience Study",
+        description=(
+            "Promoted MiniMax-M3 grouped actual-to-expected implementation for "
+            "cross-model experience-study comparisons."
+        ),
+        tags=["builtin", "deterministic", "experience-study", "minimax", "model-comparison"],
+        console_defaults={
+            "sample_name": "ae_small",
+            "population_id": "Total",
+            "period": "2018-2019",
+            "dimensions": ["product"],
+            "background": True,
+        },
+        input_schema=ExperienceStudyToolInput.model_json_schema(),
     )

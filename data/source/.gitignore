@@ -1,0 +1,4 @@
+# Keep production source data local. The README is the only tracked file here.
+*
+!.gitignore
+!README.md

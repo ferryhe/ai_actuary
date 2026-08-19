@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -29,6 +29,11 @@ from reserving_workflow.contracts.control_plane import (
     ValidatedToolInput,
     run_event_type_for_status,
 )
+from reserving_workflow.model_tools import (
+    MINIMAX_EXPERIENCE_STUDY_TOOL_ID,
+    ExperienceStudyToolInput,
+    run_minimax_experience_study,
+)
 from reserving_workflow.review import build_review_contract, ensure_review_record, write_run_review_decision_artifacts
 from reserving_workflow.reports import export_run_report
 from reserving_workflow.storage.local import LocalReviewStore, ReviewDecisionConflictError
@@ -45,6 +50,9 @@ from reserving_workflow.workflows import build_builtin_workflow_catalog
 
 DEFAULT_OPERATOR_ID = "local-actuary"
 DEFAULT_WORKSPACE_ID = "default-workspace"
+MODEL_COMPARISON_TOOL_RUNNERS = {
+    MINIMAX_EXPERIENCE_STUDY_TOOL_ID: run_minimax_experience_study,
+}
 
 
 class ApiSettings(BaseModel):
@@ -261,6 +269,36 @@ def create_app(
             return JSONResponse(
                 content=_run_sequential_workflow(**operator_params)
             )
+        if validated_tool_input.tool_id in MODEL_COMPARISON_TOOL_RUNNERS:
+            model_tool_params = _model_tool_params_from_request(
+                request,
+                validated_tool_input=validated_tool_input,
+                artifact_dir=artifact_dir,
+                registry_path=resolved_settings.registry_path,
+                ownership=ownership,
+            )
+            run_id = _generate_api_run_id(request.case_id)
+            model_tool_params["run_id"] = run_id
+            if request.background:
+                accepted_payload = _record_background_acceptance(
+                    request,
+                    validated_tool_input=validated_tool_input,
+                    artifact_dir=artifact_dir,
+                    review_delivery_dir=review_delivery_dir,
+                    registry_path=resolved_settings.registry_path,
+                    run_id=run_id,
+                    workflow_id=None,
+                    ownership=ownership,
+                )
+                scheduler = background_task_runner or background_tasks.add_task
+                scheduler(_run_model_tool_background, model_tool_params)
+                return JSONResponse(status_code=202, content=accepted_payload)
+            return JSONResponse(
+                content=_run_registered_model_tool(
+                    model_tool_params,
+                    execution_mode="synchronous",
+                )
+            )
         operator_params = _operator_params_from_request(
             request,
             validated_tool_input=validated_tool_input,
@@ -339,6 +377,30 @@ def create_app(
                 operator_params["task_contracts_module"] = task_contracts_module
             operator_params["tool_registry"] = resolved_tool_registry
             result = _run_sequential_workflow(**operator_params)
+            result["rerun"] = RerunSemantics(source_run_id=run_id).model_dump()
+            return JSONResponse(content=result)
+        model_tool_id = operator_params.get("tool_id")
+        if model_tool_id in MODEL_COMPARISON_TOOL_RUNNERS:
+            rerun_id = _generate_api_run_id(str(entry.get("case_id") or "case"))
+            result = _run_registered_model_tool(
+                {
+                    "case_id": str(entry.get("case_id") or "case"),
+                    "inputs": dict(operator_params.get("inputs") or {}),
+                    "artifact_dir": str(
+                        request.artifact_dir
+                        or _default_artifact_dir(
+                            resolved_settings, str(entry.get("case_id") or "case")
+                        )
+                    ),
+                    "registry_path": resolved_settings.registry_path,
+                    "run_id": rerun_id,
+                    "created_by": str(entry.get("created_by") or DEFAULT_OPERATOR_ID),
+                    "operator_id": str(entry.get("operator_id") or DEFAULT_OPERATOR_ID),
+                    "workspace_id": str(entry.get("workspace_id") or DEFAULT_WORKSPACE_ID),
+                    "tool_id": model_tool_id,
+                },
+                execution_mode="synchronous",
+            )
             result["rerun"] = RerunSemantics(source_run_id=run_id).model_dump()
             return JSONResponse(content=result)
         try:
@@ -551,6 +613,26 @@ def _operator_params_from_request(
     return params
 
 
+def _model_tool_params_from_request(
+    request: RunCreateRequest,
+    *,
+    validated_tool_input: ValidatedToolInput,
+    artifact_dir: str | Path,
+    registry_path: str | Path,
+    ownership: dict[str, str],
+) -> dict[str, Any]:
+    return {
+        "case_id": request.case_id,
+        "tool_id": validated_tool_input.tool_id,
+        "inputs": dict(validated_tool_input.inputs),
+        "artifact_dir": str(artifact_dir),
+        "registry_path": str(registry_path),
+        "created_by": ownership["created_by"],
+        "operator_id": ownership["operator_id"],
+        "workspace_id": ownership["workspace_id"],
+    }
+
+
 def _workflow_operator_params_from_request(
     request: RunCreateRequest,
     *,
@@ -600,12 +682,18 @@ def _workflow_operator_params_from_request(
 
 
 def _case_payload_from_tool_input(case_id: str, validated_tool_input: ValidatedToolInput) -> dict[str, Any]:
-    if validated_tool_input.tool_id != "chainladder":
-        raise ValueError(f"Unknown tool_id: {validated_tool_input.tool_id}")
-    return build_chainladder_case_payload(
-        case_id=case_id,
-        tool_inputs=validated_tool_input.inputs,
-    )
+    if validated_tool_input.tool_id == "chainladder":
+        return build_chainladder_case_payload(
+            case_id=case_id,
+            tool_inputs=validated_tool_input.inputs,
+        )
+    if validated_tool_input.tool_id in MODEL_COMPARISON_TOOL_RUNNERS:
+        return {
+            "case_id": case_id,
+            "tool_id": validated_tool_input.tool_id,
+            "inputs": dict(validated_tool_input.inputs),
+        }
+    raise ValueError(f"Unknown tool_id: {validated_tool_input.tool_id}")
 
 
 def _workflow_inputs_from_request(request: RunCreateRequest) -> dict[str, Any]:
@@ -646,6 +734,8 @@ def _record_background_acceptance(
         "workspace_id": ownership["workspace_id"],
     }
     if validated_tool_input is not None:
+        operator_params["tool_id"] = validated_tool_input.tool_id
+        operator_params["inputs"] = tool_inputs
         operator_params["case_payload"] = _case_payload_from_tool_input(request.case_id, validated_tool_input)
         operator_params["validated_input"] = {
             "case_id": request.case_id,
@@ -686,36 +776,71 @@ def _run_operator_flow_background(operator_params: dict[str, Any]) -> None:
     try:
         operator_entrypoint.run_operator_flow(**operator_params)
     except Exception as exc:
-        _record_background_failure(operator_params, exc)
+        _record_run_failure(operator_params, exc, execution_mode="background")
+
+
+def _run_registered_model_tool(
+    operator_params: dict[str, Any],
+    *,
+    execution_mode: Literal["synchronous", "background"],
+) -> dict[str, Any]:
+    params = dict(operator_params)
+    tool_id = str(params.pop("tool_id"))
+    try:
+        runner = MODEL_COMPARISON_TOOL_RUNNERS[tool_id]
+    except KeyError as exc:
+        raise ValueError(f"Unknown model comparison tool_id: {tool_id}") from exc
+    try:
+        return runner(**params)
+    except Exception as exc:
+        _record_run_failure(operator_params, exc, execution_mode=execution_mode)
+        raise
+
+
+def _run_model_tool_background(operator_params: dict[str, Any]) -> None:
+    try:
+        _run_registered_model_tool(operator_params, execution_mode="background")
+    except Exception:
+        return
 
 
 def _run_workflow_background(operator_params: dict[str, Any]) -> None:
     try:
         _run_sequential_workflow(**operator_params)
     except Exception as exc:
-        _record_background_failure(operator_params, exc)
+        _record_run_failure(operator_params, exc, execution_mode="background")
 
 
-def _record_background_failure(operator_params: dict[str, Any], exc: Exception) -> None:
+def _record_run_failure(
+    operator_params: dict[str, Any],
+    exc: Exception,
+    *,
+    execution_mode: Literal["synchronous", "background"],
+) -> None:
     registry_path = operator_params.get("registry_path")
     if registry_path is None:
         return
     case_id = operator_params.get("case_id")
     run_id = operator_params.get("run_id") or _generate_api_run_id(str(case_id or "case"))
-    artifact_dir = operator_params.get("artifact_dir") or "./tmp/api-artifacts/background-failed"
+    default_failure_dir = f"./tmp/api-artifacts/{execution_mode}-failed"
+    artifact_dir = operator_params.get("artifact_dir") or default_failure_dir
+    artifact_root = Path(artifact_dir).expanduser().resolve()
+    if operator_params.get("tool_id") in MODEL_COMPARISON_TOOL_RUNNERS:
+        artifact_root = (artifact_root / str(run_id)).resolve()
+    execution_label = execution_mode.capitalize()
     run_registry.record_run_event(
         registry_path=registry_path,
         task_id=f"operator-{case_id or 'unknown-case'}",
         case_id=str(case_id) if case_id is not None else None,
         run_id=str(run_id),
         status="failed",
-        artifact_root=str(Path(artifact_dir).expanduser().resolve()),
-        summary=f"Background operator run failed for {case_id or 'unknown-case'}",
+        artifact_root=str(artifact_root),
+        summary=f"{execution_label} operator run failed for {case_id or 'unknown-case'}",
         created_by=operator_params.get("created_by"),
         operator_id=operator_params.get("operator_id"),
         workspace_id=operator_params.get("workspace_id"),
         review_required=False,
-        error_category="background_runtime",
+        error_category=f"{execution_mode}_runtime",
         errors=[str(exc)],
     )
 
@@ -832,7 +957,12 @@ def _normalize_tool_invocation(request: RunCreateRequest, *, tool_registry) -> V
         merged_inputs["sample_name"] = request.sample_name
     if request.review_threshold_origin_count is not None and "review_threshold_origin_count" not in merged_inputs:
         merged_inputs["review_threshold_origin_count"] = request.review_threshold_origin_count
-    if legacy_method is not None and "method_variant" not in merged_inputs and "method" not in merged_inputs:
+    if (
+        tool_invocation.tool_id == "chainladder"
+        and legacy_method is not None
+        and "method_variant" not in merged_inputs
+        and "method" not in merged_inputs
+    ):
         merged_inputs["method_variant"] = legacy_method
 
     if tool_invocation.tool_id == "chainladder":
@@ -842,6 +972,12 @@ def _normalize_tool_invocation(request: RunCreateRequest, *, tool_registry) -> V
             tool_inputs=validated_inputs.model_dump(mode="json"),
         )
         validate_chainladder_case(case_input)
+        return ValidatedToolInput(
+            tool_id=tool_invocation.tool_id,
+            inputs=validated_inputs.model_dump(mode="json"),
+        )
+    if tool_invocation.tool_id == MINIMAX_EXPERIENCE_STUDY_TOOL_ID:
+        validated_inputs = ExperienceStudyToolInput.model_validate(merged_inputs)
         return ValidatedToolInput(
             tool_id=tool_invocation.tool_id,
             inputs=validated_inputs.model_dump(mode="json"),
@@ -1735,6 +1871,12 @@ def _console_expected_artifact_refs(
     for spec in _CONSOLE_ARTIFACT_SPECS:
         if spec["category"] != category:
             continue
+        if (
+            manifest is not None
+            and category != "primary"
+            and spec["artifact_id"] not in manifest_paths
+        ):
+            continue
         artifact_path = _console_artifact_path(
             artifact_root,
             manifest_paths.get(spec["artifact_id"]),
@@ -1850,13 +1992,15 @@ def _operator_console_html() -> str:
     h1, h2 { margin: 0 0 12px; }
     h2 { font-size: 16px; }
     label { display: block; margin: 10px 0; font-size: 13px; color: var(--muted); }
-    input, select { box-sizing: border-box; width: 100%; margin-top: 4px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; color: #102a43; background: white; }
+    input, select, textarea { box-sizing: border-box; width: 100%; margin-top: 4px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; color: #102a43; background: white; font: inherit; }
     input[type="checkbox"] { width: auto; margin-right: 6px; }
     button, .pill { border: 1px solid var(--border); border-radius: 999px; padding: 6px 10px; background: #f8fafc; cursor: pointer; }
     button.primary { border-color: var(--accent); background: var(--accent); color: white; }
     button:disabled { cursor: not-allowed; opacity: 0.55; }
     .run-card { display: block; width: 100%; margin: 0 0 8px; text-align: left; border-radius: 10px; }
     .run-card[selected] { border-color: var(--accent); color: var(--accent); }
+    .review-link { box-sizing: border-box; border: 1px solid var(--border); padding: 8px 10px; background: #f8fafc; color: #102a43; text-decoration: none; }
+    .review-link:hover, .review-link:focus { border-color: var(--accent); color: var(--accent); }
     .status { min-height: 18px; margin: 8px 0 16px; color: var(--muted); font-size: 13px; }
     .status.error { color: var(--danger); }
     .status.ok { color: var(--ok); }
@@ -1883,7 +2027,40 @@ def _operator_console_html() -> str:
     .artifact-gaps { margin: 12px 0 0; padding-left: 18px; }
     .artifact-gaps li { margin: 4px 0; }
     details.raw-json { margin-top: 14px; }
+    .review-section { grid-column: 1 / -1; }
+    .review-panel { display: grid; gap: 14px; }
+    .review-overview, .review-block, .review-decision-card { border: 1px solid var(--border); border-radius: 12px; background: #fbfcfe; padding: 14px; }
+    .review-overview header, .review-block header, .review-decision-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding: 0; background: transparent; color: inherit; }
+    .review-overview h3, .review-block h3, .review-decision-card h3 { margin: 0; font-size: 15px; }
+    .review-overview p, .review-block header p, .review-decision-card header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+    .review-status-chip { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 999px; padding: 3px 9px; background: white; color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .review-status-chip.passed, .review-status-chip.approved { border-color: #a6f4c5; background: #ecfdf3; color: var(--ok); }
+    .review-status-chip.pending, .review-status-chip.review-required, .review-status-chip.changes-requested { border-color: #fedf89; background: #fffaeb; color: #b54708; }
+    .review-status-chip.failed, .review-status-chip.rejected { border-color: #fda29b; background: #fef3f2; color: var(--danger); }
+    .review-meta-grid, .review-decision-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+    .review-meta-item, .adaptive-field { min-width: 0; }
+    .review-meta-item strong, .adaptive-field > strong { display: block; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; }
+    .review-meta-item span, .adaptive-field > span { display: block; margin-top: 3px; word-break: break-word; }
+    .review-block.output { border-left: 4px solid var(--accent); }
+    .review-block.suggestion { border-left: 4px solid #7f56d9; }
+    .review-block.human { border-left: 4px solid #dc6803; }
+    .adaptive-object { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
+    .adaptive-field.nested { grid-column: 1 / -1; border-top: 1px solid var(--border); padding-top: 8px; }
+    .adaptive-list { margin: 5px 0 0; padding-left: 20px; }
+    .adaptive-list li { margin: 5px 0; }
+    .review-checklist { display: grid; gap: 8px; }
+    .review-check { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start; border: 1px solid var(--border); border-radius: 9px; padding: 10px; background: white; }
+    .review-check-index { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: #fff4e5; color: #b54708; font-size: 12px; font-weight: 700; }
+    .review-check strong { display: block; font-size: 13px; }
+    .review-check p { margin: 3px 0 0; color: var(--muted); font-size: 13px; }
+    .review-reasons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .review-reason { border-radius: 999px; padding: 3px 8px; background: #fff4e5; color: #b54708; font-size: 12px; }
+    .review-decision-card { margin-top: 14px; }
+    .review-decision-card button { margin-top: 10px; }
+    .review-decision-card textarea { resize: vertical; min-height: 76px; }
+    .review-raw pre { max-height: 320px; }
     @media (max-width: 900px) { main, .workspace { grid-template-columns: 1fr; } }
+    @media (max-width: 600px) { .review-meta-grid, .review-decision-grid, .adaptive-object { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -1896,16 +2073,16 @@ def _operator_console_html() -> str:
       <h2>Create Governed Run</h2>
       <form id="create-run-form" onsubmit="createRun(event)">
         <label>case_id<input name="case_id" required placeholder="demo-case"></label>
-        <label>sample_name<input name="sample_name" value="RAA"></label>
+        <label>sample_name<input id="sample-name-input" name="sample_name" value="RAA"></label>
         <label>tool
-          <select id="tool-selector" name="tool_id" data-default-tool-id="chainladder">
+          <select id="tool-selector" name="tool_id" data-default-tool-id="chainladder" onchange="applyToolDefaults()">
             <option value="chainladder">Loading tool catalog…</option>
           </select>
         </label>
         <label>operator_id<input name="operator_id" value="local-actuary"></label>
         <label>workspace_id<input name="workspace_id" value="default-workspace"></label>
         <label>created_by<input name="created_by" placeholder="defaults to operator_id"></label>
-        <label>review_threshold_origin_count<input name="review_threshold_origin_count" type="number" min="0" step="1" placeholder="optional"></label>
+        <label>review_threshold_origin_count<input id="review-threshold-input" name="review_threshold_origin_count" type="number" min="0" step="1" placeholder="optional"></label>
         <label><input name="background" type="checkbox" checked> background</label>
         <button id="create-run-button" class="primary" type="submit">Create run</button>
       </form>
@@ -1932,22 +2109,30 @@ def _operator_console_html() -> str:
     <div class="workspace">
       <section aria-label="Timeline"><h2>Timeline</h2><div id="timeline" class="panel-body">Loading…</div></section>
       <section aria-label="Artifact Evidence Panel"><h2>Artifact Evidence Panel</h2><div id="artifact-panel" class="panel-body">Loading…</div></section>
-      <section aria-label="Review Panel">
+      <section aria-label="Review Panel" class="review-section">
         <h2>Review Panel</h2>
-        <pre id="review-panel">Loading…</pre>
-        <form id="review-decision-form" onsubmit="submitReviewDecision(event)">
+        <div id="review-panel" class="review-panel">Loading…</div>
+        <div class="review-decision-card">
+          <header>
+            <div><h3>Human Review Decision</h3><p>Review the output and AI guidance, then record the final human decision.</p></div>
+            <span id="review-decision-status" class="review-status-chip pending">Pending review</span>
+          </header>
+          <form id="review-decision-form" onsubmit="submitReviewDecision(event)">
           <input id="review-id-input" name="review_id" type="hidden">
-          <label>decision
-            <select name="decision">
-              <option value="approved">approved</option>
-              <option value="changes_requested">changes_requested</option>
-              <option value="rejected">rejected</option>
-            </select>
-          </label>
-          <label>decided_by<input name="decided_by" placeholder="actuary-001"></label>
-          <label>comment<input name="comment" placeholder="Optional decision note"></label>
-          <button id="submit-review-decision" type="submit">Submit review decision</button>
-        </form>
+            <div class="review-decision-grid">
+              <label>Decision
+                <select name="decision">
+                  <option value="approved">Approve</option>
+                  <option value="changes_requested">Request changes</option>
+                  <option value="rejected">Reject</option>
+                </select>
+              </label>
+              <label>Reviewer<input name="decided_by" placeholder="actuary-001"></label>
+            </div>
+            <label>Review comment<textarea name="comment" placeholder="Record the rationale, requested changes, or approval scope"></textarea></label>
+            <button id="submit-review-decision" class="primary" type="submit">Submit review decision</button>
+          </form>
+        </div>
       </section>
       <section aria-label="Action Panel"><h2>Action Panel</h2><div class="status">Actions include rerun and Export handoff report through <code>/runs/{run_id}/report-export</code> when a run is selected.</div><div id="action-panel" class="panel-body">Loading…</div></section>
     </div>
@@ -1956,6 +2141,7 @@ def _operator_console_html() -> str:
     let selectedRunId = null;
     let pollTimer = null;
     let pollGeneration = 0;
+    let toolCatalogById = new Map();
     const activeEventTypes = ["run.accepted", "run.queued", "run.running"];
     const terminalEventTypes = ["run.completed", "run.failed", "run.needs_review"];
 
@@ -2031,6 +2217,7 @@ def _operator_console_html() -> str:
         const payload = await parseJsonOrThrow(response, "Tool catalog");
         const tools = payload.tools || [];
         if (!tools.length) return;
+        toolCatalogById = new Map(tools.map((tool) => [tool.tool_id || tool.method, tool]));
         selector.innerHTML = "";
         for (const tool of tools) {
           const option = document.createElement("option");
@@ -2044,6 +2231,7 @@ def _operator_console_html() -> str:
         if (!selector.value && tools.length) {
           selector.value = tools[0].tool_id || tools[0].method;
         }
+        applyToolDefaults();
       } catch (error) {
         const fallback = selector.querySelector("option[value='chainladder']") || selector.options[0];
         if (fallback) {
@@ -2138,7 +2326,7 @@ def _operator_console_html() -> str:
         const button = document.createElement("button");
         button.className = "run-card";
         if (card.selected) button.setAttribute("selected", "selected");
-        button.textContent = `${card.case_id || "unknown case"} · ${card.status || "unknown"}`;
+        button.textContent = `${card.case_id || "unknown case"} - ${card.status || "unknown"}`;
         button.onclick = () => loadConsole(card.run_id);
         queue.appendChild(button);
       }
@@ -2154,13 +2342,295 @@ def _operator_console_html() -> str:
       }
       inbox.className = "";
       for (const review of reviews) {
-        const button = document.createElement("button");
-        button.className = "run-card";
-        if (review.selected) button.setAttribute("selected", "selected");
-        button.textContent = `${review.case_id || "unknown case"} · ${review.status || "review"}`;
-        button.onclick = () => loadConsole(review.run_id);
-        inbox.appendChild(button);
+        const link = document.createElement("a");
+        link.className = "run-card review-link";
+        link.href = reviewDetailsUrl(review);
+        if (review.selected) link.setAttribute("selected", "selected");
+        link.textContent = `${review.case_id || "unknown case"} - Open review details`;
+        inbox.appendChild(link);
       }
+    }
+
+    function applyToolDefaults() {
+      const selector = document.getElementById("tool-selector");
+      const sampleInput = document.getElementById("sample-name-input");
+      const thresholdInput = document.getElementById("review-threshold-input");
+      const backgroundInput = document.querySelector('input[name="background"]');
+      const tool = toolCatalogById.get(selector.value);
+      const defaults = tool && tool.console_defaults ? tool.console_defaults : {};
+      sampleInput.value = defaults.sample_name || (selector.value === "chainladder" ? "RAA" : "");
+      thresholdInput.disabled = selector.value !== "chainladder";
+      if (thresholdInput.disabled) thresholdInput.value = "";
+      if (typeof defaults.background === "boolean") {
+        backgroundInput.checked = defaults.background;
+      }
+    }
+
+    function reviewDetailsUrl(review) {
+      const params = new URLSearchParams();
+      const filters = getConsoleFilters();
+      if (review && review.run_id) params.set("run_id", review.run_id);
+      if (filters.operator_id || (review && review.assigned_to)) {
+        params.set("operator_id", filters.operator_id || review.assigned_to);
+      }
+      if (filters.workspace_id || (review && review.workspace_id)) {
+        params.set("workspace_id", filters.workspace_id || review.workspace_id);
+      }
+      return `/console?${params.toString()}#review-panel`;
+    }
+
+    const reviewFieldLabels = {
+      automated_result: "Automated evaluation",
+      deterministic_outputs: "Deterministic outputs",
+      component_candidate: "Component candidate",
+      machine_disposition: "Machine disposition",
+      promotion_eligible: "Promotion eligible",
+      static_scan: "Static scan",
+      strong_isolation: "Strong isolation",
+      test_gates: "Test gates",
+      reserve_summary: "Reserve summary",
+      diagnostics: "Diagnostics",
+      method: "Method",
+      summary: "Summary",
+      key_points: "Key points",
+      recommendation: "Recommendation",
+      decision_note: "Decision note",
+      model: "Model",
+      files: "Files",
+      path: "Path",
+      source_path: "Source path",
+      bytes: "Bytes",
+      status: "Status",
+    };
+
+    function reviewLabel(key) {
+      if (reviewFieldLabels[key]) return reviewFieldLabels[key];
+      return String(key || "field").replaceAll("_", " ").replace(/\\b\\w/g, (letter) => letter.toUpperCase());
+    }
+
+    function reviewScalar(value) {
+      if (value === null || value === undefined || value === "") return "Not provided";
+      if (value === true) return "Yes";
+      if (value === false) return "No";
+      return String(value);
+    }
+
+    function reviewStatusClass(value) {
+      const normalized = String(value || "pending").toLowerCase().replaceAll("_", "-");
+      if (["passed", "approved", "completed"].includes(normalized)) return "passed";
+      if (["failed", "rejected", "blocked"].includes(normalized)) return "failed";
+      if (normalized === "changes-requested") return "changes-requested";
+      return "pending";
+    }
+
+    function makeReviewStatusChip(value, label) {
+      const chip = document.createElement("span");
+      chip.className = `review-status-chip ${reviewStatusClass(value)}`;
+      chip.textContent = label || reviewScalar(value);
+      return chip;
+    }
+
+    function renderAdaptiveValue(value) {
+      if (Array.isArray(value)) {
+        if (!value.length) {
+          const empty = document.createElement("span");
+          empty.className = "empty";
+          empty.textContent = "None";
+          return empty;
+        }
+        const list = document.createElement("ul");
+        list.className = "adaptive-list";
+        for (const itemValue of value) {
+          const item = document.createElement("li");
+          item.appendChild(renderAdaptiveValue(itemValue));
+          list.appendChild(item);
+        }
+        return list;
+      }
+      if (value && typeof value === "object") {
+        const objectGrid = document.createElement("div");
+        objectGrid.className = "adaptive-object";
+        for (const [key, itemValue] of Object.entries(value)) {
+          const field = document.createElement("div");
+          const nested = itemValue && typeof itemValue === "object";
+          field.className = nested ? "adaptive-field nested" : "adaptive-field";
+          const label = document.createElement("strong");
+          label.textContent = reviewLabel(key);
+          field.append(label, renderAdaptiveValue(itemValue));
+          objectGrid.appendChild(field);
+        }
+        return objectGrid;
+      }
+      const scalar = document.createElement("span");
+      scalar.textContent = reviewScalar(value);
+      return scalar;
+    }
+
+    function makeReviewBlock(kind, title, subtitle) {
+      const block = document.createElement("article");
+      block.className = `review-block ${kind}`;
+      const header = document.createElement("header");
+      const headingGroup = document.createElement("div");
+      const heading = document.createElement("h3");
+      heading.textContent = title;
+      const description = document.createElement("p");
+      description.textContent = subtitle;
+      headingGroup.append(heading, description);
+      header.appendChild(headingGroup);
+      block.appendChild(header);
+      return block;
+    }
+
+    function appendReviewMeta(container, label, value) {
+      const item = document.createElement("div");
+      item.className = "review-meta-item";
+      const title = document.createElement("strong");
+      title.textContent = label;
+      const content = document.createElement("span");
+      content.textContent = reviewScalar(value);
+      item.append(title, content);
+      container.appendChild(item);
+    }
+
+    function renderReviewChecklist(block, checklist, reasons) {
+      if (Array.isArray(checklist) && checklist.length) {
+        const list = document.createElement("div");
+        list.className = "review-checklist";
+        checklist.forEach((check, index) => {
+          const row = document.createElement("div");
+          row.className = "review-check";
+          const number = document.createElement("span");
+          number.className = "review-check-index";
+          number.textContent = String(index + 1);
+          const content = document.createElement("div");
+          const title = document.createElement("strong");
+          const question = document.createElement("p");
+          if (check && typeof check === "object") {
+            title.textContent = check.title || check.id || `Review item ${index + 1}`;
+            question.textContent = check.question || check.description || "Human confirmation required";
+          } else {
+            title.textContent = `Review item ${index + 1}`;
+            question.textContent = reviewScalar(check);
+          }
+          content.append(title, question);
+          row.append(number, content, makeReviewStatusChip("pending", "Pending"));
+          list.appendChild(row);
+        });
+        block.appendChild(list);
+      } else {
+        const empty = document.createElement("p");
+        empty.className = "empty";
+        empty.textContent = "This review packet has no dedicated checklist. Use the review reasons and source evidence to decide.";
+        block.appendChild(empty);
+      }
+      if (Array.isArray(reasons) && reasons.length) {
+        const reasonList = document.createElement("div");
+        reasonList.className = "review-reasons";
+        for (const reason of reasons) {
+          const chip = document.createElement("span");
+          chip.className = "review-reason";
+          chip.textContent = reviewScalar(reason);
+          reasonList.appendChild(chip);
+        }
+        block.appendChild(reasonList);
+      }
+    }
+
+    function renderReviewPanel(panel) {
+      const container = document.getElementById("review-panel");
+      container.innerHTML = "";
+      const packet = panel && panel.packet && typeof panel.packet === "object" ? panel.packet : {};
+      if (!panel || panel.status === "not_available" || panel.status === "not_required") {
+        container.textContent = "The selected run does not require human review.";
+        container.className = "review-panel empty";
+      } else {
+        container.className = "review-panel";
+        const overview = document.createElement("article");
+        overview.className = "review-overview";
+        const overviewHeader = document.createElement("header");
+        const overviewText = document.createElement("div");
+        const overviewTitle = document.createElement("h3");
+        overviewTitle.textContent = "Review overview";
+        const overviewSummary = document.createElement("p");
+        overviewSummary.textContent = packet.case_summary || "This run requires human review before it can proceed.";
+        overviewText.append(overviewTitle, overviewSummary);
+        overviewHeader.append(overviewText, makeReviewStatusChip(panel.status));
+        const meta = document.createElement("div");
+        meta.className = "review-meta-grid";
+        appendReviewMeta(meta, "Case", panel.case_id || packet.case_id);
+        appendReviewMeta(meta, "Run", panel.run_id || packet.run_id);
+        appendReviewMeta(meta, "Assignee", panel.assigned_to || packet.assigned_to);
+        appendReviewMeta(meta, "Workspace", panel.workspace_id || packet.workspace_id);
+        overview.append(overviewHeader, meta);
+        container.appendChild(overview);
+
+        const outputBlock = makeReviewBlock("output", "Output", "Primary results from machine execution and deterministic calculations.");
+        let outputPayload = packet.automated_result || packet.deterministic_outputs || packet.deterministic_result;
+        if (packet.component_candidate) {
+          outputPayload = {
+            ...(packet.automated_result ? {automated_result: packet.automated_result} : {}),
+            ...(packet.deterministic_outputs ? {deterministic_outputs: packet.deterministic_outputs} : {}),
+            component_candidate: packet.component_candidate,
+          };
+        }
+        outputBlock.appendChild(renderAdaptiveValue(outputPayload || {status: panel.status}));
+        container.appendChild(outputBlock);
+
+        const suggestionBlock = makeReviewBlock("suggestion", "AI guidance", "AI-generated explanations and review focus areas; these do not replace a human decision.");
+        const explicitSuggestion = packet.ai_suggestion || packet.ai_recommendation || packet.draft_narrative || packet.narrative_draft || packet.recommendation;
+        const suggestionPayload = explicitSuggestion || {
+          summary: packet.case_summary || "This run triggered human review.",
+          recommendation: packet.decision_note || "Verify the review focus areas and evidence before deciding.",
+          key_points: Array.isArray(packet.review_checklist) ? packet.review_checklist.map((item) => item.title || item.id || item.question) : [],
+        };
+        suggestionBlock.appendChild(renderAdaptiveValue(suggestionPayload));
+        container.appendChild(suggestionBlock);
+
+        const humanBlock = makeReviewBlock("human", "Human review focus", "Verify business rules, model output, and production-fit risks item by item.");
+        const reasons = panel.reason_codes || packet.review_reasons || packet.failed_checks || [];
+        renderReviewChecklist(humanBlock, packet.review_checklist, reasons);
+        if (panel.decision) {
+          const decisionDetails = document.createElement("details");
+          const decisionSummary = document.createElement("summary");
+          decisionSummary.textContent = "Recorded review decision";
+          decisionDetails.append(decisionSummary, renderAdaptiveValue(panel.decision));
+          humanBlock.appendChild(decisionDetails);
+        }
+        container.appendChild(humanBlock);
+
+        const consumedKeys = new Set([
+          "assigned_to", "automated_result", "case_id", "case_summary", "component_candidate",
+          "decision_note", "decision_options", "deterministic_outputs", "deterministic_result",
+          "draft_narrative", "failed_checks", "narrative_draft", "recommendation", "review_checklist",
+          "review_reasons", "run_id", "status", "workspace_id", "ai_suggestion", "ai_recommendation",
+        ]);
+        const extraPacket = Object.fromEntries(Object.entries(packet).filter(([key]) => !consumedKeys.has(key)));
+        if (Object.keys(extraPacket).length) {
+          const extraDetails = document.createElement("details");
+          extraDetails.className = "review-block";
+          const extraSummary = document.createElement("summary");
+          extraSummary.textContent = "Additional structured data (auto-adapted)";
+          extraDetails.append(extraSummary, renderAdaptiveValue(extraPacket));
+          container.appendChild(extraDetails);
+        }
+
+        const rawDetails = document.createElement("details");
+        rawDetails.className = "raw-json review-raw";
+        const rawSummary = document.createElement("summary");
+        rawSummary.textContent = "View raw review JSON";
+        const rawPre = document.createElement("pre");
+        rawPre.textContent = JSON.stringify(panel, null, 2);
+        rawDetails.append(rawSummary, rawPre);
+        container.appendChild(rawDetails);
+      }
+
+      const decision = panel && panel.decision;
+      const decisionValue = decision && decision.decision;
+      const decisionStatus = document.getElementById("review-decision-status");
+      decisionStatus.className = `review-status-chip ${reviewStatusClass(decisionValue)}`;
+      decisionStatus.textContent = decisionValue ? `Decision: ${decisionValue}` : "Pending review";
+      document.getElementById("review-id-input").value = panel && panel.review_id ? panel.review_id : "";
+      document.getElementById("submit-review-decision").disabled = !(panel && panel.review_id) || Boolean(decisionValue);
     }
 
     function renderActionPanel(actionPanel) {
@@ -2310,9 +2780,7 @@ def _operator_console_html() -> str:
         renderReviewInbox(state.review_inbox || []);
         renderTimeline(state.timeline || []);
         renderArtifactPanel(state.artifact_panel);
-        document.getElementById("review-panel").textContent = JSON.stringify(state.review_panel, null, 2);
-        document.getElementById("review-id-input").value = state.review_panel && state.review_panel.review_id ? state.review_panel.review_id : "";
-        document.getElementById("submit-review-decision").disabled = !(state.review_panel && state.review_panel.review_id);
+        renderReviewPanel(state.review_panel);
         renderActionPanel(state.action_panel);
         if (!options.preservePolling && shouldPollEvents(state.timeline || [])) {
           startPolling(state.selected_run_id);
@@ -2329,10 +2797,11 @@ def _operator_console_html() -> str:
       const form = event.currentTarget;
       const formData = new FormData(form);
       const thresholdValue = formData.get("review_threshold_origin_count");
+      const toolId = String(formData.get("tool_id") || "chainladder").trim() || "chainladder";
       const payload = {
         case_id: String(formData.get("case_id") || "").trim(),
-        tool_id: String(formData.get("tool_id") || "chainladder").trim() || "chainladder",
-        method: String(formData.get("tool_id") || "chainladder").trim() || "chainladder",
+        tool_id: toolId,
+        method: toolId,
         inputs: {
           sample_name: String(formData.get("sample_name") || "RAA").trim() || "RAA",
         },
@@ -2341,7 +2810,7 @@ def _operator_console_html() -> str:
         created_by: String(formData.get("created_by") || "").trim() || null,
         background: formData.get("background") === "on",
       };
-      if (thresholdValue !== null && String(thresholdValue).trim() !== "") {
+      if (toolId === "chainladder" && thresholdValue !== null && String(thresholdValue).trim() !== "") {
         const thresholdNumber = Number(thresholdValue);
         if (!Number.isInteger(thresholdNumber) || thresholdNumber < 0) {
           setOperationStatus("review_threshold_origin_count must be a non-negative integer.", "error");
@@ -2431,7 +2900,13 @@ def _operator_console_html() -> str:
       }
     }
 
-    Promise.all([loadToolCatalog(), loadConsole()]).catch((error) => {
+    const initialConsoleParams = new URLSearchParams(window.location.search);
+    const initialRunId = initialConsoleParams.get("run_id");
+    const initialFilters = {
+      operator_id: initialConsoleParams.get("operator_id"),
+      workspace_id: initialConsoleParams.get("workspace_id"),
+    };
+    Promise.all([loadToolCatalog(), loadConsole(initialRunId, initialFilters)]).catch((error) => {
       const message = error instanceof Error ? error.message : "Failed to initialize console.";
       renderConsoleError(message);
       setOperationStatus(message, "error");
