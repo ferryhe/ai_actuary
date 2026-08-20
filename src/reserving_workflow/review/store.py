@@ -7,7 +7,23 @@ from typing import Any
 
 from reserving_workflow.artifacts.storage import read_json_artifact, write_json_artifact
 from reserving_workflow.contracts.control_plane import Review, ReviewDecisionArtifact
-from reserving_workflow.storage.local import LocalArtifactStore, LocalReviewStore, resolve_artifact_path, resolve_artifact_root
+from reserving_workflow.storage.local import (
+    LocalArtifactStore,
+    LocalReviewStore,
+    ReviewNotFoundError,
+    resolve_artifact_path,
+    resolve_artifact_root,
+)
+
+
+class ReviewIdentityMismatchError(ValueError):
+    """A persisted review or packet conflicts with authoritative run identity."""
+
+    code = "review_identity_mismatch"
+    message = "Stored review identity conflicts with the registered run."
+
+    def __init__(self) -> None:
+        super().__init__(self.message)
 
 
 def ensure_review_record(
@@ -50,8 +66,17 @@ def build_review_snapshot(
 
     review_packet_result = review_packet_result or {}
     run_id = str(run_entry.get("run_id"))
-    record = review_store.get_review_for_run(run_id)
+    expected_review_id = build_review_id(run_id)
+    try:
+        record = review_store.get_review(expected_review_id)
+    except ReviewNotFoundError:
+        record = review_store.get_review_for_run(run_id)
     if record is not None:
+        record = bind_review_record_identity(record, run_entry=run_entry)
+        packet = record.get("packet")
+        if packet is None and review_packet_result.get("present"):
+            packet = review_packet_result.get("packet")
+        _validate_review_packet_identity(packet, run_entry=run_entry)
         return build_review_contract(
             record,
             review_packet_result=review_packet_result,
@@ -60,6 +85,7 @@ def build_review_snapshot(
         )
 
     packet = review_packet_result.get("packet") if review_packet_result.get("present") else None
+    _validate_review_packet_identity(packet, run_entry=run_entry)
     needs_review = _run_needs_review(run_entry, packet)
     status = "review_required" if needs_review else "not_required"
     packet_payload = packet if isinstance(packet, dict) else {}
@@ -77,6 +103,53 @@ def build_review_snapshot(
         markdown_path=review_packet_result.get("markdown_path"),
         review_delivery=run_entry.get("review_delivery"),
     ).model_dump(exclude_none=True)
+
+
+def bind_review_record_identity(
+    record: dict[str, Any],
+    *,
+    run_entry: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind present persisted identities and fill legacy omissions in memory."""
+
+    run_id = str(run_entry.get("run_id"))
+    expected: dict[str, str | None] = {
+        "review_id": build_review_id(run_id),
+        "run_id": run_id,
+        "case_id": (
+            str(run_entry["case_id"])
+            if run_entry.get("case_id") is not None
+            else None
+        ),
+    }
+    bound = dict(record)
+    for field, expected_value in expected.items():
+        if expected_value is None:
+            continue
+        if field in record and record[field] is not None:
+            if str(record[field]) != expected_value:
+                raise ReviewIdentityMismatchError()
+        else:
+            bound[field] = expected_value
+    return bound
+
+
+def _validate_review_packet_identity(
+    packet: Any,
+    *,
+    run_entry: dict[str, Any],
+) -> None:
+    if not isinstance(packet, dict):
+        return
+    expected = {
+        "run_id": run_entry.get("run_id"),
+        "case_id": run_entry.get("case_id"),
+    }
+    for field, expected_value in expected.items():
+        if field not in packet or expected_value is None:
+            continue
+        if packet[field] is None or str(packet[field]) != str(expected_value):
+            raise ReviewIdentityMismatchError()
 
 
 def build_review_contract(

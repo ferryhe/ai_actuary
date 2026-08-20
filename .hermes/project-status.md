@@ -69,8 +69,8 @@ Next safe action: reopen PR7 only for a persistent-service/concurrency requireme
 - Scope: PR2 read-only ADK control-plane adapter only; PR3–PR6 capabilities remain out of scope.
 - Branch/worktree: `feat/adk-readonly-control-plane-adapter-v2` in a new isolated continuation worktree; the prior unpublished branch is retained for audit.
 - Baseline: `origin/main` at `1670dd7c8bb1792ed8792357168548141adac0cc`; no open pull requests at start.
-- Stage: continuation blocker remediation complete; fresh Reviewer 1/Reviewer 2/Tester cycle 1 pending on a committed HEAD.
-- Review cycles: `0/5` for this new PR attempt; the prior branch's `5/5` audit record remains unchanged.
+- Stage: new-attempt review cycle 1 remediation is complete on a verified local diff; fresh Reviewer 1/Reviewer 2/Tester cycle 2 is next.
+- Review cycles: `1/5` for this new PR attempt; the prior branch's `5/5` audit record remains unchanged.
 - Task heartbeat: `ai-actuary-pr2-continuation-heartbeat` is `ACTIVE`, scoped to this continuation, and must be deleted after merge/cleanup or a confirmed stop-rule blocker.
 - TDD evidence: first shared-client collection failed with the expected missing-package error; final focused suite passed (`143 passed, 6 skipped`) and full suite passed (`322 passed, 10 skipped`).
 - Platform coverage note: POSIX FIFO/device/descriptor-race checks are present but skip on Windows and must run in Linux CI.
@@ -84,6 +84,12 @@ Next safe action: reopen PR7 only for a persistent-service/concurrency requireme
 - Cycle 4 verification: TDD RED `28 failed, 5 passed`; targeted GREEN `33 passed`; focused `240 passed, 6 skipped`; PR1 core `24 passed, 3 skipped`; ADK 2.7.1 regression `27 passed`; Windows invariance/security/tool group `29 passed`; sanitizer adversarial `20 passed`; Python 3.11 Linux/LF full suite `422 passed, 7 skipped`; Ruff, `git diff --check`, local-path scan, cleanup, and port checks passed.
 - Continuation blockers authorized for one TDD batch: list-runs operator/workspace response identity; Windows same-root intermediate junction replacement; remaining snake/camel secret assignment variants; artifact-list provenance and nested review/packet/decision identities.
 - Continuation TDD/verification: initial targeted RED `20 failed, 3 passed`, targeted GREEN `23 passed`; helper/uppercase extension RED `6 failed, 7 passed`, GREEN `13 passed`; focused `268 passed, 7 skipped`; Windows full `445 passed, 11 skipped, 2 deselected`; Python 3.11 Linux/LF full `448 passed, 7 skipped`; ADK 2.7.1 `32 passed, 2 skipped`; storage invariance, review GET/POST, real workflow, Windows junction, POSIX safety, Ruff, diff/path/secret scans, cleanup, and ports passed.
+- New-attempt cycle 1 blockers: Windows top-level trusted-root double-rename TOCTOU during lexical final-file open; compound API/access-key sanitizer variants plus an ordinary `token count` false positive; review packet `case_id` not bound to the outer persisted review identity.
+- New-attempt cycle 1 review evidence: all three independent gates reproduced the Windows race; focused `268 passed, 7 skipped`; PR1 regression `24 passed, 3 skipped`; clean Windows/LF and Linux full suites otherwise passed; worktree, diff, cleanup, process, and port checks passed.
+- New-attempt cycle 1 remediation: Windows final artifacts now open relative to a pinned trusted-root handle through `NtCreateFile`, with delete sharing disabled on the final object; compound API/access-key names and assignments redact across case/separator styles while ordinary token-count language remains; review records and packets are bound to registered review/run/case identity with legacy missing fields filled only in memory.
+- New-attempt cycle 1 verification: TDD RED `19 failed, 7 passed` plus token-count extension RED `3 failed, 2 passed`; focused `293 passed, 7 skipped` and controller overlap `309 passed, 10 skipped`; Windows adversarial `13 passed, 4 skipped`; PR1 `24 passed, 3 skipped`; ADK 2.7.1 `61 passed, 2 skipped`; Linux Python 3.11 LF full `470 passed, 8 skipped`; Windows full `465 passed, 11 skipped, 2 failed` only for unchanged CRLF checksum baselines; Ruff, diff, path/credential, cleanup, container, process, and port gates passed.
+- Updated: `2026-08-20T01:35:31.8451443-04:00`.
+- Updated: `2026-08-20T01:02:56.3063891-04:00`.
 - Updated: `2026-08-20T00:44:59.6857150-04:00`.
 - Updated: `2026-08-20T00:13:12.2484124-04:00`.
 - Updated: `2026-08-19T20:35:03.7128077-04:00`.

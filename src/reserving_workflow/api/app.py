@@ -46,6 +46,8 @@ from reserving_workflow.model_tools import (
     run_minimax_experience_study,
 )
 from reserving_workflow.review import (
+    ReviewIdentityMismatchError,
+    bind_review_record_identity,
     build_review_contract,
     build_review_snapshot,
     ensure_review_record,
@@ -149,6 +151,16 @@ def create_app(
     resolved_tool_registry = tool_registry or build_builtin_tool_registry()
     resolved_workflow_catalog = workflow_catalog or build_builtin_workflow_catalog()
     app = FastAPI(title="AI Actuary Control Plane", version="0.1.0")
+
+    @app.exception_handler(ReviewIdentityMismatchError)
+    async def _review_identity_mismatch_handler(
+        _request: Request,
+        exc: ReviewIdentityMismatchError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={"detail": {"code": exc.code, "message": exc.message}},
+        )
 
     def _get_review_store() -> LocalReviewStore:
         try:
@@ -525,27 +537,16 @@ def create_app(
         run_id = _run_id_from_review_id(review_id)
         if run_id is None:
             raise HTTPException(status_code=404, detail="Review not found.")
-        try:
-            review_store = _get_review_store()
-            record = review_store.get_review(review_id)
-        except ValueError:
-            run_entry = _get_registry_entry(resolved_settings.registry_path, run_id)
-            review = _review_payload_for_run(
-                run_entry,
-                review_store=review_store,
-                review_store_root=resolved_settings.review_store_dir,
-            )
-            if review.get("review_id") != review_id:
-                raise HTTPException(status_code=404, detail="Review not found.")
-            return {"review": review}
-        run_entry = _get_registry_entry(resolved_settings.registry_path, str(record.get("run_id")))
-        return {
-            "review": _review_payload_for_run(
-                run_entry,
-                review_store=review_store,
-                review_store_root=resolved_settings.review_store_dir,
-            )
-        }
+        review_store = _get_review_store()
+        run_entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+        review = _review_payload_for_run(
+            run_entry,
+            review_store=review_store,
+            review_store_root=resolved_settings.review_store_dir,
+        )
+        if review.get("review_id") != review_id:
+            raise HTTPException(status_code=404, detail="Review not found.")
+        return {"review": review}
 
     @app.post("/reviews/{review_id}/decision")
     async def submit_review_decision(review_id: str, request: ReviewDecisionRequest) -> dict[str, Any]:
@@ -573,7 +574,11 @@ def create_app(
             if review_record is None:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
         try:
-            run_entry = _get_registry_entry(resolved_settings.registry_path, str(review_record.get("run_id")))
+            run_id = _run_id_from_review_id(review_id)
+            if run_id is None:
+                raise HTTPException(status_code=404, detail="Review not found.")
+            run_entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+            bind_review_record_identity(review_record, run_entry=run_entry)
             decision_record = review_store.submit_decision(
                 review_id=review_id,
                 decision=decision_contract.decision,
@@ -583,6 +588,8 @@ def create_app(
             )
         except ReviewDecisionConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ReviewIdentityMismatchError:
+            raise
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         decision_record["artifacts"] = write_run_review_decision_artifacts(

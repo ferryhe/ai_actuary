@@ -393,7 +393,7 @@ def test_actual_adk_projection_envelope_redacts_sensitive_free_map_values(
 
 
 def test_actual_adk_projection_envelope_normalizes_sensitive_key_styles() -> None:
-    sentinel = "SENTINEL-SEMANTIC-SECRET"
+    sentinel = "opaque-3b978cd1"
 
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -414,6 +414,15 @@ def test_actual_adk_projection_envelope_normalizes_sensitive_key_styles() -> Non
                         "SECRETKEY": sentinel,
                         "TOKENVALUE": sentinel,
                         "AUTHTOKEN": sentinel,
+                        "x_api_key": sentinel,
+                        "xApiKey": sentinel,
+                        "XAPIKEY": sentinel,
+                        "apiKeyValue": sentinel,
+                        "api-key-value": sentinel,
+                        "personalAccessKey": sentinel,
+                        "awsAccessKeyId": sentinel,
+                        "note": f"x_api_key={sentinel}",
+                        "usage": "Token count is 120 for this model.",
                         "secretaryName": "ordinary-business-value",
                         "tokenizationMethod": "ordinary-business-value",
                         "authenticityScore": "ordinary-business-value",
@@ -437,10 +446,76 @@ def test_actual_adk_projection_envelope_normalizes_sensitive_key_styles() -> Non
     inputs = result["data"]["data"]["inputs"]
     assert sentinel not in json.dumps(result)
     assert inputs == {
+        "note": "[redacted]",
+        "usage": "Token count is 120 for this model.",
         "secretaryName": "ordinary-business-value",
         "tokenizationMethod": "ordinary-business-value",
         "authenticityScore": "ordinary-business-value",
     }
+
+
+def test_actual_adk_review_envelope_rejects_packet_case_identity_mismatch() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "run_id": "run-1",
+                "review": {
+                    "review_id": "review-run-1",
+                    "run_id": "run-1",
+                    "case_id": "case-1",
+                    "status": "review_required",
+                    "review_required": True,
+                    "packet": {
+                        "run_id": "run-1",
+                        "case_id": "other-case",
+                        "status": "review_required",
+                    },
+                },
+            },
+        )
+
+    def factory() -> ReadOnlyControlPlaneClient:
+        return ReadOnlyControlPlaneClient(
+            "http://testserver",
+            transport=httpx.MockTransport(handler),
+            max_get_attempts=1,
+        )
+
+    with adk_tools.use_read_client_factory(factory):
+        result = adk_tools.get_run_review_snapshot("run-1")
+
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "invalid_contract",
+            "message": "Control plane returned an invalid response contract.",
+        },
+    }
+
+
+def test_actual_adk_review_packet_case_conflict_is_storage_invariant_and_keeps_review_root_missing(
+    tmp_path: Path,
+) -> None:
+    fixture, roots = _tool_fixture(tmp_path)
+    packet_path = roots[1] / "review_packet.json"
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    packet["case_id"] = "other-case"
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+    before = _snapshot(roots)
+
+    with adk_tools.use_read_client_factory(fixture["client_factory"]):
+        result = adk_tools.get_run_review_snapshot(fixture["run_id"])
+
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "http_error",
+            "message": "Control plane rejected the request.",
+        },
+    }
+    assert _snapshot(roots) == before
+    assert not roots[-1].exists()
 
 
 def test_actual_adk_list_runs_reports_filtered_identity_mismatch_safely() -> None:

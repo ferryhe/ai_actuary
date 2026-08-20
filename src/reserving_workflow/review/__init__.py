@@ -1,6 +1,8 @@
 """Review workflow boundary for CAS Core."""
 
 from .store import (
+    ReviewIdentityMismatchError,
+    bind_review_record_identity,
     build_review_contract,
     build_review_id,
     build_review_snapshot,
@@ -9,6 +11,8 @@ from .store import (
 )
 
 __all__ = [
+    "ReviewIdentityMismatchError",
+    "bind_review_record_identity",
     "build_review_contract",
     "build_review_id",
     "build_review_snapshot",

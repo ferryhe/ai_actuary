@@ -613,6 +613,123 @@ def test_windows_endpoint_rejects_trusted_root_ancestor_junction_race(
     }
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows rename sharing regression requires Windows")
+def test_windows_reader_blocks_both_trusted_root_swap_windows_and_keeps_original_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from reserving_workflow.adapters.control_plane import projections
+
+    import ctypes
+    from ctypes import wintypes
+
+    root = tmp_path / "trusted-root"
+    replacement = tmp_path / "replacement-root"
+    parked = tmp_path / "parked-root"
+    staged_original = tmp_path / "staged-original.json"
+    root.mkdir()
+    replacement.mkdir()
+    _write_json(root / "artifact.json", {"identity": "original"})
+    _write_json(replacement / "artifact.json", {"identity": "replacement"})
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessHandleCount.argtypes = [wintypes.HANDLE, wintypes.LPDWORD]
+    kernel32.GetProcessHandleCount.restype = wintypes.BOOL
+
+    def handle_count() -> int:
+        count = wintypes.DWORD()
+        assert kernel32.GetProcessHandleCount(
+            kernel32.GetCurrentProcess(),
+            ctypes.byref(count),
+        )
+        return int(count.value)
+
+    original_verify_root = projections._windows_verify_configured_root_handle
+    original_open_relative = projections._windows_open_relative_handle
+    attack_live = False
+    root_swap_attempted = False
+    first_object_swap_attempted = False
+    first_object_swap_blocked = False
+    second_object_swap_attempted = False
+    second_object_swap_blocked = False
+
+    def verify_then_attempt_first_swap(
+        trusted_root_handle: int,
+        configured_root: Path,
+        *,
+        namespace: str,
+    ) -> None:
+        nonlocal attack_live, root_swap_attempted
+        original_verify_root(
+            trusted_root_handle,
+            configured_root,
+            namespace=namespace,
+        )
+        if configured_root != root:
+            return
+        root_swap_attempted = True
+        root.rename(parked)
+        replacement.rename(root)
+        attack_live = True
+
+    def open_then_attempt_both_object_swaps(
+        parent_handle: int,
+        component: str,
+        *,
+        expect_directory: bool,
+        namespace: str,
+    ) -> int:
+        nonlocal first_object_swap_attempted, first_object_swap_blocked
+        nonlocal second_object_swap_attempted, second_object_swap_blocked
+        handle = original_open_relative(
+            parent_handle,
+            component,
+            expect_directory=expect_directory,
+            namespace=namespace,
+        )
+        if expect_directory or component != "artifact.json":
+            return handle
+        first_object_swap_attempted = True
+        try:
+            os.replace(root / "artifact.json", parked / "artifact.json")
+        except OSError:
+            first_object_swap_blocked = True
+        second_object_swap_attempted = True
+        try:
+            (parked / "artifact.json").rename(staged_original)
+        except OSError:
+            second_object_swap_blocked = True
+        return handle
+
+    monkeypatch.setattr(
+        projections,
+        "_windows_verify_configured_root_handle",
+        verify_then_attempt_first_swap,
+    )
+    monkeypatch.setattr(
+        projections,
+        "_windows_open_relative_handle",
+        open_then_attempt_both_object_swaps,
+    )
+    before = handle_count()
+    try:
+        payload = read_bounded_json_object(root, "artifact.json")
+    finally:
+        if attack_live:
+            root.rename(replacement)
+            parked.rename(root)
+
+    assert root_swap_attempted is True
+    assert attack_live is True
+    assert first_object_swap_attempted is True
+    assert first_object_swap_blocked is True
+    assert second_object_swap_attempted is True
+    assert second_object_swap_blocked is True
+    assert payload == {"identity": "original"}
+    assert handle_count() == before
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO creation is unavailable")
 def test_projection_rejects_fifo_without_blocking(tmp_path: Path) -> None:
     client, root, _, run_id = _projection_fixture(tmp_path)
@@ -919,6 +1036,118 @@ def test_free_map_sanitizer_redacts_semantic_sensitive_assignments(
     )
 
     assert projected["inputs"]["note"] == "[redacted]"
+
+
+def test_free_map_sanitizer_redacts_compound_api_and_access_key_styles_without_token_false_positive() -> None:
+    opaque_value = "opaque-7f0c19d2"
+    sensitive_keys = (
+        "x_api_key",
+        "xApiKey",
+        "XAPIKEY",
+        "apiKeyValue",
+        "api-key-value",
+        "personalAccessKey",
+        "awsAccessKeyId",
+    )
+    projected = project_artifact_payload(
+        "validated_input",
+        {
+            "case_id": "case-1",
+            "tool_id": "chainladder",
+            "inputs": {
+                **{key: opaque_value for key in sensitive_keys},
+                "note": f"x_api_key={opaque_value}",
+                "usage": "Token count is 120 for this model.",
+            },
+        },
+    )
+
+    assert opaque_value not in json.dumps(projected)
+    assert projected["inputs"] == {
+        "note": "[redacted]",
+        "usage": "Token count is 120 for this model.",
+    }
+
+
+@pytest.mark.parametrize(
+    "ordinary_value",
+    (
+        "Token count: 42",
+        "The token count is 42 for this model",
+        "This model has a token count of 7.",
+    ),
+)
+def test_free_map_sanitizer_preserves_ordinary_token_count_language(
+    ordinary_value: str,
+) -> None:
+    projected = project_artifact_payload(
+        "validated_input",
+        {
+            "case_id": "case-1",
+            "tool_id": "chainladder",
+            "inputs": {"usage": ordinary_value},
+        },
+    )
+
+    assert projected["inputs"]["usage"] == ordinary_value
+
+
+@pytest.mark.parametrize(
+    "unsafe_value",
+    (
+        "Token count: 42; x_api_key=opaque-9e47a2c1",
+        "The token count is 42 for this model; Bearer opaque-7c39d0a5",
+    ),
+)
+def test_token_count_language_does_not_bypass_other_secret_detection(
+    unsafe_value: str,
+) -> None:
+    projected = project_artifact_payload(
+        "validated_input",
+        {
+            "case_id": "case-1",
+            "tool_id": "chainladder",
+            "inputs": {"usage": unsafe_value},
+        },
+    )
+
+    assert projected["inputs"]["usage"] == "[redacted]"
+
+
+def test_http_projection_redacts_compound_api_and_access_key_styles_without_token_false_positive(
+    tmp_path: Path,
+) -> None:
+    client, root, _, run_id = _projection_fixture(tmp_path)
+    opaque_value = "opaque-41a8d095"
+    _write_json(
+        root / "validated_input.json",
+        {
+            "case_id": "case-projection-1",
+            "run_id": run_id,
+            "tool_id": "chainladder",
+            "inputs": {
+                "x_api_key": opaque_value,
+                "xApiKey": opaque_value,
+                "XAPIKEY": opaque_value,
+                "apiKeyValue": opaque_value,
+                "api-key-value": opaque_value,
+                "personalAccessKey": opaque_value,
+                "awsAccessKeyId": opaque_value,
+                "note": f"x_api_key={opaque_value}",
+                "usage": "Token count is 120 for this model.",
+            },
+        },
+    )
+
+    response = client.get(f"/runs/{run_id}/artifacts/validated_input/projection")
+
+    assert response.status_code == 200
+    inputs = response.json()["data"]["inputs"]
+    assert opaque_value not in json.dumps(response.json())
+    assert inputs == {
+        "note": "[redacted]",
+        "usage": "Token count is 120 for this model.",
+    }
 
 
 def test_free_map_sanitizer_does_not_match_sensitive_token_substrings() -> None:

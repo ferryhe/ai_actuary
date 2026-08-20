@@ -638,9 +638,9 @@ def _open_descriptor_fallback(root: Path, parts: tuple[str, ...], *, namespace: 
                 _windows_open_handle(current, expect_directory=True, namespace=namespace)
             )
 
-        final_path = current / parts[-1]
-        final_handle = _windows_open_handle(
-            final_path,
+        final_handle = _windows_open_relative_handle(
+            parent_handles[-1],
+            parts[-1],
             expect_directory=False,
             namespace=namespace,
         )
@@ -677,20 +677,9 @@ def _windows_open_handle(
     generic_read = 0x80000000
     file_share_read = 0x00000001
     file_share_write = 0x00000002
-    file_share_delete = 0x00000004
     open_existing = 3
     file_flag_open_reparse_point = 0x00200000
     file_flag_backup_semantics = 0x02000000
-    file_attribute_directory = 0x00000010
-    file_attribute_device = 0x00000040
-    file_attribute_reparse_point = 0x00000400
-    file_attribute_tag_info_class = 9
-
-    class FileAttributeTagInfo(ctypes.Structure):
-        _fields_ = [
-            ("file_attributes", wintypes.DWORD),
-            ("reparse_tag", wintypes.DWORD),
-        ]
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateFileW.argtypes = [
@@ -703,18 +692,10 @@ def _windows_open_handle(
         wintypes.HANDLE,
     ]
     kernel32.CreateFileW.restype = wintypes.HANDLE
-    kernel32.GetFileInformationByHandleEx.argtypes = [
-        wintypes.HANDLE,
-        ctypes.c_int,
-        wintypes.LPVOID,
-        wintypes.DWORD,
-    ]
-    kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
-
     handle = kernel32.CreateFileW(
         str(path),
         file_read_attributes if expect_directory else generic_read,
-        file_share_read | file_share_write | file_share_delete,
+        file_share_read | file_share_write,
         None,
         open_existing,
         file_flag_open_reparse_point | file_flag_backup_semantics,
@@ -727,41 +708,191 @@ def _windows_open_handle(
             raise FileNotFoundError(error, "Windows path component is missing")
         raise OSError(error, "Windows path component could not be opened safely")
 
-    raw_handle = int(handle)
+    return _windows_validate_handle(
+        int(handle),
+        expect_directory=expect_directory,
+        namespace=namespace,
+    )
+
+
+def _windows_open_relative_handle(
+    parent_handle: int,
+    component: str,
+    *,
+    expect_directory: bool,
+    namespace: str,
+) -> int:
+    """Open one component relative to a pinned Windows directory handle."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    file_list_directory = 0x00000001
+    file_read_attributes = 0x00000080
+    synchronize = 0x00100000
+    generic_read = 0x80000000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_open = 1
+    file_directory_file = 0x00000001
+    file_synchronous_io_nonalert = 0x00000020
+    file_open_reparse_point = 0x00200000
+    obj_case_insensitive = 0x00000040
+
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.USHORT),
+            ("maximum_length", wintypes.USHORT),
+            ("buffer", wintypes.LPWSTR),
+        ]
+
+    class ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.ULONG),
+            ("root_directory", wintypes.HANDLE),
+            ("object_name", ctypes.POINTER(UnicodeString)),
+            ("attributes", wintypes.ULONG),
+            ("security_descriptor", wintypes.LPVOID),
+            ("security_quality_of_service", wintypes.LPVOID),
+        ]
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [
+            ("status", ctypes.c_void_p),
+            ("information", ctypes.c_size_t),
+        ]
+
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    ntdll.NtCreateFile.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        ctypes.POINTER(ObjectAttributes),
+        ctypes.POINTER(IoStatusBlock),
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    ntdll.NtCreateFile.restype = wintypes.LONG
+    ntdll.RtlNtStatusToDosError.argtypes = [wintypes.LONG]
+    ntdll.RtlNtStatusToDosError.restype = wintypes.ULONG
+
+    name_buffer = ctypes.create_unicode_buffer(component)
+    name = UnicodeString(
+        length=len(component.encode("utf-16-le")),
+        maximum_length=(len(component) + 1) * 2,
+        buffer=ctypes.cast(name_buffer, wintypes.LPWSTR),
+    )
+    attributes = ObjectAttributes(
+        length=ctypes.sizeof(ObjectAttributes),
+        root_directory=wintypes.HANDLE(parent_handle),
+        object_name=ctypes.pointer(name),
+        attributes=obj_case_insensitive,
+        security_descriptor=None,
+        security_quality_of_service=None,
+    )
+    handle = wintypes.HANDLE()
+    io_status = IoStatusBlock()
+    desired_access = (
+        file_list_directory | file_read_attributes | synchronize
+        if expect_directory
+        else generic_read | synchronize
+    )
+    create_options = (
+        file_directory_file if expect_directory else 0
+    ) | file_open_reparse_point | file_synchronous_io_nonalert
+    status = int(
+        ntdll.NtCreateFile(
+            ctypes.byref(handle),
+            desired_access,
+            ctypes.byref(attributes),
+            ctypes.byref(io_status),
+            None,
+            0,
+            file_share_read | file_share_write,
+            file_open,
+            create_options,
+            None,
+            0,
+        )
+    )
+    if status < 0:
+        error = int(ntdll.RtlNtStatusToDosError(status))
+        if error in {2, 3}:
+            raise FileNotFoundError(error, "Windows path component is missing")
+        raise OSError(error, "Windows path component could not be opened safely")
+    return _windows_validate_handle(
+        int(handle.value),
+        expect_directory=expect_directory,
+        namespace=namespace,
+    )
+
+
+def _windows_validate_handle(
+    handle: int,
+    *,
+    expect_directory: bool,
+    namespace: str,
+) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    file_attribute_directory = 0x00000010
+    file_attribute_device = 0x00000040
+    file_attribute_reparse_point = 0x00000400
+    file_attribute_tag_info_class = 9
+
+    class FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = [
+            ("file_attributes", wintypes.DWORD),
+            ("reparse_tag", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetFileInformationByHandleEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
     info = FileAttributeTagInfo()
     if not kernel32.GetFileInformationByHandleEx(
-        handle,
+        wintypes.HANDLE(handle),
         file_attribute_tag_info_class,
         ctypes.byref(info),
         ctypes.sizeof(info),
     ):
         error = ctypes.get_last_error()
-        _windows_close_handle(raw_handle)
+        _windows_close_handle(handle)
         raise OSError(error, "Windows path component metadata could not be read safely")
 
     attributes = int(info.file_attributes)
     if attributes & file_attribute_reparse_point:
-        _windows_close_handle(raw_handle)
+        _windows_close_handle(handle)
         raise _read_error(
             namespace,
             "path_rejected",
             "Registered artifact path failed safety validation.",
         )
     if expect_directory and not attributes & file_attribute_directory:
-        _windows_close_handle(raw_handle)
+        _windows_close_handle(handle)
         raise _read_error(
             namespace,
             "path_rejected",
             "Registered artifact path failed safety validation.",
         )
     if not expect_directory and attributes & (file_attribute_directory | file_attribute_device):
-        _windows_close_handle(raw_handle)
+        _windows_close_handle(handle)
         raise _read_error(
             namespace,
             "not_regular",
             "Registered artifact must be a regular file.",
         )
-    return raw_handle
+    return handle
 
 
 def _windows_verify_handle_within_root(
@@ -941,6 +1072,8 @@ def _forbidden_key(key: str) -> bool:
         return True
     tokens = _semantic_tokens(candidate)
     compact = "".join(tokens)
+    if "apikey" in compact or "accesskey" in compact:
+        return True
     if compact in {
         "password",
         "passwd",
@@ -968,7 +1101,7 @@ def _forbidden_key(key: str) -> bool:
         "basicvalue",
     }:
         return True
-    if set(tokens) & {
+    sensitive_tokens = set(tokens) & {
         "password",
         "passwords",
         "passwd",
@@ -988,7 +1121,13 @@ def _forbidden_key(key: str) -> bool:
         "header",
         "headers",
         "private",
-    }:
+    }
+    if any(
+        token == "token" and index + 1 < len(tokens) and tokens[index + 1] == "count"
+        for index, token in enumerate(tokens)
+    ):
+        sensitive_tokens.discard("token")
+    if sensitive_tokens:
         return True
     normalized = "_".join(tokens)
     if normalized in {
@@ -1106,7 +1245,7 @@ def _looks_sensitive(value: str) -> bool:
     ):
         return True
     if re.search(
-        r"\b(?:secret|token|api[-_ ]?key|password|passphrase|credentials?|cookies?|sessionid|"
+        r"\b(?:secret|token(?!\s+count\b)|api[-_ ]?key|password|passphrase|credentials?|cookies?|sessionid|"
         r"access[-_ ]?token|refresh[-_ ]?token|shared[-_ ]?secret|registry[-_ ]?path|"
         r"file[-_ ]?name|basic[-_ ]?value)\b",
         lowered,

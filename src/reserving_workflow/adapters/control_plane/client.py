@@ -226,6 +226,7 @@ class ReadOnlyControlPlaneClient:
         review = envelope.review
         expected_review_id = f"review-{safe_run_id}"
         packet_run_id = review.packet.get("run_id") if review.packet is not None else None
+        packet_case_id = review.packet.get("case_id") if review.packet is not None else None
         decision = review.decision
         _require_contract_identity(
             envelope.run_id in {None, safe_run_id}
@@ -235,6 +236,12 @@ class ReadOnlyControlPlaneClient:
                 review.packet is None
                 or "run_id" not in review.packet
                 or packet_run_id == safe_run_id
+            )
+            and (
+                review.packet is None
+                or "case_id" not in review.packet
+                or review.case_id is None
+                or packet_case_id == review.case_id
             )
             and (
                 decision is None

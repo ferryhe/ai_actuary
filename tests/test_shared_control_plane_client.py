@@ -408,6 +408,7 @@ def test_artifact_metadata_derives_known_provenance_and_leaves_unknown_unclaimed
         (("run_id",), "other-run"),
         (("review", "review_id"), "review-other-run"),
         (("review", "packet", "run_id"), "other-run"),
+        (("review", "packet", "case_id"), "other-case"),
         (("review", "decision", "run_id"), "other-run"),
         (("review", "decision", "review_id"), "review-other-run"),
         (("review", "decision", "review_id"), ""),

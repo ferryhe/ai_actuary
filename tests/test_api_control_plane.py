@@ -1818,6 +1818,126 @@ def test_review_decision_post_materializes_record_without_prior_get_and_later_ge
     assert _content_snapshot(roots) == before
 
 
+@pytest.mark.parametrize("identity_field", ("review_id", "run_id", "case_id"))
+@pytest.mark.parametrize(
+    "route_template",
+    (
+        "/console/state?run_id={run_id}",
+        "/runs/{run_id}/review",
+        "/reviews",
+        "/reviews/{review_id}",
+    ),
+)
+def test_review_gets_reject_persisted_identity_conflicts_without_storage_changes(
+    tmp_path,
+    identity_field,
+    route_template,
+):
+    settings = ApiSettings(
+        registry_path=tmp_path / "registry" / "runs.json",
+        artifact_root=tmp_path / "artifacts",
+        review_store_dir=tmp_path / "reviews",
+    )
+    client = _client(tmp_path, runner_module=ReviewRunnerModule, settings=settings)
+    run = client.post("/runs", json={"case_id": "bound-review-case"}).json()
+    review_id = f"review-{run['run_id']}"
+    record = {
+        "review_id": review_id,
+        "run_id": run["run_id"],
+        "case_id": "bound-review-case",
+        "status": "review_required",
+        "reason_codes": ["threshold"],
+        "packet": {
+            "run_id": run["run_id"],
+            "case_id": "bound-review-case",
+            "status": "review_required",
+        },
+        "decision": None,
+    }
+    record[identity_field] = f"mismatched-{identity_field}"
+    record_path = Path(settings.review_store_dir) / review_id / "review_record.json"
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    artifact_root = Path(client.get(f"/runs/{run['run_id']}").json()["run"]["artifact_root"])
+    roots = [Path(settings.registry_path).parent, artifact_root, Path(settings.review_store_dir)]
+    before = _content_snapshot(roots)
+
+    response = client.get(
+        route_template.format(run_id=run["run_id"], review_id=review_id)
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": {
+            "code": "review_identity_mismatch",
+            "message": "Stored review identity conflicts with the registered run.",
+        }
+    }
+    assert _content_snapshot(roots) == before
+
+
+def test_review_get_rejects_packet_case_conflict_without_creating_review_root_or_changing_storage(
+    tmp_path,
+):
+    settings = ApiSettings(
+        registry_path=tmp_path / "registry" / "runs.json",
+        artifact_root=tmp_path / "artifacts",
+        review_store_dir=tmp_path / "reviews-not-created",
+    )
+    client = _client(tmp_path, runner_module=ReviewRunnerModule, settings=settings)
+    run = client.post("/runs", json={"case_id": "packet-bound-case"}).json()
+    artifact_root = Path(client.get(f"/runs/{run['run_id']}").json()["run"]["artifact_root"])
+    packet_path = artifact_root / "review_packet.json"
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    packet["case_id"] = "other-case"
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+    roots = [Path(settings.registry_path).parent, artifact_root, Path(settings.review_store_dir)]
+    before = _content_snapshot(roots)
+
+    response = client.get(f"/runs/{run['run_id']}/review")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "review_identity_mismatch"
+    assert _content_snapshot(roots) == before
+    assert not Path(settings.review_store_dir).exists()
+
+
+def test_review_get_accepts_legacy_record_with_missing_identity_fields(tmp_path):
+    settings = ApiSettings(
+        registry_path=tmp_path / "registry" / "runs.json",
+        artifact_root=tmp_path / "artifacts",
+        review_store_dir=tmp_path / "reviews",
+    )
+    client = _client(tmp_path, runner_module=ReviewRunnerModule, settings=settings)
+    run = client.post("/runs", json={"case_id": "legacy-review-case"}).json()
+    review_id = f"review-{run['run_id']}"
+    record_path = Path(settings.review_store_dir) / review_id / "review_record.json"
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(
+        json.dumps(
+            {
+                "status": "review_required",
+                "reason_codes": ["threshold"],
+                "packet": {"status": "review_required"},
+                "decision": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact_root = Path(client.get(f"/runs/{run['run_id']}").json()["run"]["artifact_root"])
+    roots = [Path(settings.registry_path).parent, artifact_root, Path(settings.review_store_dir)]
+    before = _content_snapshot(roots)
+
+    response = client.get(f"/runs/{run['run_id']}/review")
+
+    assert response.status_code == 200
+    review = response.json()["review"]
+    assert review["review_id"] == review_id
+    assert review["run_id"] == run["run_id"]
+    assert review["case_id"] == "legacy-review-case"
+    assert _content_snapshot(roots) == before
+
+
 def _content_snapshot(roots):
     snapshot = []
     for root in roots:
