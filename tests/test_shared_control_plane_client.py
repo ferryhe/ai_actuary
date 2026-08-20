@@ -291,6 +291,165 @@ def test_parameterized_reads_bind_response_identity_to_the_request(
     }
 
 
+@pytest.mark.parametrize(
+    "requested_filters",
+    (
+        {"operator_id": "operator-1"},
+        {"workspace_id": "workspace-1"},
+        {"operator_id": "operator-1", "workspace_id": "workspace-1"},
+    ),
+)
+def test_list_runs_validates_requested_identity_before_status_and_limit(
+    requested_filters: dict[str, str],
+) -> None:
+    matching_run = {
+        "run_id": "run-match",
+        "case_id": "case-1",
+        "status": "completed",
+        "operator_id": "operator-1",
+        "workspace_id": "workspace-1",
+    }
+    mismatched_run = {
+        "run_id": "run-hidden-mismatch",
+        "case_id": "case-2",
+        "status": "failed",
+        "operator_id": "other-operator",
+        "workspace_id": "other-workspace",
+    }
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"run_count": 2, "runs": [matching_run, mismatched_run]},
+        )
+
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(handler),
+        max_get_attempts=1,
+    )
+
+    with pytest.raises(ControlPlaneContractError) as exc_info:
+        client.list_runs(
+            limit=1,
+            status="completed",
+            **requested_filters,
+        )
+
+    assert exc_info.value.code == "invalid_contract"
+
+
+@pytest.mark.parametrize(
+    ("artifact_id", "server_provenance"),
+    (
+        ("validated_input", "review"),
+        ("unknown_artifact", "deterministic"),
+    ),
+)
+def test_artifact_metadata_rejects_forged_or_mismatched_provenance(
+    artifact_id: str,
+    server_provenance: str,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "run_id": "run-1",
+                "artifacts": [
+                    {
+                        "artifact_id": artifact_id,
+                        "present": True,
+                        "provenance": server_provenance,
+                    }
+                ],
+            },
+        )
+
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(handler),
+        max_get_attempts=1,
+    )
+
+    with pytest.raises(ControlPlaneContractError) as exc_info:
+        client.get_run_artifacts("run-1")
+
+    assert exc_info.value.code == "invalid_contract"
+
+
+def test_artifact_metadata_derives_known_provenance_and_leaves_unknown_unclaimed() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "run_id": "run-1",
+                "artifacts": [
+                    {"artifact_id": "validated_input", "present": True},
+                    {"artifact_id": "unknown_artifact", "present": True},
+                ],
+            },
+        )
+
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(handler),
+        max_get_attempts=1,
+    )
+
+    artifacts = client.get_run_artifacts("run-1")
+
+    assert artifacts[0].provenance == "deterministic"
+    assert artifacts[1].provenance is None
+
+
+@pytest.mark.parametrize(
+    ("field_path", "wrong_value"),
+    (
+        (("run_id",), "other-run"),
+        (("review", "review_id"), "review-other-run"),
+        (("review", "packet", "run_id"), "other-run"),
+        (("review", "decision", "run_id"), "other-run"),
+        (("review", "decision", "review_id"), "review-other-run"),
+        (("review", "decision", "review_id"), ""),
+    ),
+)
+def test_review_snapshot_rejects_relational_identity_mismatches(
+    field_path: tuple[str, ...],
+    wrong_value: str,
+) -> None:
+    payload = {
+        "run_id": "run-1",
+        "review": {
+            "review_id": "review-run-1",
+            "run_id": "run-1",
+            "case_id": "case-1",
+            "status": "review_decided",
+            "review_required": True,
+            "packet": {"run_id": "run-1", "status": "review_required"},
+            "decision": {
+                "review_id": "review-run-1",
+                "run_id": "run-1",
+                "decision": "approved",
+            },
+        },
+    }
+    target = payload
+    for key in field_path[:-1]:
+        target = target[key]
+    target[field_path[-1]] = wrong_value
+
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+        max_get_attempts=1,
+    )
+
+    with pytest.raises(ControlPlaneContractError) as exc_info:
+        client.get_run_review_snapshot("run-1")
+
+    assert exc_info.value.code == "invalid_contract"
+
+
 def test_read_only_client_owns_shared_run_polling_and_summary_behavior() -> None:
     with ReadOnlyControlPlaneClient(
         "http://testserver",

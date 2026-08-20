@@ -146,12 +146,29 @@ class ReadOnlyControlPlaneClient:
     ) -> list[Run]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
+        safe_operator_id = (
+            _identifier(operator_id, field_name="operator_id")
+            if operator_id is not None
+            else None
+        )
+        safe_workspace_id = (
+            _identifier(workspace_id, field_name="workspace_id")
+            if workspace_id is not None
+            else None
+        )
         params: dict[str, str] = {}
-        if operator_id is not None:
-            params["operator_id"] = _identifier(operator_id, field_name="operator_id")
-        if workspace_id is not None:
-            params["workspace_id"] = _identifier(workspace_id, field_name="workspace_id")
+        if safe_operator_id is not None:
+            params["operator_id"] = safe_operator_id
+        if safe_workspace_id is not None:
+            params["workspace_id"] = safe_workspace_id
         runs = self._request_model("GET", "/runs", RunListEnvelope, params=params).runs
+        _require_contract_identity(
+            all(
+                (safe_operator_id is None or run.operator_id == safe_operator_id)
+                and (safe_workspace_id is None or run.workspace_id == safe_workspace_id)
+                for run in runs
+            )
+        )
         if status is not None:
             if status not in {"accepted", "queued", "running", "completed", "needs_review", "failed"}:
                 raise ValueError("unsupported run status")
@@ -185,14 +202,48 @@ class ReadOnlyControlPlaneClient:
             "GET", f"/runs/{safe_run_id}/artifacts", ArtifactListEnvelope
         )
         _require_contract_identity(envelope.run_id == safe_run_id)
-        return envelope.artifacts
+        artifacts: list[ArtifactMetadata] = []
+        for artifact in envelope.artifacts:
+            spec = ARTIFACT_PROJECTION_SPECS.get(artifact.artifact_id)
+            expected_provenance = spec.provenance if spec is not None else None
+            _require_contract_identity(
+                artifact.provenance is None
+                or (
+                    expected_provenance is not None
+                    and artifact.provenance == expected_provenance
+                )
+            )
+            artifacts.append(
+                artifact.model_copy(update={"provenance": expected_provenance})
+            )
+        return artifacts
 
     def get_run_review_snapshot(self, run_id: str) -> Review:
         safe_run_id = _identifier(run_id, field_name="run_id")
-        review = self._request_model(
+        envelope = self._request_model(
             "GET", f"/runs/{safe_run_id}/review", ReviewEnvelope
-        ).review
-        _require_contract_identity(review.run_id == safe_run_id)
+        )
+        review = envelope.review
+        expected_review_id = f"review-{safe_run_id}"
+        packet_run_id = review.packet.get("run_id") if review.packet is not None else None
+        decision = review.decision
+        _require_contract_identity(
+            envelope.run_id in {None, safe_run_id}
+            and review.run_id == safe_run_id
+            and (not review.review_id or review.review_id == expected_review_id)
+            and (
+                review.packet is None
+                or "run_id" not in review.packet
+                or packet_run_id == safe_run_id
+            )
+            and (
+                decision is None
+                or (
+                    decision.run_id == safe_run_id
+                    and decision.review_id == expected_review_id
+                )
+            )
+        )
         return review
 
     def get_run_review(self, run_id: str) -> Review:

@@ -36,10 +36,6 @@ MAX_JSON_LIST_LENGTH = 2_000
 MAX_JSON_STRING_LENGTH = 100_000
 MAX_PROJECTED_OUTPUT_BYTES = 500_000
 
-_SENSITIVE_ASSIGNMENT = re.compile(
-    r"(?i)(?:^|[^A-Za-z0-9])(?:client[-_ ]*secret|private[-_ ]*key|"
-    r"authorization|x[-_ ]*auth[-_ ]*header)\s{0,16}[:=]"
-)
 _PEM_PRIVATE_KEY_MARKER = re.compile(
     r"(?i)-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
 )
@@ -560,6 +556,7 @@ def _safe_relative_parts(relative_path: str, *, namespace: str) -> tuple[str, ..
     parts = raw.replace("\\", "/").split("/")
     if (
         not raw
+        or len(parts) != 1
         or any(part in {"", ".", ".."} or ":" in part for part in parts)
         or any(
             part.casefold() in {"?", "??", "device", "globalroot", "unc"}
@@ -936,35 +933,64 @@ def _safe_json_value(value: Any) -> Any:
 
 def _forbidden_key(key: str) -> bool:
     candidate = key.strip()
-    if _looks_like_absolute_path(candidate) or _looks_sensitive(candidate):
-        return True
-    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", candidate)
-    normalized = re.sub(r"[^a-z0-9]+", "_", separated.lower()).strip("_")
-    compact = normalized.replace("_", "")
-    if any(
-        marker in compact
-        for marker in (
-            "password",
-            "passwd",
-            "passphrase",
-            "credential",
-            "cookie",
-            "session",
-            "authheader",
-            "authorization",
-            "apikey",
-            "accesskey",
-            "privatekey",
-            "clientsecret",
-            "accesstoken",
-            "refreshtoken",
-            "sharedsecret",
-            "registrypath",
-        )
+    if (
+        _looks_like_absolute_path(candidate)
+        or _PEM_PRIVATE_KEY_MARKER.search(candidate)
+        or _URL_USERINFO.search(candidate)
     ):
         return True
-    if compact in {"filename", "basicvalue"}:
+    tokens = _semantic_tokens(candidate)
+    compact = "".join(tokens)
+    if compact in {
+        "password",
+        "passwd",
+        "passphrase",
+        "credential",
+        "credentials",
+        "cookie",
+        "cookies",
+        "session",
+        "sessionid",
+        "authheader",
+        "authorization",
+        "apikey",
+        "accesskey",
+        "privatekey",
+        "clientsecret",
+        "secretkey",
+        "accesstoken",
+        "refreshtoken",
+        "sharedsecret",
+        "tokenvalue",
+        "authtoken",
+        "registrypath",
+        "filename",
+        "basicvalue",
+    }:
         return True
+    if set(tokens) & {
+        "password",
+        "passwords",
+        "passwd",
+        "passphrase",
+        "passphrases",
+        "credential",
+        "credentials",
+        "cookie",
+        "cookies",
+        "session",
+        "sessions",
+        "secret",
+        "token",
+        "auth",
+        "authentication",
+        "authorization",
+        "header",
+        "headers",
+        "private",
+    }:
+        return True
+    normalized = "_".join(tokens)
     if normalized in {
         "path",
         "paths",
@@ -1003,24 +1029,56 @@ def _forbidden_key(key: str) -> bool:
         "private",
     }:
         return True
-    if re.search(
-        r"(?:^|_)(?:passwords?|passwd|passphrases?|credentials?|cookies?|sessions?|"
-        r"auth(?:entication|orization)?|headers?)(?:_|$)",
-        normalized,
-    ):
-        return True
-    return normalized.endswith(
-        (
-            "_path",
-            "_paths",
-            "_root",
-            "_token",
-            "_secret",
-            "_api_key",
-            "_access_key",
-            "_private_key",
-        )
-    )
+    return bool(tokens and tokens[-1] in {"path", "paths", "root"})
+
+
+def _semantic_tokens(value: str) -> tuple[str, ...]:
+    """Split bounded key text consistently across separators, case, and acronyms."""
+
+    tokens: list[str] = []
+    current: list[str] = []
+    for index, character in enumerate(value):
+        if not character.isalnum():
+            if current:
+                tokens.append("".join(current).casefold())
+                current = []
+            continue
+        previous = value[index - 1] if index else ""
+        following = value[index + 1] if index + 1 < len(value) else ""
+        if (
+            character.isupper()
+            and current
+            and (
+                previous.islower()
+                or previous.isdigit()
+                or (previous.isupper() and following.islower())
+            )
+        ):
+            tokens.append("".join(current).casefold())
+            current = []
+        current.append(character)
+    if current:
+        tokens.append("".join(current).casefold())
+    return tuple(tokens)
+
+
+def _contains_sensitive_assignment(value: str) -> bool:
+    """Inspect bounded assignment keys without a backtracking expression."""
+
+    assignment_boundary = "\r\n;,&|()[]{}"
+    segment_start = 0
+    for index, character in enumerate(value):
+        if character in assignment_boundary:
+            segment_start = index + 1
+            continue
+        if character not in {":", "="}:
+            continue
+        start = max(segment_start, index - 128)
+        candidate = value[start:index].strip()
+        if candidate and _forbidden_key(candidate):
+            return True
+        segment_start = index + 1
+    return False
 
 
 def _looks_like_absolute_path(value: str) -> bool:
@@ -1042,7 +1100,7 @@ def _looks_like_absolute_path(value: str) -> bool:
 def _looks_sensitive(value: str) -> bool:
     lowered = value.lower()
     if (
-        _SENSITIVE_ASSIGNMENT.search(value)
+        _contains_sensitive_assignment(value)
         or _PEM_PRIVATE_KEY_MARKER.search(value)
         or _URL_USERINFO.search(value)
     ):

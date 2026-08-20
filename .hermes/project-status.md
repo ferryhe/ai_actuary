@@ -67,11 +67,11 @@ Next safe action: reopen PR7 only for a persistent-service/concurrency requireme
 ## ADK Multi-PR Route — PR2 Delivery (2026-08-19)
 
 - Scope: PR2 read-only ADK control-plane adapter only; PR3–PR6 capabilities remain out of scope.
-- Branch/worktree: `feat/adk-readonly-control-plane-adapter` in an isolated worktree.
+- Branch/worktree: `feat/adk-readonly-control-plane-adapter-v2` in a new isolated continuation worktree; the prior unpublished branch is retained for audit.
 - Baseline: `origin/main` at `1670dd7c8bb1792ed8792357168548141adac0cc`; no open pull requests at start.
-- Stage: review cycle 4 remediation complete; final fresh Reviewer 1/Reviewer 2/Tester rerun pending on the new committed HEAD.
-- Review cycles: `4/5`.
-- Task heartbeat: `ai-actuary-pr2-delivery-heartbeat` is `ACTIVE`, scoped to this PR2 delivery, and must be deleted after merge/cleanup or a confirmed stop-rule blocker.
+- Stage: continuation blocker remediation complete; fresh Reviewer 1/Reviewer 2/Tester cycle 1 pending on a committed HEAD.
+- Review cycles: `0/5` for this new PR attempt; the prior branch's `5/5` audit record remains unchanged.
+- Task heartbeat: `ai-actuary-pr2-continuation-heartbeat` is `ACTIVE`, scoped to this continuation, and must be deleted after merge/cleanup or a confirmed stop-rule blocker.
 - TDD evidence: first shared-client collection failed with the expected missing-package error; final focused suite passed (`143 passed, 6 skipped`) and full suite passed (`322 passed, 10 skipped`).
 - Platform coverage note: POSIX FIFO/device/descriptor-race checks are present but skip on Windows and must run in Linux CI.
 - Cycle 1 blockers: embedded absolute-path/common-credential redaction gaps; Windows intermediate-directory TOCTOU; Linux symlink test not reaching the no-follow branch; stable rejection for malformed/non-finite JSON hardening.
@@ -82,6 +82,10 @@ Next safe action: reopen PR7 only for a persistent-service/concurrency requireme
 - Cycle 3 verification: TDD RED `25 failed`; focused `207 passed, 6 skipped`; PR1/ADK regression `24 passed, 3 skipped`; Windows trusted-root races `2 passed`; Windows race/handle-leak group `4 passed`; artifact schema/identity and authoritative fixtures `29 passed`; Python 3.11 Linux/LF full suite `389 passed, 7 skipped`; `git diff --check` passed.
 - Cycle 4 blockers: real workflow parent manifest/artifact truth divergence; client request/response run and artifact identity plus provenance not bound; credential-assignment/PEM/auth-header value sanitizer gaps; committed local worktree path.
 - Cycle 4 verification: TDD RED `28 failed, 5 passed`; targeted GREEN `33 passed`; focused `240 passed, 6 skipped`; PR1 core `24 passed, 3 skipped`; ADK 2.7.1 regression `27 passed`; Windows invariance/security/tool group `29 passed`; sanitizer adversarial `20 passed`; Python 3.11 Linux/LF full suite `422 passed, 7 skipped`; Ruff, `git diff --check`, local-path scan, cleanup, and port checks passed.
+- Continuation blockers authorized for one TDD batch: list-runs operator/workspace response identity; Windows same-root intermediate junction replacement; remaining snake/camel secret assignment variants; artifact-list provenance and nested review/packet/decision identities.
+- Continuation TDD/verification: initial targeted RED `20 failed, 3 passed`, targeted GREEN `23 passed`; helper/uppercase extension RED `6 failed, 7 passed`, GREEN `13 passed`; focused `268 passed, 7 skipped`; Windows full `445 passed, 11 skipped, 2 deselected`; Python 3.11 Linux/LF full `448 passed, 7 skipped`; ADK 2.7.1 `32 passed, 2 skipped`; storage invariance, review GET/POST, real workflow, Windows junction, POSIX safety, Ruff, diff/path/secret scans, cleanup, and ports passed.
+- Updated: `2026-08-20T00:44:59.6857150-04:00`.
+- Updated: `2026-08-20T00:13:12.2484124-04:00`.
 - Updated: `2026-08-19T20:35:03.7128077-04:00`.
 - Updated: `2026-08-19T20:16:08.3452311-04:00`.
 - Updated: `2026-08-19T19:54:16.3437495-04:00`.

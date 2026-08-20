@@ -124,6 +124,8 @@ def _tool_fixture(tmp_path: Path) -> tuple[dict[str, Any], list[Path]]:
         event_type="run.running",
         event_payload={"secret": sentinel, "path": str(tmp_path)},
         workflow_id="chainladder-basic",
+        operator_id="local-actuary",
+        workspace_id="default-workspace",
     )
     store.update_run_status(
         task_id="task-adk",
@@ -137,6 +139,8 @@ def _tool_fixture(tmp_path: Path) -> tuple[dict[str, Any], list[Path]]:
         event_type="run.needs_review",
         event_payload={"secret": sentinel, "path": str(tmp_path)},
         workflow_id="chainladder-basic",
+        operator_id="local-actuary",
+        workspace_id="default-workspace",
     )
     settings = ApiSettings(
         registry_path=registry_path,
@@ -386,6 +390,109 @@ def test_actual_adk_projection_envelope_redacts_sensitive_free_map_values(
 
     assert result["ok"] is True
     assert result["data"]["data"]["inputs"]["note"] == "[redacted]"
+
+
+def test_actual_adk_projection_envelope_normalizes_sensitive_key_styles() -> None:
+    sentinel = "SENTINEL-SEMANTIC-SECRET"
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "run_id": "run-1",
+                "artifact_id": "validated_input",
+                "status": "available",
+                "provenance": "deterministic",
+                "data": {
+                    "case_id": "case-1",
+                    "tool_id": "chainladder",
+                    "inputs": {
+                        "secret_key": sentinel,
+                        "secretKey": sentinel,
+                        "TOKEN-VALUE": sentinel,
+                        "authToken": sentinel,
+                        "SECRETKEY": sentinel,
+                        "TOKENVALUE": sentinel,
+                        "AUTHTOKEN": sentinel,
+                        "secretaryName": "ordinary-business-value",
+                        "tokenizationMethod": "ordinary-business-value",
+                        "authenticityScore": "ordinary-business-value",
+                    },
+                },
+                "errors": [],
+            },
+        )
+
+    def factory() -> ReadOnlyControlPlaneClient:
+        return ReadOnlyControlPlaneClient(
+            "http://testserver",
+            transport=httpx.MockTransport(handler),
+            max_get_attempts=1,
+        )
+
+    with adk_tools.use_read_client_factory(factory):
+        result = adk_tools.get_artifact_projection("run-1", "validated_input")
+
+    assert result["ok"] is True
+    inputs = result["data"]["data"]["inputs"]
+    assert sentinel not in json.dumps(result)
+    assert inputs == {
+        "secretaryName": "ordinary-business-value",
+        "tokenizationMethod": "ordinary-business-value",
+        "authenticityScore": "ordinary-business-value",
+    }
+
+
+def test_actual_adk_list_runs_reports_filtered_identity_mismatch_safely() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "run_count": 1,
+                "runs": [
+                    {
+                        "run_id": "run-1",
+                        "status": "completed",
+                        "operator_id": "other-operator",
+                    }
+                ],
+            },
+        )
+
+    def factory() -> ReadOnlyControlPlaneClient:
+        return ReadOnlyControlPlaneClient(
+            "http://testserver",
+            transport=httpx.MockTransport(handler),
+            max_get_attempts=1,
+        )
+
+    with adk_tools.use_read_client_factory(factory):
+        result = adk_tools.list_runs(operator_id="operator-1")
+
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "invalid_contract",
+            "message": "Control plane returned an invalid response contract.",
+        },
+    }
+
+
+def test_actual_api_and_adk_round_trip_legacy_identity_filters(tmp_path: Path) -> None:
+    fixture, roots = _tool_fixture(tmp_path)
+    before = _snapshot(roots)
+
+    with adk_tools.use_read_client_factory(fixture["client_factory"]):
+        result = adk_tools.list_runs(
+            operator_id="local-actuary",
+            workspace_id="default-workspace",
+        )
+
+    assert result["ok"] is True
+    assert len(result["data"]) == 1
+    assert result["data"][0]["operator_id"] == "local-actuary"
+    assert result["data"][0]["workspace_id"] == "default-workspace"
+    assert _snapshot(roots) == before
 
 
 def test_actual_adk_envelope_reports_response_identity_mismatch_safely() -> None:

@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import socket
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -429,12 +430,46 @@ def test_projection_rejects_intermediate_and_final_symlinks(tmp_path: Path) -> N
     assert intermediate_response.json()["detail"]["code"] == "artifact_path_rejected"
 
 
+def test_projection_rejects_all_multicomponent_registered_paths(tmp_path: Path) -> None:
+    client, root, _, run_id = _projection_fixture(tmp_path)
+    nested = root / "slot" / "validated_input.json"
+    nested.parent.mkdir()
+    (root / "validated_input.json").replace(nested)
+    manifest_path = root / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifact_paths"]["validated_input"] = "slot/validated_input.json"
+    _write_json(manifest_path, manifest)
+
+    response = client.get(f"/runs/{run_id}/artifacts/validated_input/projection")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "code": "artifact_path_rejected",
+        "message": "Registered artifact path failed safety validation.",
+    }
+
+
+def test_bounded_reader_rejects_multicomponent_paths_at_the_shared_boundary(
+    tmp_path: Path,
+) -> None:
+    nested = tmp_path / "slot" / "validated_input.json"
+    nested.parent.mkdir()
+    _write_json(nested, {"identity": "must-not-be-read"})
+
+    with pytest.raises(ArtifactProjectionReadError) as exc_info:
+        read_bounded_json_object(tmp_path, "slot/validated_input.json")
+
+    assert exc_info.value.code == "artifact_path_rejected"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="junction swap regression requires Windows")
 def test_windows_endpoint_confines_file_after_intermediate_handle_returns(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from reserving_workflow.adapters.control_plane import projections
+
+    import ctypes
+    from ctypes import wintypes
 
     client, root, _, run_id = _projection_fixture(tmp_path)
     intermediate = root / "slot"
@@ -451,46 +486,55 @@ def test_windows_endpoint_confines_file_after_intermediate_handle_returns(
     manifest["artifact_paths"]["validated_input"] = "slot/validated_input.json"
     _write_json(manifest_path, manifest)
     parked = root / "parked"
-    original_open_handle = projections._windows_open_handle
-    swapped = False
-    sharing_blocked = False
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessHandleCount.argtypes = [wintypes.HANDLE, wintypes.LPDWORD]
+    kernel32.GetProcessHandleCount.restype = wintypes.BOOL
 
-    def open_then_swap(path: Path, *, expect_directory: bool, namespace: str) -> int:
-        nonlocal sharing_blocked, swapped
-        handle = original_open_handle(
-            path,
-            expect_directory=expect_directory,
-            namespace=namespace,
+    def handle_count() -> int:
+        count = wintypes.DWORD()
+        assert kernel32.GetProcessHandleCount(
+            kernel32.GetCurrentProcess(),
+            ctypes.byref(count),
         )
-        if not swapped and path == intermediate:
-            try:
-                intermediate.rename(parked)
-            except OSError:
-                sharing_blocked = True
-                return handle
-            completed = subprocess.run(
-                ["cmd", "/c", "mklink", "/J", str(intermediate), str(outside)],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if completed.returncode != 0:
-                projections._windows_close_handle(handle)
-                pytest.skip("junction creation is unavailable in this Windows environment")
-            swapped = True
-        return handle
+        return int(count.value)
 
-    monkeypatch.setattr(projections, "_windows_open_handle", open_then_swap)
+    before = handle_count()
+    handle = projections._windows_open_handle(
+        intermediate,
+        expect_directory=True,
+        namespace="artifact",
+    )
+    swapped = False
+    try:
+        intermediate.rename(parked)
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(intermediate), str(outside)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            parked.rename(intermediate)
+            pytest.skip("junction creation is unavailable in this Windows environment")
+        swapped = True
+    finally:
+        projections._windows_close_handle(handle)
+    assert handle_count() == before
 
-    response = client.get(f"/runs/{run_id}/artifacts/validated_input/projection")
+    try:
+        response = client.get(f"/runs/{run_id}/artifacts/validated_input/projection")
+    finally:
+        if swapped:
+            os.rmdir(intermediate)
+            parked.rename(intermediate)
 
-    assert sharing_blocked or swapped
-    if sharing_blocked:
-        assert response.status_code == 200
-        assert response.json()["data"]["inputs"]["sample_name"] == "RAA"
-    else:
-        assert response.status_code == 400
-        assert response.json()["detail"]["code"] == "artifact_path_rejected"
+    assert swapped
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "code": "artifact_path_rejected",
+        "message": "Registered artifact path failed safety validation.",
+    }
 
 
 @pytest.mark.parametrize("race_namespace", ("manifest", "artifact"))
@@ -753,6 +797,16 @@ def test_nested_free_map_sanitizer_redacts_sensitive_keys_paths_and_credentials(
         "fileName",
         "file_name",
         "BasicValue",
+        "secret_key",
+        "secretKey",
+        "SECRET-KEY",
+        "token_value",
+        "tokenValue",
+        "TOKEN-VALUE",
+        "authToken",
+        "SECRETKEY",
+        "TOKENVALUE",
+        "AUTHTOKEN",
         "/var/lib/private/key.json",
         r"C:\private\key.json",
         r"\\server\share\key.json",
@@ -835,6 +889,57 @@ def test_free_map_sanitizer_redacts_assignment_pem_and_url_userinfo_values(
     )
 
     assert projected["inputs"]["note"] == "[redacted]"
+
+
+@pytest.mark.parametrize(
+    "unsafe_value",
+    (
+        "secret_key=opaque-value",
+        "secretKey: opaque-value",
+        "SECRET-KEY = opaque-value",
+        "token_value=opaque-value",
+        "tokenValue: opaque-value",
+        "TOKEN-VALUE = opaque-value",
+        "authToken=opaque-value",
+        "SECRETKEY=opaque-value",
+        "TOKENVALUE=opaque-value",
+        "AUTHTOKEN=opaque-value",
+    ),
+)
+def test_free_map_sanitizer_redacts_semantic_sensitive_assignments(
+    unsafe_value: str,
+) -> None:
+    projected = project_artifact_payload(
+        "validated_input",
+        {
+            "case_id": "case-1",
+            "tool_id": "chainladder",
+            "inputs": {"note": unsafe_value},
+        },
+    )
+
+    assert projected["inputs"]["note"] == "[redacted]"
+
+
+def test_free_map_sanitizer_does_not_match_sensitive_token_substrings() -> None:
+    projected = project_artifact_payload(
+        "validated_input",
+        {
+            "case_id": "case-1",
+            "tool_id": "chainladder",
+            "inputs": {
+                "secretaryName": "ordinary-business-value",
+                "tokenizationMethod": "ordinary-business-value",
+                "authenticityScore": "ordinary-business-value",
+            },
+        },
+    )
+
+    assert projected["inputs"] == {
+        "secretaryName": "ordinary-business-value",
+        "tokenizationMethod": "ordinary-business-value",
+        "authenticityScore": "ordinary-business-value",
+    }
 
 
 @pytest.mark.parametrize(
@@ -988,9 +1093,26 @@ def test_bounded_reader_uses_open_descriptor_when_entry_is_replaced(
 @pytest.mark.skipif(os.name != "posix", reason="POSIX device fixture is unavailable")
 def test_bounded_reader_rejects_device_file() -> None:
     with pytest.raises(ArtifactProjectionReadError) as exc_info:
-        read_bounded_json_object(Path("/"), "dev/null")
+        read_bounded_json_object(Path("/dev"), "null")
 
     assert exc_info.value.code == "artifact_not_regular"
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(socket, "AF_UNIX"),
+    reason="POSIX socket fixture is unavailable",
+)
+def test_bounded_reader_rejects_unix_socket_without_blocking(tmp_path: Path) -> None:
+    target = tmp_path / "artifact.json"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(str(target))
+        with pytest.raises(ArtifactProjectionReadError) as exc_info:
+            read_bounded_json_object(tmp_path, target.name)
+    finally:
+        listener.close()
+
+    assert exc_info.value.code == "artifact_unreadable"
 
 
 @pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="fd accounting is unavailable")

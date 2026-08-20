@@ -107,6 +107,7 @@ class ArtifactListEnvelope(ResponseContract):
 
 
 class ReviewEnvelope(ResponseContract):
+    run_id: str | None = None
     review: Review
 
 
