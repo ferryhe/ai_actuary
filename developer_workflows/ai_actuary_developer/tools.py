@@ -119,7 +119,10 @@ def list_runs(
         isinstance(limit, bool)
         or not isinstance(limit, int)
         or not 1 <= limit <= 100
-        or (status is not None and status not in _RUN_STATUSES)
+        or (
+            status is not None
+            and (not isinstance(status, str) or status not in _RUN_STATUSES)
+        )
         or (operator_id is not None and not _valid_identifier(operator_id))
         or (workspace_id is not None and not _valid_identifier(workspace_id))
     ):

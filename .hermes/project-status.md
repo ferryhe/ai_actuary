@@ -69,9 +69,9 @@ Next safe action: reopen PR7 only for a persistent-service/concurrency requireme
 - Scope: PR2 read-only ADK control-plane adapter only; PR3–PR6 capabilities remain out of scope.
 - Branch/worktree: `feat/adk-readonly-control-plane-adapter-v2` in a new isolated continuation worktree; the prior unpublished branch is retained for audit.
 - Baseline: `origin/main` at `1670dd7c8bb1792ed8792357168548141adac0cc`; no open pull requests at start.
-- Stage: STOPPED at the managed review cap after final review cycle 5/5 found one reproducible Important blocker; no branch was pushed and no pull request was created.
-- Review cycles: `5/5` for this new PR attempt; autonomous remediation is exhausted and the prior branch's `5/5` audit record remains unchanged.
-- Task heartbeat: `ai-actuary-pr2-continuation-heartbeat` was deleted after the confirmed stop-rule blocker.
+- Stage: user-authorized cycle 5 blocker remediation is complete; awaiting fresh review cycle 6/10.
+- Review cycles: `5/10` under the user-extended cap. If cycle 10 still finds blockers, apply one final fix without an eleventh review, then publish the PR as Ready for review and wait for Copilot comments.
+- Task heartbeat: prior continuation heartbeat was deleted at the old stop line; `ai-actuary-pr2-extended-review-heartbeat` is active for the resumed delivery.
 - TDD evidence: first shared-client collection failed with the expected missing-package error; final focused suite passed (`143 passed, 6 skipped`) and full suite passed (`322 passed, 10 skipped`).
 - Platform coverage note: POSIX FIFO/device/descriptor-race checks are present but skip on Windows and must run in Linux CI.
 - Cycle 1 blockers: embedded absolute-path/common-credential redaction gaps; Windows intermediate-directory TOCTOU; Linux symlink test not reaching the no-follow branch; stable rejection for malformed/non-finite JSON hardening.
@@ -102,7 +102,12 @@ Next safe action: reopen PR7 only for a persistent-service/concurrency requireme
 - New-attempt cycle 4 verification: 21 expected TDD failures were observed and closed; controller overlap `284 passed, 11 skipped`; Windows focused `410 passed, 18 skipped`, storage `18 passed, 6 skipped`; clean Linux core full `617 passed, 10 skipped`, POSIX focused `288 passed, 3 skipped`; ADK 2.7.1 `87 passed, 2 skipped` with exact 12 read-only tools and model-free discovery; real root rename, root symlink/junction, child reparse, directory limit, fd/handle closure, direct/ASGI/ADK sanitizer and review tests passed; Ruff, diff, path/credential, cleanup, container, and port gates passed. Windows full retained only the two unchanged CRLF checksum failures.
 - New-attempt cycle 5 blocker: the registered developer `list_runs` tool evaluates non-string `status` values against the status set before entering its common safe invocation wrapper; JSON array/object arguments therefore raise uncaught `TypeError` instead of the required stable invalid-argument envelope. Reviewer 1, Reviewer 2, Tester, and the controller reproduced both list and object cases at product SHA `90886633d91e018c595e75a0df10b95342ea9849`.
 - New-attempt cycle 5 stop evidence: zero Critical and one shared Important finding; Windows focused `410 passed, 18 skipped`, review storage `18 passed, 6 skipped`, PR1 `24 passed, 3 skipped`, and the pre-existing adversarial matrix passed; remote `main` remained at the frozen base, the delivery branch did not exist remotely, and GitHub had no open PR for it. The minimum future fix is to type-check `status` before set membership and add list/object/set-like argument envelope regressions, but it was not applied because the autonomous `5/5` review cap was reached.
-- Next safe action: require explicit user authorization for a fresh attempt with a new review budget; do not push, open, or merge this branch as-is.
+- Next safe action: remediate the cycle 5 tool-argument envelope blocker, run fresh cycle 6 review, and continue within the user-authorized 10-cycle cap.
+- Resumption authorization: user explicitly raised the maximum to 10 review cycles and authorized one final unreviewed remediation after cycle 10 before Ready-for-review PR publication and Copilot feedback handling.
+- Extended-cap cycle 5 remediation: `list_runs.status` now requires a string before status-set membership; JSON array/object/boolean/number values return the stable `invalid_argument` envelope. A table-driven audit covers every parameter on all 12 registered read tools and found no other raw argument exception.
+- Extended-cap cycle 5 verification: TDD RED `2 failed, 55 passed`, GREEN `64 passed`; controller ADK suite `120 passed, 3 skipped`; focused `467 passed, 18 skipped`; PR1 `24 passed, 3 skipped`; clean Linux LF/core-only full `674 passed, 10 skipped`; ADK 2.7.1 version, exact 12 tools, root agent, app-info/build-graph smoke and `25 passed, 2 skipped`; Windows full retained only two unchanged CRLF checksum failures. Ruff, diff, path/credential, cleanup, container, and port gates passed.
+- Updated: `2026-08-20T07:12:42.9636511-04:00`.
+- Updated: `2026-08-20T06:59:38.6207343-04:00`.
 - Updated: `2026-08-20T05:00:35.4942725-04:00`.
 - Updated: `2026-08-20T04:43:34.6918160-04:00`.
 - Updated: `2026-08-20T04:12:24.6382454-04:00`.

@@ -285,6 +285,87 @@ def test_adk_tool_arguments_are_strictly_bounded(call, code: str) -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "parameter", "value"),
+    [
+        pytest.param(tool_name, parameter, value, id=f"{tool_name}-{parameter}-{type(value).__name__}")
+        for tool_name, parameters in {
+            "get_tool": {"tool_id": [[], {}, True, 1, None]},
+            "get_workflow": {"workflow_id": [[], {}, True, 1, None]},
+            "list_runs": {
+                "limit": [[], {}, True, None],
+                "status": [[], {}, True, 1],
+                "operator_id": [[], {}, True, 1],
+                "workspace_id": [[], {}, True, 1],
+            },
+            "get_run": {"run_id": [[], {}, True, 1, None]},
+            "get_run_events": {"run_id": [[], {}, True, 1, None]},
+            "get_run_artifacts": {"run_id": [[], {}, True, 1, None]},
+            "get_run_review_snapshot": {"run_id": [[], {}, True, 1, None]},
+            "get_artifact_projection": {
+                "run_id": [[], {}, True, 1, None],
+                "artifact_id": [[], {}, True, 1, None],
+            },
+        }.items()
+        for parameter, values in parameters.items()
+        for value in values
+    ],
+)
+def test_adk_tool_json_argument_types_return_safe_envelope(
+    tool_name: str,
+    parameter: str,
+    value: Any,
+) -> None:
+    arguments = {
+        "get_tool": {"tool_id": "chainladder"},
+        "get_workflow": {"workflow_id": "chainladder-basic"},
+        "list_runs": {
+            "limit": 20,
+            "status": None,
+            "operator_id": None,
+            "workspace_id": None,
+        },
+        "get_run": {"run_id": "run-1"},
+        "get_run_events": {"run_id": "run-1"},
+        "get_run_artifacts": {"run_id": "run-1"},
+        "get_run_review_snapshot": {"run_id": "run-1"},
+        "get_artifact_projection": {
+            "run_id": "run-1",
+            "artifact_id": "validated_input",
+        },
+    }[tool_name]
+    arguments[parameter] = value
+
+    result = getattr(adk_tools, tool_name)(**arguments)
+
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "invalid_argument",
+            "message": "Tool arguments failed validation.",
+        },
+    }
+
+
+def test_adversarial_json_matrix_covers_every_adk_tool_parameter() -> None:
+    parameterized_tools = {
+        "get_tool": {"tool_id"},
+        "get_workflow": {"workflow_id"},
+        "list_runs": {"limit", "status", "operator_id", "workspace_id"},
+        "get_run": {"run_id"},
+        "get_run_events": {"run_id"},
+        "get_run_artifacts": {"run_id"},
+        "get_run_review_snapshot": {"run_id"},
+        "get_artifact_projection": {"run_id", "artifact_id"},
+    }
+
+    assert {
+        name: set(inspect.signature(getattr(adk_tools, name)).parameters)
+        for name in READ_TOOL_NAMES
+        if inspect.signature(getattr(adk_tools, name)).parameters
+    } == parameterized_tools
+
+
 def test_adk_tool_failures_never_return_raw_transport_or_response_details() -> None:
     sentinel = "SENTINEL-RAW-EXCEPTION"
 
