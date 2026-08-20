@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
+import time
 from pathlib import Path
 
 import httpx
@@ -835,6 +837,77 @@ def test_console_state_contains_experience_study_results(tmp_path):
     assert result_panel["result_count"] == 8
     assert len(result_panel["results"]) == 8
     assert result_panel["narrative_summary"].startswith("MiniMax-M3 produced 8")
+
+
+@pytest.mark.parametrize("surface", ("results", "console"))
+def test_result_surfaces_pin_manifest_and_artifacts_to_one_root(
+    tmp_path,
+    monkeypatch,
+    surface,
+):
+    client = _client(tmp_path)
+    run = client.post(
+        "/runs",
+        json={
+            "case_id": f"minimax-pinned-{surface}",
+            "tool_id": "minimax_experience_study_tool",
+            "inputs": {"sample_name": "ae_small"},
+        },
+    ).json()
+    run_id = run["run_id"]
+    root = Path(client.get(f"/runs/{run_id}").json()["run"]["artifact_root"])
+    parked = tmp_path / f"parked-{surface}"
+    replacement = tmp_path / f"replacement-{surface}"
+    replacement.mkdir()
+    (replacement / "run_manifest.json").write_text(
+        (root / "run_manifest.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    original_read = api_app.TrustedArtifactRoot.read_bounded_json_object
+    swapped = False
+
+    def read_then_swap(
+        trusted_root,
+        relative_path,
+        *,
+        namespace=None,
+        max_bytes=1_000_000,
+    ):
+        nonlocal swapped
+        payload = original_read(
+            trusted_root,
+            relative_path,
+            namespace=namespace,
+            max_bytes=max_bytes,
+        )
+        if not swapped and relative_path == "run_manifest.json":
+            root.rename(parked)
+            replacement.rename(root)
+            swapped = True
+        return payload
+
+    monkeypatch.setattr(
+        api_app.TrustedArtifactRoot,
+        "read_bounded_json_object",
+        read_then_swap,
+    )
+    try:
+        response = client.get(
+            f"/runs/{run_id}/results"
+            if surface == "results"
+            else f"/console/state?run_id={run_id}"
+        )
+        assert response.status_code == 200
+        panel = response.json() if surface == "results" else response.json()["result_panel"]
+        assert panel["status"] == "available"
+        assert panel["result_count"] == 8
+        assert len(panel["results"]) == 8
+    finally:
+        if swapped:
+            root.rename(replacement)
+            parked.rename(root)
+
+    assert swapped is True
 
 
 def test_result_projection_rejects_out_of_root_artifact(tmp_path):
@@ -2052,6 +2125,142 @@ def test_legacy_review_get_then_decision_post_persists_bound_identity(tmp_path):
     assert persisted["case_id"] == "legacy-review-decision-case"
     assert persisted["workspace_id"] == DEFAULT_WORKSPACE_ID
     assert client.get(f"/reviews/{review_id}").json()["review"]["status"] == "review_decided"
+
+
+def test_legacy_idempotent_decision_post_persists_missing_outer_identity_once(tmp_path):
+    settings = ApiSettings(
+        registry_path=tmp_path / "registry" / "runs.json",
+        artifact_root=tmp_path / "artifacts",
+        review_store_dir=tmp_path / "reviews",
+    )
+    client = _client(tmp_path, runner_module=ReviewRunnerModule, settings=settings)
+    run = client.post("/runs", json={"case_id": "legacy-idempotent-case"}).json()
+    run_id = run["run_id"]
+    review_id = f"review-{run_id}"
+    record_path = Path(settings.review_store_dir) / review_id / "review_record.json"
+    record_path.parent.mkdir(parents=True)
+    decided_at = "2024-01-02T03:04:05+00:00"
+    request_payload = {
+        "decision": "approved",
+        "comment": "approved",
+        "decided_by": "actuary",
+    }
+    record_path.write_text(
+        json.dumps(
+            {
+                "status": "review_decided",
+                "reason_codes": ["threshold"],
+                "packet": {"status": "review_required"},
+                "decision": {
+                    "review_id": review_id,
+                    "run_id": run_id,
+                    **request_payload,
+                    "follow_up_run_id": None,
+                    "decided_at": decided_at,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    first = client.post(f"/reviews/{review_id}/decision", json=request_payload)
+
+    assert first.status_code == 200
+    assert first.json()["decision"]["decided_at"] == decided_at
+    assert first.json()["review"]["case_id"] == "legacy-idempotent-case"
+    assert first.json()["review"]["workspace_id"] == DEFAULT_WORKSPACE_ID
+    persisted = json.loads(record_path.read_text(encoding="utf-8"))
+    assert persisted["review_id"] == review_id
+    assert persisted["run_id"] == run_id
+    assert persisted["case_id"] == "legacy-idempotent-case"
+    assert persisted["workspace_id"] == DEFAULT_WORKSPACE_ID
+    assert persisted["decision"]["decided_at"] == decided_at
+    artifact_root = Path(client.get(f"/runs/{run_id}").json()["run"]["artifact_root"])
+    after_first = _content_snapshot(
+        [Path(settings.registry_path).parent, artifact_root, Path(settings.review_store_dir)]
+    )
+
+    second = client.post(f"/reviews/{review_id}/decision", json=request_payload)
+
+    assert second.status_code == 200
+    assert second.json()["review"]["case_id"] == "legacy-idempotent-case"
+    assert second.json()["review"]["workspace_id"] == DEFAULT_WORKSPACE_ID
+    assert _content_snapshot(
+        [Path(settings.registry_path).parent, artifact_root, Path(settings.review_store_dir)]
+    ) == after_first
+
+
+@pytest.mark.parametrize(
+    "route",
+    (
+        "/runs/{run_id}/review",
+        "/reviews",
+        "/reviews/{review_id}",
+    ),
+)
+def test_review_get_surfaces_reject_unsafe_persisted_record_with_stable_error(
+    tmp_path,
+    route,
+):
+    settings = ApiSettings(
+        registry_path=tmp_path / "registry" / "runs.json",
+        artifact_root=tmp_path / "artifacts",
+        review_store_dir=tmp_path / "reviews",
+    )
+    client = _client(tmp_path, runner_module=ReviewRunnerModule, settings=settings)
+    run = client.post("/runs", json={"case_id": "unsafe-review-record-case"}).json()
+    review_id = f"review-{run['run_id']}"
+    record_path = Path(settings.review_store_dir) / review_id / "review_record.json"
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text("{broken C:/private/credential", encoding="utf-8")
+
+    response = client.get(
+        route.format(run_id=run["run_id"], review_id=review_id)
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "code": "review_record_unsafe",
+        "message": "Stored review record could not be read safely.",
+    }
+    serialized = json.dumps(response.json())
+    assert "C:/private" not in serialized
+    assert "credential" not in serialized
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO creation is unavailable")
+def test_review_get_rejects_fifo_record_without_blocking_or_writing(tmp_path):
+    settings = ApiSettings(
+        registry_path=tmp_path / "registry" / "runs.json",
+        artifact_root=tmp_path / "artifacts",
+        review_store_dir=tmp_path / "reviews",
+    )
+    client = _client(tmp_path, runner_module=ReviewRunnerModule, settings=settings)
+    run = client.post("/runs", json={"case_id": "fifo-review-record-case"}).json()
+    review_id = f"review-{run['run_id']}"
+    record_path = Path(settings.review_store_dir) / review_id / "review_record.json"
+    record_path.parent.mkdir(parents=True)
+    os.mkfifo(record_path)
+    artifact_root = Path(
+        client.get(f"/runs/{run['run_id']}").json()["run"]["artifact_root"]
+    )
+    roots = [
+        Path(settings.registry_path).parent,
+        artifact_root,
+        Path(settings.review_store_dir),
+    ]
+    before = _content_snapshot(roots)
+
+    started = time.monotonic()
+    response = client.get(f"/runs/{run['run_id']}/review")
+
+    assert time.monotonic() - started < 2
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "code": "review_record_unsafe",
+        "message": "Stored review record could not be read safely.",
+    }
+    assert _content_snapshot(roots) == before
 
 
 def _content_snapshot(roots):

@@ -693,3 +693,182 @@ def test_close_and_context_manager_only_close_owned_clients() -> None:
         assert owned.get_health().ok is True
     assert owned.is_closed is True
     injected.close()
+
+
+@pytest.mark.parametrize(
+    ("path", "count_field", "items_field"),
+    (
+        ("/tools", "tool_count", "tools"),
+        ("/workflows", "workflow_count", "workflows"),
+        ("/runs", "run_count", "runs"),
+        ("/runs/run-1/events", "event_count", "events"),
+    ),
+)
+def test_list_envelopes_reject_counts_that_do_not_match_the_returned_items(
+    path: str,
+    count_field: str,
+    items_field: str,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = _response_for(request).json()
+        assert isinstance(payload[items_field], list)
+        payload[count_field] = len(payload[items_field]) + 1
+        return httpx.Response(200, json=payload)
+
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(handler),
+        max_get_attempts=1,
+    )
+    operation = {
+        "/tools": client.list_tools,
+        "/workflows": client.list_workflows,
+        "/runs": client.list_runs,
+        "/runs/run-1/events": lambda: client.get_run_events("run-1"),
+    }[path]
+
+    with pytest.raises(ControlPlaneContractError) as exc_info:
+        operation()
+
+    assert exc_info.value.code == "invalid_contract"
+
+
+@pytest.mark.parametrize(
+    ("event_type", "status"),
+    (
+        ("run.completed", "running"),
+        ("workflow.completed", "needs_review"),
+        ("workflow.step.failed", "completed"),
+        ("workflow.started", "queued"),
+        ("workflow.step.started", "accepted"),
+    ),
+)
+def test_run_events_reject_type_status_relationship_mismatches(
+    event_type: str,
+    status: str,
+) -> None:
+    payload = {
+        "run_id": "run-1",
+        "event_count": 1,
+        "events": [
+            {"type": event_type, "run_id": "run-1", "status": status, "payload": {}},
+        ],
+    }
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+        max_get_attempts=1,
+    )
+
+    with pytest.raises(ControlPlaneContractError) as exc_info:
+        client.get_run_events("run-1")
+
+    assert exc_info.value.code == "invalid_contract"
+
+
+def test_summarize_run_rejects_terminal_run_that_disagrees_with_last_event() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = _response_for(request).json()
+        if request.url.path == "/runs/run-1/events":
+            payload["events"][-1]["type"] = "run.completed"
+            payload["events"][-1]["status"] = "completed"
+        return httpx.Response(200, json=payload)
+
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(handler),
+        max_get_attempts=1,
+    )
+
+    with pytest.raises(ControlPlaneContractError) as exc_info:
+        client.summarize_run("run-1")
+
+    assert exc_info.value.code == "invalid_contract"
+
+
+@pytest.mark.parametrize("missing_outer", ("case_id", "workspace_id"))
+def test_review_packet_identity_requires_the_corresponding_outer_authority(
+    missing_outer: str,
+) -> None:
+    payload = {
+        "run_id": "run-1",
+        "review": {
+            "review_id": "review-run-1",
+            "run_id": "run-1",
+            "case_id": "case-1",
+            "workspace_id": "workspace-1",
+            "status": "review_required",
+            "review_required": True,
+            "packet": {
+                "run_id": "run-1",
+                "case_id": "case-1",
+                "workspace_id": "workspace-1",
+                "status": "review_required",
+            },
+        },
+    }
+    payload["review"].pop(missing_outer)
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+        max_get_attempts=1,
+    )
+
+    with pytest.raises(ControlPlaneContractError) as exc_info:
+        client.get_run_review_snapshot("run-1")
+
+    assert exc_info.value.code == "invalid_contract"
+
+
+def test_legacy_deterministic_projection_method_must_match_outer_tool_identity() -> None:
+    payload = {
+        "run_id": "run-1",
+        "artifact_id": "deterministic_result",
+        "case_id": "case-1",
+        "tool_id": "chainladder",
+        "status": "available",
+        "provenance": "deterministic",
+        "data": {
+            "case_id": "case-1",
+            "method": "foreign-method",
+            "reserve_summary": {},
+        },
+        "errors": [],
+    }
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+        max_get_attempts=1,
+    )
+
+    with pytest.raises(ControlPlaneContractError) as exc_info:
+        client.get_artifact_projection("run-1", "deterministic_result")
+
+    assert exc_info.value.code == "invalid_contract"
+
+
+def test_deterministic_projection_with_inner_tool_id_keeps_minimax_method_compatibility() -> None:
+    payload = {
+        "run_id": "run-1",
+        "artifact_id": "deterministic_result",
+        "case_id": "case-1",
+        "tool_id": "minimax-experience-study",
+        "status": "available",
+        "provenance": "deterministic",
+        "data": {
+            "case_id": "case-1",
+            "tool_id": "minimax-experience-study",
+            "method": "actual-to-expected",
+            "reserve_summary": {},
+        },
+        "errors": [],
+    }
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+        max_get_attempts=1,
+    )
+
+    projection = client.get_artifact_projection("run-1", "deterministic_result")
+
+    assert projection.data["method"] == "actual-to-expected"

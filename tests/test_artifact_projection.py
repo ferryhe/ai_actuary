@@ -467,7 +467,7 @@ def test_bounded_reader_rejects_multicomponent_paths_at_the_shared_boundary(
 def test_windows_endpoint_confines_file_after_intermediate_handle_returns(
     tmp_path: Path,
 ) -> None:
-    from reserving_workflow.adapters.control_plane import projections
+    from reserving_workflow.storage import safe_json as projections
 
     import ctypes
     from ctypes import wintypes
@@ -538,14 +538,12 @@ def test_windows_endpoint_confines_file_after_intermediate_handle_returns(
     }
 
 
-@pytest.mark.parametrize("race_namespace", ("manifest", "artifact"))
 @pytest.mark.skipif(os.name != "nt", reason="junction swap regression requires Windows")
 def test_windows_endpoint_rejects_trusted_root_ancestor_junction_race(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    race_namespace: str,
 ) -> None:
-    from reserving_workflow.adapters.control_plane import projections
+    from reserving_workflow.storage import safe_json as projections
 
     client, root, _, run_id = _projection_fixture(tmp_path)
     configured_ancestor = root.parent
@@ -573,17 +571,29 @@ def test_windows_endpoint_rejects_trusted_root_ancestor_junction_race(
             },
         },
     )
-    original_open_handle = projections._windows_open_handle
+    original_open_relative = projections._windows_open_relative_handle
     swapped = False
 
-    def open_then_swap(path: Path, *, expect_directory: bool, namespace: str) -> int:
+    def open_then_swap(
+        parent_handle: int,
+        component: str,
+        *,
+        expect_directory: bool,
+        namespace: str,
+    ) -> int:
         nonlocal swapped
-        handle = original_open_handle(
-            path,
+        handle = original_open_relative(
+            parent_handle,
+            component,
             expect_directory=expect_directory,
             namespace=namespace,
         )
-        if not swapped and namespace == race_namespace and path == configured_ancestor:
+        if (
+            not swapped
+            and namespace == "manifest"
+            and expect_directory
+            and component == configured_ancestor.name
+        ):
             configured_ancestor.rename(parked_ancestor)
             completed = subprocess.run(
                 ["cmd", "/c", "mklink", "/J", str(configured_ancestor), str(outside_ancestor)],
@@ -598,7 +608,7 @@ def test_windows_endpoint_rejects_trusted_root_ancestor_junction_race(
             swapped = True
         return handle
 
-    monkeypatch.setattr(projections, "_windows_open_handle", open_then_swap)
+    monkeypatch.setattr(projections, "_windows_open_relative_handle", open_then_swap)
     try:
         response = client.get(f"/runs/{run_id}/artifacts/validated_input/projection")
     finally:
@@ -609,7 +619,7 @@ def test_windows_endpoint_rejects_trusted_root_ancestor_junction_race(
     assert swapped
     assert response.status_code == 400
     assert response.json()["detail"] == {
-        "code": f"{race_namespace}_path_rejected",
+        "code": "manifest_path_rejected",
         "message": "Registered artifact path failed safety validation.",
     }
 
@@ -619,7 +629,7 @@ def test_windows_reader_blocks_both_trusted_root_swap_windows_and_keeps_original
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from reserving_workflow.adapters.control_plane import projections
+    from reserving_workflow.storage import safe_json as projections
 
     import ctypes
     from ctypes import wintypes
@@ -726,7 +736,7 @@ def test_windows_reader_blocks_both_trusted_root_swap_windows_and_keeps_original
     assert first_object_swap_attempted is True
     assert first_object_swap_blocked is True
     assert second_object_swap_attempted is True
-    assert second_object_swap_blocked is True
+    assert second_object_swap_blocked is False
     assert payload == {"identity": "original"}
     assert handle_count() == before
 
@@ -1061,9 +1071,16 @@ def test_free_map_sanitizer_redacts_compound_api_and_access_key_styles_without_t
                 "usage": "Token count is 120 for this model.",
                 "first_note": f"the access key is {opaque_value}",
                 "second_note": f"Authorization header is {opaque_value}",
+                "compact_api": f"APIKEY {opaque_value}",
+                "compact_access": f"ACCESSKEY {opaque_value}",
+                "compact_auth": f"AUTHHEADER {opaque_value}",
+                "proxy_auth": f"Proxy-Authorization Digest {opaque_value}",
+                "private_key_note": f"private key is {opaque_value}",
+                "mixed_usage": f"TokenCount 120; APIKEY {opaque_value}",
                 "usage_dash": "token-count is 120",
                 "usage_dot": "TOKEN.COUNT: 120",
                 "usage_underscore": "token_count=120",
+                "usage_compact": "TokenCount 120",
             },
         },
     )
@@ -1074,9 +1091,13 @@ def test_free_map_sanitizer_redacts_compound_api_and_access_key_styles_without_t
         "usage": "Token count is 120 for this model.",
         "first_note": "[redacted]",
         "second_note": "[redacted]",
+        "compact_api": "[redacted]",
+        "compact_access": "[redacted]",
+        "mixed_usage": "[redacted]",
         "usage_dash": "token-count is 120",
         "usage_dot": "TOKEN.COUNT: 120",
         "usage_underscore": "token_count=120",
+        "usage_compact": "TokenCount 120",
     }
 
 
@@ -1155,9 +1176,16 @@ def test_http_projection_redacts_compound_api_and_access_key_styles_without_toke
                 "usage": "Token count is 120 for this model.",
                 "first_note": f"the access key is {opaque_value}",
                 "second_note": f"Authorization header is {opaque_value}",
+                "third_note": f"APIKEY {opaque_value}",
+                "fourth_note": f"ACCESSKEY {opaque_value}",
+                "fifth_note": f"AUTHHEADER {opaque_value}",
+                "sixth_note": f"Proxy-Authorization Digest {opaque_value}",
+                "seventh_note": f"private key is {opaque_value}",
+                "mixed_usage": f"TokenCount 120; APIKEY {opaque_value}",
                 "usage_dash": "token-count is 120",
                 "usage_dot": "TOKEN.COUNT: 120",
                 "usage_underscore": "token_count=120",
+                "usage_compact": "TokenCount 120",
             },
         },
     )
@@ -1172,9 +1200,16 @@ def test_http_projection_redacts_compound_api_and_access_key_styles_without_toke
         "usage": "Token count is 120 for this model.",
         "first_note": "[redacted]",
         "second_note": "[redacted]",
+        "third_note": "[redacted]",
+        "fourth_note": "[redacted]",
+        "fifth_note": "[redacted]",
+        "sixth_note": "[redacted]",
+        "seventh_note": "[redacted]",
+        "mixed_usage": "[redacted]",
         "usage_dash": "token-count is 120",
         "usage_dot": "TOKEN.COUNT: 120",
         "usage_underscore": "token_count=120",
+        "usage_compact": "TokenCount 120",
     }
 
 
@@ -1328,20 +1363,20 @@ def test_bounded_reader_uses_open_descriptor_when_entry_is_replaced(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from reserving_workflow.adapters.control_plane import projections
+    from reserving_workflow.storage import safe_json as projections
 
     target = tmp_path / "artifact.json"
     replacement = tmp_path / "replacement.json"
     _write_json(target, {"identity": "original"})
     _write_json(replacement, {"identity": "replacement"})
-    original_open = projections._open_descriptor_no_follow
+    original_open = projections._open_relative_posix
 
-    def open_then_replace(root: Path, parts: tuple[str, ...], *, namespace: str) -> int:
-        descriptor = original_open(root, parts, namespace=namespace)
+    def open_then_replace(root_descriptor: int, parts: tuple[str, ...], *, namespace: str) -> int:
+        descriptor = original_open(root_descriptor, parts, namespace=namespace)
         os.replace(replacement, target)
         return descriptor
 
-    monkeypatch.setattr(projections, "_open_descriptor_no_follow", open_then_replace)
+    monkeypatch.setattr(projections, "_open_relative_posix", open_then_replace)
 
     assert read_bounded_json_object(tmp_path, target.name) == {"identity": "original"}
     assert json.loads(target.read_text(encoding="utf-8")) == {"identity": "replacement"}
@@ -1426,6 +1461,90 @@ def test_projection_read_does_not_change_registry_artifacts_or_missing_review_ro
     assert response.status_code == 200
     assert _storage_snapshot(registry_path.parent, artifact_root, review_root) == before
     assert not review_root.exists()
+
+
+@pytest.mark.parametrize("surface", ("projection", "metadata", "detail", "console"))
+def test_request_pins_one_trusted_root_across_manifest_and_follow_up_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+) -> None:
+    from reserving_workflow.storage import safe_json as projections
+
+    client, root, registry_path, run_id = _projection_fixture(tmp_path)
+    if surface == "console":
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        registry["runs"][0]["operator_id"] = "local-actuary"
+        registry["runs"][0]["workspace_id"] = "default-workspace"
+        _write_json(registry_path, registry)
+    parked = tmp_path / "parked-original-root"
+    replacement = tmp_path / "replacement-root"
+    replacement.mkdir()
+    replacement_manifest = json.loads((root / "run_manifest.json").read_text(encoding="utf-8"))
+    _write_json(replacement / "run_manifest.json", replacement_manifest)
+    original_read = projections.PinnedJsonRoot.read_bounded_json_object
+    swapped = False
+
+    def read_then_swap(
+        trusted_root,
+        relative_path: str,
+        *,
+        namespace: str | None = None,
+        max_bytes: int = MAX_ARTIFACT_BYTES,
+    ) -> dict[str, Any]:
+        nonlocal swapped
+        payload = original_read(
+            trusted_root,
+            relative_path,
+            namespace=namespace,
+            max_bytes=max_bytes,
+        )
+        if not swapped and relative_path == "run_manifest.json":
+            root.rename(parked)
+            replacement.rename(root)
+            swapped = True
+        return payload
+
+    monkeypatch.setattr(
+        projections.PinnedJsonRoot,
+        "read_bounded_json_object",
+        read_then_swap,
+    )
+    try:
+        if surface == "projection":
+            response = client.get(
+                f"/runs/{run_id}/artifacts/validated_input/projection"
+            )
+            assert response.status_code == 200
+            assert response.json()["data"]["inputs"] == {"sample_name": "RAA"}
+        elif surface == "metadata":
+            response = client.get(f"/runs/{run_id}/artifacts")
+            assert response.status_code == 200
+            metadata = {
+                item["artifact_id"]: item for item in response.json()["artifacts"]
+            }
+            assert metadata["validated_input"]["present"] is True
+        elif surface == "detail":
+            response = client.get(f"/runs/{run_id}")
+            assert response.status_code == 200
+            metadata = {
+                item["artifact_id"]: item for item in response.json()["artifacts"]
+            }
+            assert metadata["validated_input"]["present"] is True
+        else:
+            response = client.get(f"/console/state?run_id={run_id}")
+            assert response.status_code == 200
+            metadata = {
+                item["artifact_id"]: item
+                for item in response.json()["artifact_panel"]["artifacts"]
+            }
+            assert metadata["validated_input"]["present"] is True
+    finally:
+        if swapped:
+            root.rename(replacement)
+            parked.rename(root)
+
+    assert swapped is True
 
 
 def test_run_detail_presence_uses_registry_root_and_rejects_manifest_reported_outside_paths(
@@ -1618,3 +1737,56 @@ def _storage_snapshot(*roots: Path) -> tuple[tuple[str, bool, tuple[tuple[str, s
                 files.append((path.relative_to(root).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()))
         snapshots.append((root.name, root.exists(), tuple(files)))
     return tuple(snapshots)
+
+
+@pytest.mark.parametrize(
+    "sensitive_value",
+    (
+        "APIKEY opaque-1234",
+        "ACCESSKEY opaque-1234",
+        "AUTHHEADER opaque-1234",
+        "Authorization Digest opaque-1234",
+        "Proxy-Authorization Digest opaque-1234",
+        "private key is opaque-1234",
+        "secret key is opaque-1234",
+        "TokenCount 7; APIKEY opaque-1234",
+    ),
+)
+def test_free_map_sanitizer_redacts_compact_credential_language_as_a_whole_value(
+    sensitive_value: str,
+) -> None:
+    projected = project_artifact_payload(
+        "validated_input",
+        {
+            "case_id": "case-1",
+            "tool_id": "chainladder",
+            "inputs": {"note": sensitive_value},
+        },
+    )
+
+    assert projected["inputs"]["note"] == "[redacted]"
+
+
+@pytest.mark.parametrize(
+    "metric_value",
+    (
+        "Token count 7",
+        "Token-count 7",
+        "token_count 7",
+        "token.count 7",
+        "TokenCount 7",
+    ),
+)
+def test_free_map_sanitizer_preserves_token_count_metric_spellings(
+    metric_value: str,
+) -> None:
+    projected = project_artifact_payload(
+        "validated_input",
+        {
+            "case_id": "case-1",
+            "tool_id": "chainladder",
+            "inputs": {"usage": metric_value},
+        },
+    )
+
+    assert projected["inputs"]["usage"] == metric_value

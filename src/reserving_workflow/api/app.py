@@ -19,6 +19,7 @@ from reserving_workflow import operator_entrypoint
 from reserving_workflow.adapters.control_plane.projections import (
     ARTIFACT_PROJECTION_SPECS,
     ArtifactProjectionReadError,
+    TrustedArtifactRoot,
     build_artifact_projection,
     provenance_for_artifact,
     read_bounded_json_object,
@@ -55,7 +56,11 @@ from reserving_workflow.review import (
     write_run_review_decision_artifacts,
 )
 from reserving_workflow.reports import export_run_report
-from reserving_workflow.storage.local import LocalReviewStore, ReviewDecisionConflictError
+from reserving_workflow.storage.local import (
+    LocalReviewStore,
+    ReviewDecisionConflictError,
+    ReviewRecordReadError,
+)
 from reserving_workflow.runtime import build_preflight_report, run_registry
 from reserving_workflow.tools import build_builtin_tool_registry
 from reserving_workflow.validation import (
@@ -170,6 +175,16 @@ def create_app(
     ) -> JSONResponse:
         return JSONResponse(
             status_code=exc.status_code,
+            content={"detail": {"code": exc.code, "message": exc.message}},
+        )
+
+    @app.exception_handler(ReviewRecordReadError)
+    async def _review_record_read_error_handler(
+        _request: Request,
+        exc: ReviewRecordReadError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
             content={"detail": {"code": exc.code, "message": exc.message}},
         )
 
@@ -385,21 +400,11 @@ def create_app(
     @app.get("/runs/{run_id}")
     async def get_run_detail(run_id: str) -> dict[str, Any]:
         entry = _get_registry_entry(resolved_settings.registry_path, run_id)
-        artifact_manifest = _load_manifest_for_entry(entry)
-        review_packet = _load_review_packet_for_entry(entry)
-        run_payload = dict(entry)
-        run_payload.update(_console_selected_run(entry) or {})
-        return {
-            "run": run_payload,
-            "events": [_event_from_history(run_id, item) for item in entry.get("status_history", [])],
-            "artifact_manifest": artifact_manifest,
-            "artifacts": _artifact_refs_from_manifest(
-                artifact_manifest,
-                artifact_root=entry.get("artifact_root"),
-            ),
-            "review_packet": review_packet.get("packet") if review_packet.get("present") else None,
-            "review_delivery": entry.get("review_delivery"),
-        }
+        artifact_root = entry.get("artifact_root")
+        if artifact_root:
+            with TrustedArtifactRoot(artifact_root, namespace="manifest") as trusted_root:
+                return _run_detail_payload(entry, trusted_root=trusted_root)
+        return _run_detail_payload(entry)
 
     @app.get("/runs/{run_id}/events")
     async def get_run_events(run_id: str) -> dict[str, Any]:
@@ -465,18 +470,11 @@ def create_app(
     @app.get("/runs/{run_id}/artifacts")
     async def get_artifacts(run_id: str) -> dict[str, Any]:
         entry = _get_registry_entry(resolved_settings.registry_path, run_id)
-        manifest = _load_manifest_for_entry(entry)
         artifact_root = entry.get("artifact_root")
-        return {
-            "run_id": run_id,
-            "artifact_root": artifact_root,
-            "artifact_manifest": manifest,
-            "artifact_paths": manifest.get("artifact_paths", {}) if manifest else {},
-            "artifacts": _artifact_logical_metadata_from_manifest(
-                manifest,
-                artifact_root=artifact_root,
-            ),
-        }
+        if artifact_root:
+            with TrustedArtifactRoot(artifact_root, namespace="manifest") as trusted_root:
+                return _run_artifact_metadata_payload(entry, trusted_root=trusted_root)
+        return _run_artifact_metadata_payload(entry)
 
     @app.get("/runs/{run_id}/artifacts/{artifact_id}/projection")
     async def get_artifact_projection(run_id: str, artifact_id: str) -> dict[str, Any]:
@@ -518,6 +516,20 @@ def create_app(
     @app.get("/runs/{run_id}/review")
     async def get_run_review(run_id: str) -> dict[str, Any]:
         entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+        artifact_root = entry.get("artifact_root")
+        if artifact_root:
+            with TrustedArtifactRoot(
+                artifact_root,
+                namespace="review_packet",
+            ) as trusted_root:
+                return {
+                    "review": _review_payload_for_run(
+                        entry,
+                        review_store=_get_review_store(),
+                        review_store_root=resolved_settings.review_store_dir,
+                        trusted_root=trusted_root,
+                    )
+                }
         return {
             "review": _review_payload_for_run(
                 entry,
@@ -556,11 +568,24 @@ def create_app(
             raise HTTPException(status_code=404, detail="Review not found.")
         review_store = _get_review_store()
         run_entry = _get_registry_entry(resolved_settings.registry_path, run_id)
-        review = _review_payload_for_run(
-            run_entry,
-            review_store=review_store,
-            review_store_root=resolved_settings.review_store_dir,
-        )
+        artifact_root = run_entry.get("artifact_root")
+        if artifact_root:
+            with TrustedArtifactRoot(
+                artifact_root,
+                namespace="review_packet",
+            ) as trusted_root:
+                review = _review_payload_for_run(
+                    run_entry,
+                    review_store=review_store,
+                    review_store_root=resolved_settings.review_store_dir,
+                    trusted_root=trusted_root,
+                )
+        else:
+            review = _review_payload_for_run(
+                run_entry,
+                review_store=review_store,
+                review_store_root=resolved_settings.review_store_dir,
+            )
         if review.get("review_id") != review_id:
             raise HTTPException(status_code=404, detail="Review not found.")
         return {"review": review}
@@ -1540,7 +1565,37 @@ def _console_state_payload(
     review_store,
     review_store_root: str | Path,
     filters: dict[str, str],
+    trusted_root: TrustedArtifactRoot | None = None,
+    pin_root: bool = True,
 ) -> dict[str, Any]:
+    artifact_root = selected_entry.get("artifact_root") if selected_entry else None
+    if pin_root and trusted_root is None and artifact_root:
+        try:
+            with TrustedArtifactRoot(artifact_root, namespace="artifact") as pinned_root:
+                return _console_state_payload(
+                    selected_entry,
+                    runs,
+                    all_runs=all_runs,
+                    tool_registry=tool_registry,
+                    review_store=review_store,
+                    review_store_root=review_store_root,
+                    filters=filters,
+                    trusted_root=pinned_root,
+                    pin_root=False,
+                )
+        except ArtifactProjectionReadError as exc:
+            if exc.code != "artifact_missing":
+                raise
+            return _console_state_payload(
+                selected_entry,
+                runs,
+                all_runs=all_runs,
+                tool_registry=tool_registry,
+                review_store=review_store,
+                review_store_root=review_store_root,
+                filters=filters,
+                pin_root=False,
+            )
     selected_run_id = str(selected_entry.get("run_id")) if selected_entry else None
     review_inbox = _review_inbox_payload(
         registry_path=None,
@@ -1548,6 +1603,11 @@ def _console_state_payload(
         review_store=review_store,
         review_store_root=review_store_root,
         selected_run_id=selected_run_id,
+        trusted_roots=(
+            {selected_run_id: trusted_root}
+            if selected_run_id is not None and trusted_root is not None
+            else None
+        ),
     )
     filter_option_runs = all_runs if all_runs is not None else runs
     return {
@@ -1567,13 +1627,20 @@ def _console_state_payload(
         "selected_run": _console_selected_run(selected_entry),
         "run_cards": [_console_run_card(entry, selected_run_id=selected_run_id) for entry in runs],
         "timeline": _console_timeline(selected_entry),
-        "result_panel": _result_panel_projection(selected_entry),
-        "artifact_panel": _console_artifact_panel(selected_entry),
+        "result_panel": _result_panel_projection(
+            selected_entry,
+            trusted_root=trusted_root,
+        ),
+        "artifact_panel": _console_artifact_panel(
+            selected_entry,
+            trusted_root=trusted_root,
+        ),
         "review_inbox": review_inbox,
         "review_panel": _console_review_panel(
             selected_entry,
             review_store=review_store,
             review_store_root=review_store_root,
+            trusted_root=trusted_root,
         ),
         "action_panel": _console_action_panel(selected_entry),
     }
@@ -1651,55 +1718,62 @@ def _artifact_projection_for_run(entry: dict[str, Any], *, artifact_id: str) -> 
             status_code=404,
         )
     root = Path(str(artifact_root)).expanduser().absolute()
-    manifest = read_bounded_json_object(root, "run_manifest.json", namespace="manifest")
-    validate_artifact_projection_schema("run_manifest", manifest)
-    run_id = str(entry.get("run_id"))
-    if manifest.get("run_id") != run_id:
-        raise ArtifactProjectionReadError(
-            "manifest_run_mismatch",
-            "Run manifest does not match the selected run.",
-            status_code=409,
+    with TrustedArtifactRoot(root, namespace="manifest") as trusted_root:
+        manifest = trusted_root.read_bounded_json_object(
+            "run_manifest.json",
+            namespace="manifest",
         )
-    expected_case_id = entry.get("case_id")
-    if expected_case_id is not None and manifest.get("case_id") != str(expected_case_id):
-        raise ArtifactProjectionReadError(
-            "manifest_case_mismatch",
-            "Run manifest does not match the selected case.",
-            status_code=409,
+        validate_artifact_projection_schema("run_manifest", manifest)
+        run_id = str(entry.get("run_id"))
+        if manifest.get("run_id") != run_id:
+            raise ArtifactProjectionReadError(
+                "manifest_run_mismatch",
+                "Run manifest does not match the selected run.",
+                status_code=409,
+            )
+        expected_case_id = entry.get("case_id")
+        if expected_case_id is not None and manifest.get("case_id") != str(expected_case_id):
+            raise ArtifactProjectionReadError(
+                "manifest_case_mismatch",
+                "Run manifest does not match the selected case.",
+                status_code=409,
+            )
+        expected_tool_id = _registered_tool_id(entry)
+        if (
+            expected_tool_id is not None
+            and "tool_id" in manifest
+            and str(manifest.get("tool_id")) != expected_tool_id
+        ):
+            raise ArtifactProjectionReadError(
+                "manifest_tool_mismatch",
+                "Run manifest does not match the selected tool.",
+                status_code=409,
+            )
+        artifact_paths = manifest.get("artifact_paths")
+        if not isinstance(artifact_paths, dict) or artifact_id not in artifact_paths:
+            raise ArtifactProjectionReadError(
+                "artifact_not_registered",
+                "Artifact is not registered in the run manifest.",
+                status_code=404,
+            )
+        raw_ref = artifact_paths.get(artifact_id)
+        if not isinstance(raw_ref, str) or not raw_ref:
+            raise ArtifactProjectionReadError(
+                "artifact_path_rejected",
+                "Registered artifact path failed safety validation.",
+            )
+        spec = ARTIFACT_PROJECTION_SPECS[artifact_id]
+        normalized_ref = raw_ref.replace("\\", "/")
+        if normalized_ref.rsplit("/", 1)[-1] != spec.filename:
+            raise ArtifactProjectionReadError(
+                "artifact_schema_mismatch",
+                "Registered artifact does not match the projection schema.",
+                status_code=422,
+            )
+        payload = trusted_root.read_bounded_json_object(
+            raw_ref,
+            namespace="artifact",
         )
-    expected_tool_id = _registered_tool_id(entry)
-    if (
-        expected_tool_id is not None
-        and "tool_id" in manifest
-        and str(manifest.get("tool_id")) != expected_tool_id
-    ):
-        raise ArtifactProjectionReadError(
-            "manifest_tool_mismatch",
-            "Run manifest does not match the selected tool.",
-            status_code=409,
-        )
-    artifact_paths = manifest.get("artifact_paths")
-    if not isinstance(artifact_paths, dict) or artifact_id not in artifact_paths:
-        raise ArtifactProjectionReadError(
-            "artifact_not_registered",
-            "Artifact is not registered in the run manifest.",
-            status_code=404,
-        )
-    raw_ref = artifact_paths.get(artifact_id)
-    if not isinstance(raw_ref, str) or not raw_ref:
-        raise ArtifactProjectionReadError(
-            "artifact_path_rejected",
-            "Registered artifact path failed safety validation.",
-        )
-    spec = ARTIFACT_PROJECTION_SPECS[artifact_id]
-    normalized_ref = raw_ref.replace("\\", "/")
-    if normalized_ref.rsplit("/", 1)[-1] != spec.filename:
-        raise ArtifactProjectionReadError(
-            "artifact_schema_mismatch",
-            "Registered artifact does not match the projection schema.",
-            status_code=422,
-        )
-    payload = read_bounded_json_object(root, raw_ref, namespace="artifact")
     validate_artifact_projection_schema(artifact_id, payload)
     if expected_case_id is not None and payload.get("case_id") != str(expected_case_id):
         raise ArtifactProjectionReadError(
@@ -1743,17 +1817,42 @@ def _artifact_projection_for_run(entry: dict[str, Any], *, artifact_id: str) -> 
     ).model_dump()
 
 
-def _result_panel_projection(entry: dict[str, Any] | None) -> dict[str, Any]:
+def _result_panel_projection(
+    entry: dict[str, Any] | None,
+    *,
+    trusted_root: TrustedArtifactRoot | None = None,
+) -> dict[str, Any]:
     """Project registered result artifacts into a path-free Console contract."""
 
     if entry is None:
         return _empty_result_panel(status="no_run_selected")
 
+    artifact_root = entry.get("artifact_root")
+    if trusted_root is None and artifact_root:
+        try:
+            with TrustedArtifactRoot(artifact_root, namespace="artifact") as pinned_root:
+                return _result_panel_projection(entry, trusted_root=pinned_root)
+        except ArtifactProjectionReadError as exc:
+            return _empty_result_panel(
+                status="error",
+                tool_id=_registered_tool_id(entry) or UNAVAILABLE,
+                errors=[
+                    _result_projection_error(
+                        "run_manifest",
+                        exc.code,
+                        "Run manifest could not be read safely.",
+                    )
+                ],
+            )
+
     registered_tool_id = _registered_tool_id(entry)
     if registered_tool_id not in {None, MINIMAX_EXPERIENCE_STUDY_TOOL_ID}:
         return _empty_result_panel(status="not_available", tool_id=registered_tool_id)
 
-    root, manifest, manifest_error = _load_result_manifest(entry)
+    root, manifest, manifest_error = _load_result_manifest(
+        entry,
+        trusted_root=trusted_root,
+    )
     if manifest_error is not None or root is None or manifest is None:
         return _empty_result_panel(
             status="error",
@@ -1789,6 +1888,7 @@ def _result_panel_projection(entry: dict[str, Any] | None) -> dict[str, Any]:
             artifact_root=root,
             manifest=manifest,
             artifact_id=artifact_id,
+            trusted_root=trusted_root,
         )
         if error is not None:
             errors.append(error)
@@ -1895,6 +1995,8 @@ def _registered_tool_id(entry: dict[str, Any]) -> str | None:
 
 def _load_result_manifest(
     entry: dict[str, Any],
+    *,
+    trusted_root: TrustedArtifactRoot | None = None,
 ) -> tuple[Path | None, dict[str, Any] | None, dict[str, str] | None]:
     artifact_root = entry.get("artifact_root")
     if not artifact_root:
@@ -1903,11 +2005,19 @@ def _load_result_manifest(
         )
     try:
         root = Path(str(artifact_root)).expanduser().absolute()
-        manifest = read_bounded_json_object(
-            root,
-            "run_manifest.json",
-            namespace="artifact",
-            max_bytes=MAX_RESULT_ARTIFACT_BYTES,
+        manifest = (
+            trusted_root.read_bounded_json_object(
+                "run_manifest.json",
+                namespace="artifact",
+                max_bytes=MAX_RESULT_ARTIFACT_BYTES,
+            )
+            if trusted_root is not None
+            else read_bounded_json_object(
+                root,
+                "run_manifest.json",
+                namespace="artifact",
+                max_bytes=MAX_RESULT_ARTIFACT_BYTES,
+            )
         )
     except ArtifactProjectionReadError as exc:
         code = "artifact_unreadable" if exc.code in {"artifact_invalid_encoding", "artifact_invalid_json"} else exc.code
@@ -1926,6 +2036,7 @@ def _read_registered_result_artifact(
     artifact_root: Path,
     manifest: dict[str, Any],
     artifact_id: str,
+    trusted_root: TrustedArtifactRoot | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
     artifact_paths = manifest.get("artifact_paths")
     if not isinstance(artifact_paths, dict) or artifact_id not in artifact_paths:
@@ -1940,11 +2051,19 @@ def _read_registered_result_artifact(
             artifact_id, "artifact_path_rejected", "Registered artifact path failed safety validation."
         )
     try:
-        return read_bounded_json_object(
-            artifact_root,
-            raw_ref,
-            namespace="artifact",
-            max_bytes=MAX_RESULT_ARTIFACT_BYTES,
+        return (
+            trusted_root.read_bounded_json_object(
+                raw_ref,
+                namespace="artifact",
+                max_bytes=MAX_RESULT_ARTIFACT_BYTES,
+            )
+            if trusted_root is not None
+            else read_bounded_json_object(
+                artifact_root,
+                raw_ref,
+                namespace="artifact",
+                max_bytes=MAX_RESULT_ARTIFACT_BYTES,
+            )
         ), None
     except ArtifactProjectionReadError as exc:
         code = "artifact_unreadable" if exc.code in {"artifact_invalid_encoding", "artifact_invalid_json"} else exc.code
@@ -2027,7 +2146,11 @@ def _result_projection_error(artifact_id: str, code: str, message: str) -> dict[
     return {"artifact_id": artifact_id, "code": code, "message": message}
 
 
-def _console_artifact_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
+def _console_artifact_panel(
+    entry: dict[str, Any] | None,
+    *,
+    trusted_root: TrustedArtifactRoot | None = None,
+) -> dict[str, Any]:
     if entry is None:
         return {
             "present": False,
@@ -2046,7 +2169,7 @@ def _console_artifact_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
         }
     manifest_error = None
     try:
-        manifest = _load_manifest_for_entry(entry)
+        manifest = _load_manifest_for_entry(entry, trusted_root=trusted_root)
     except ArtifactProjectionReadError:
         manifest = None
         manifest_error = {
@@ -2055,9 +2178,24 @@ def _console_artifact_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
         }
     artifact_root = entry.get("artifact_root")
     root = Path(str(artifact_root)).expanduser().absolute() if artifact_root else None
-    primary_refs = _console_expected_artifact_refs(root, manifest, category="primary")
-    review_refs = _console_expected_artifact_refs(root, manifest, category="review")
-    decision_refs = _console_expected_artifact_refs(root, manifest, category="decision")
+    primary_refs = _console_expected_artifact_refs(
+        root,
+        manifest,
+        category="primary",
+        trusted_root=trusted_root,
+    )
+    review_refs = _console_expected_artifact_refs(
+        root,
+        manifest,
+        category="review",
+        trusted_root=trusted_root,
+    )
+    decision_refs = _console_expected_artifact_refs(
+        root,
+        manifest,
+        category="decision",
+        trusted_root=trusted_root,
+    )
     evidence_items = [*primary_refs, *review_refs, *decision_refs]
     return {
         "present": manifest is not None,
@@ -2075,6 +2213,7 @@ def _console_artifact_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
         "artifacts": _artifact_logical_metadata_from_manifest(
             manifest,
             artifact_root=artifact_root,
+            trusted_root=trusted_root,
         ),
         "primary_artifact_refs": primary_refs,
         "review_artifact_refs": review_refs,
@@ -2090,6 +2229,7 @@ def _console_review_panel(
     *,
     review_store,
     review_store_root: str | Path,
+    trusted_root: TrustedArtifactRoot | None = None,
 ) -> dict[str, Any]:
     if entry is None:
         review = Review(status="not_available", review_required=False)
@@ -2099,6 +2239,7 @@ def _console_review_panel(
                 entry,
                 review_store=review_store,
                 review_store_root=review_store_root,
+                trusted_root=trusted_root,
             )
         )
     payload = review.model_dump()
@@ -2146,15 +2287,75 @@ def _event_from_history(run_id: str, history_item: dict[str, Any]) -> dict[str, 
     return event
 
 
-def _load_manifest_for_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
+def _run_detail_payload(
+    entry: dict[str, Any],
+    *,
+    trusted_root: TrustedArtifactRoot | None = None,
+) -> dict[str, Any]:
+    run_id = str(entry.get("run_id"))
+    artifact_manifest = _load_manifest_for_entry(entry, trusted_root=trusted_root)
+    review_packet = _load_review_packet_for_entry(entry, trusted_root=trusted_root)
+    run_payload = dict(entry)
+    run_payload.update(_console_selected_run(entry) or {})
+    return {
+        "run": run_payload,
+        "events": [
+            _event_from_history(run_id, item)
+            for item in entry.get("status_history", [])
+        ],
+        "artifact_manifest": artifact_manifest,
+        "artifacts": _artifact_refs_from_manifest(
+            artifact_manifest,
+            artifact_root=entry.get("artifact_root"),
+            trusted_root=trusted_root,
+        ),
+        "review_packet": (
+            review_packet.get("packet") if review_packet.get("present") else None
+        ),
+        "review_delivery": entry.get("review_delivery"),
+    }
+
+
+def _run_artifact_metadata_payload(
+    entry: dict[str, Any],
+    *,
+    trusted_root: TrustedArtifactRoot | None = None,
+) -> dict[str, Any]:
+    artifact_root = entry.get("artifact_root")
+    manifest = _load_manifest_for_entry(entry, trusted_root=trusted_root)
+    return {
+        "run_id": str(entry.get("run_id")),
+        "artifact_root": artifact_root,
+        "artifact_manifest": manifest,
+        "artifact_paths": manifest.get("artifact_paths", {}) if manifest else {},
+        "artifacts": _artifact_logical_metadata_from_manifest(
+            manifest,
+            artifact_root=artifact_root,
+            trusted_root=trusted_root,
+        ),
+    }
+
+
+def _load_manifest_for_entry(
+    entry: dict[str, Any],
+    *,
+    trusted_root: TrustedArtifactRoot | None = None,
+) -> dict[str, Any] | None:
     artifact_root = entry.get("artifact_root")
     if not artifact_root:
         return None
     try:
-        manifest = read_bounded_json_object(
-            artifact_root,
-            "run_manifest.json",
-            namespace="manifest",
+        manifest = (
+            trusted_root.read_bounded_json_object(
+                "run_manifest.json",
+                namespace="manifest",
+            )
+            if trusted_root is not None
+            else read_bounded_json_object(
+                artifact_root,
+                "run_manifest.json",
+                namespace="manifest",
+            )
         )
     except ArtifactProjectionReadError as exc:
         if exc.code == "manifest_missing":
@@ -2179,7 +2380,11 @@ def _load_manifest_for_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
     return manifest
 
 
-def _load_review_packet_for_entry(entry: dict[str, Any]) -> dict[str, Any]:
+def _load_review_packet_for_entry(
+    entry: dict[str, Any],
+    *,
+    trusted_root: TrustedArtifactRoot | None = None,
+) -> dict[str, Any]:
     artifact_root = entry.get("artifact_root")
     if not artifact_root:
         return {"present": False, "run_id": entry.get("run_id"), "packet": None}
@@ -2187,10 +2392,17 @@ def _load_review_packet_for_entry(entry: dict[str, Any]) -> dict[str, Any]:
     packet_json = root / "review_packet.json"
     markdown_path = root / "review_packet.md"
     try:
-        packet = read_bounded_json_object(
-            root,
-            "review_packet.json",
-            namespace="review_packet",
+        packet = (
+            trusted_root.read_bounded_json_object(
+                "review_packet.json",
+                namespace="review_packet",
+            )
+            if trusted_root is not None
+            else read_bounded_json_object(
+                root,
+                "review_packet.json",
+                namespace="review_packet",
+            )
         )
     except ArtifactProjectionReadError as exc:
         if exc.code == "review_packet_missing":
@@ -2216,14 +2428,21 @@ def _review_payload_for_run(
     *,
     review_store,
     review_store_root: str | Path,
+    trusted_root: TrustedArtifactRoot | None = None,
 ) -> dict[str, Any]:
-    review_packet = _load_review_packet_for_entry(entry)
+    review_packet = _load_review_packet_for_entry(
+        entry,
+        trusted_root=trusted_root,
+    )
     return build_review_snapshot(
         review_store=review_store,
         run_entry=entry,
         review_packet_result=review_packet,
         review_store_root=review_store_root,
-        decision_artifacts=_decision_artifacts_for_run(entry),
+        decision_artifacts=_decision_artifacts_for_run(
+            entry,
+            trusted_root=trusted_root,
+        ),
     )
 
 
@@ -2256,16 +2475,42 @@ def _review_inbox_payload(
     review_store,
     review_store_root: str | Path,
     selected_run_id: str | None,
+    trusted_roots: dict[str, TrustedArtifactRoot] | None = None,
 ) -> list[dict[str, Any]]:
     del registry_path
     reviews: list[dict[str, Any]] = []
     seen_review_ids: set[str] = set()
     for entry in runs:
-        review_payload = _review_payload_for_run(
-            entry,
-            review_store=review_store,
-            review_store_root=review_store_root,
-        )
+        run_id = str(entry.get("run_id"))
+        trusted_root = (trusted_roots or {}).get(run_id)
+        artifact_root = entry.get("artifact_root")
+        if trusted_root is None and artifact_root:
+            try:
+                with TrustedArtifactRoot(
+                    artifact_root,
+                    namespace="review_packet",
+                ) as pinned_root:
+                    review_payload = _review_payload_for_run(
+                        entry,
+                        review_store=review_store,
+                        review_store_root=review_store_root,
+                        trusted_root=pinned_root,
+                    )
+            except ArtifactProjectionReadError as exc:
+                if exc.code != "review_packet_missing":
+                    raise
+                review_payload = _review_payload_for_run(
+                    entry,
+                    review_store=review_store,
+                    review_store_root=review_store_root,
+                )
+        else:
+            review_payload = _review_payload_for_run(
+                entry,
+                review_store=review_store,
+                review_store_root=review_store_root,
+                trusted_root=trusted_root,
+            )
         review_id = review_payload.get("review_id")
         if not review_id:
             continue
@@ -2321,7 +2566,11 @@ def _run_id_from_review_id(review_id: str) -> str | None:
     return run_id or None
 
 
-def _decision_artifacts_for_run(entry: dict[str, Any]) -> list[dict[str, Any]]:
+def _decision_artifacts_for_run(
+    entry: dict[str, Any],
+    *,
+    trusted_root: TrustedArtifactRoot | None = None,
+) -> list[dict[str, Any]]:
     artifact_root = entry.get("artifact_root")
     if not artifact_root:
         return []
@@ -2331,13 +2580,21 @@ def _decision_artifacts_for_run(entry: dict[str, Any]) -> list[dict[str, Any]]:
             artifact_id="review_decision",
             path=str(root / "review_decision.json"),
             label="review decision",
-            present=_artifact_is_regular(root, "review_decision.json"),
+            present=_artifact_is_regular(
+                root,
+                "review_decision.json",
+                trusted_root=trusted_root,
+            ),
         ).model_dump(),
         ArtifactRef(
             artifact_id="review_decision_markdown",
             path=str(root / "review_decision.md"),
             label="review decision markdown",
-            present=_artifact_is_regular(root, "review_decision.md"),
+            present=_artifact_is_regular(
+                root,
+                "review_decision.md",
+                trusted_root=trusted_root,
+            ),
         ).model_dump(),
     ]
 
@@ -2355,6 +2612,7 @@ def _artifact_refs_from_manifest(
     manifest: dict[str, Any] | None,
     *,
     artifact_root: str | Path | None = None,
+    trusted_root: TrustedArtifactRoot | None = None,
 ) -> list[dict[str, Any]]:
     if manifest is None:
         return []
@@ -2373,7 +2631,11 @@ def _artifact_refs_from_manifest(
                 label=str(artifact_id).replace("_", " "),
                 path=str(artifact_path) if artifact_path is not None else None,
                 present=(
-                    _artifact_is_regular(root, relative_ref)
+                    _artifact_is_regular(
+                        root,
+                        relative_ref,
+                        trusted_root=trusted_root,
+                    )
                     if root is not None and relative_ref is not None
                     else False
                 ),
@@ -2414,21 +2676,35 @@ def _trusted_root_relative_artifact_ref(
 def _regular_artifact_metadata(
     artifact_root: Path,
     relative_ref: str,
+    *,
+    trusted_root: TrustedArtifactRoot | None = None,
 ):
     try:
+        if trusted_root is not None:
+            return trusted_root.stat_regular_artifact(relative_ref)
         return stat_regular_artifact(artifact_root, relative_ref)
     except ArtifactProjectionReadError:
         return None
 
 
-def _artifact_is_regular(artifact_root: Path, relative_ref: str) -> bool:
-    return _regular_artifact_metadata(artifact_root, relative_ref) is not None
+def _artifact_is_regular(
+    artifact_root: Path,
+    relative_ref: str,
+    *,
+    trusted_root: TrustedArtifactRoot | None = None,
+) -> bool:
+    return _regular_artifact_metadata(
+        artifact_root,
+        relative_ref,
+        trusted_root=trusted_root,
+    ) is not None
 
 
 def _artifact_logical_metadata_from_manifest(
     manifest: dict[str, Any] | None,
     *,
     artifact_root: str | Path | None = None,
+    trusted_root: TrustedArtifactRoot | None = None,
 ) -> list[dict[str, Any]]:
     return [
         {
@@ -2439,6 +2715,7 @@ def _artifact_logical_metadata_from_manifest(
         for artifact in _artifact_refs_from_manifest(
             manifest,
             artifact_root=artifact_root,
+            trusted_root=trusted_root,
         )
     ]
 
@@ -2464,6 +2741,7 @@ def _console_expected_artifact_refs(
     manifest: dict[str, Any] | None,
     *,
     category: str,
+    trusted_root: TrustedArtifactRoot | None = None,
 ) -> list[dict[str, Any]]:
     manifest_paths = manifest.get("artifact_paths", {}) if manifest else {}
     refs: list[dict[str, Any]] = []
@@ -2482,7 +2760,11 @@ def _console_expected_artifact_refs(
             fallback_filename=spec["filename"],
         )
         metadata = (
-            _regular_artifact_metadata(artifact_root, relative_ref)
+            _regular_artifact_metadata(
+                artifact_root,
+                relative_ref,
+                trusted_root=trusted_root,
+            )
             if artifact_root is not None and relative_ref is not None
             else None
         )

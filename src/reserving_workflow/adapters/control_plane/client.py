@@ -115,7 +115,9 @@ class ReadOnlyControlPlaneClient:
         return self._request_model("GET", "/health/preflight", PreflightStatus)
 
     def list_tools(self) -> list[ToolSummary]:
-        return self._request_model("GET", "/tools", ToolListEnvelope).tools
+        envelope = self._request_model("GET", "/tools", ToolListEnvelope)
+        _require_contract_identity(envelope.tool_count == len(envelope.tools))
+        return envelope.tools
 
     def get_tool(self, tool_id: str) -> ToolDetail:
         safe_tool_id = _identifier(tool_id, field_name="tool_id")
@@ -124,7 +126,11 @@ class ReadOnlyControlPlaneClient:
         return tool
 
     def list_workflows(self) -> list[WorkflowSummary]:
-        return self._request_model("GET", "/workflows", WorkflowListEnvelope).workflows
+        envelope = self._request_model("GET", "/workflows", WorkflowListEnvelope)
+        _require_contract_identity(
+            envelope.workflow_count == len(envelope.workflows)
+        )
+        return envelope.workflows
 
     def get_workflow(self, workflow_id: str) -> Workflow:
         safe_workflow_id = _identifier(workflow_id, field_name="workflow_id")
@@ -161,7 +167,9 @@ class ReadOnlyControlPlaneClient:
             params["operator_id"] = safe_operator_id
         if safe_workspace_id is not None:
             params["workspace_id"] = safe_workspace_id
-        runs = self._request_model("GET", "/runs", RunListEnvelope, params=params).runs
+        envelope = self._request_model("GET", "/runs", RunListEnvelope, params=params)
+        _require_contract_identity(envelope.run_count == len(envelope.runs))
+        runs = envelope.runs
         _require_contract_identity(
             all(
                 (safe_operator_id is None or run.operator_id == safe_operator_id)
@@ -192,7 +200,9 @@ class ReadOnlyControlPlaneClient:
         )
         _require_contract_identity(
             envelope.run_id == safe_run_id
+            and envelope.event_count == len(envelope.events)
             and all(event.run_id == safe_run_id for event in envelope.events)
+            and all(_event_type_matches_status(event) for event in envelope.events)
         )
         return envelope.events
 
@@ -243,14 +253,18 @@ class ReadOnlyControlPlaneClient:
             and (
                 review.packet is None
                 or "case_id" not in review.packet
-                or review.case_id is None
-                or packet_case_id == review.case_id
+                or (
+                    review.case_id is not None
+                    and packet_case_id == review.case_id
+                )
             )
             and (
                 review.packet is None
                 or "workspace_id" not in review.packet
-                or review.workspace_id is None
-                or packet_workspace_id == review.workspace_id
+                or (
+                    review.workspace_id is not None
+                    and packet_workspace_id == review.workspace_id
+                )
             )
             and (
                 decision is None
@@ -294,6 +308,14 @@ class ReadOnlyControlPlaneClient:
                     and data_tool_id == projection.tool_id
                 )
             )
+            and (
+                safe_artifact_id != "deterministic_result"
+                or data_tool_id is not None
+                or (
+                    projection.tool_id is not None
+                    and projection.data.get("method") == projection.tool_id
+                )
+            )
         )
         return projection
 
@@ -321,6 +343,9 @@ class ReadOnlyControlPlaneClient:
 
         run = self.get_run(run_id)
         events = self.get_run_events(run_id)
+        _require_contract_identity(
+            not events or events[-1].status == run.status
+        )
         artifacts = self.get_run_artifacts(run_id)
         review = self.get_run_review(run_id)
         return AgentRunSummary(
@@ -487,6 +512,12 @@ def _require_contract_identity(condition: bool) -> None:
             code="invalid_contract",
             message="Control plane returned an invalid response contract.",
         )
+
+
+def _event_type_matches_status(event: RunEvent) -> bool:
+    suffix = event.type.rsplit(".", 1)[-1]
+    expected_status = "running" if suffix == "started" else suffix
+    return event.status == expected_status
 
 
 __all__ = ["ReadOnlyControlPlaneClient"]

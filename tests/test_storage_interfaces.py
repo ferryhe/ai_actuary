@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
+import stat
+import subprocess
+import time
+from pathlib import Path
 
 import pytest
 
 from reserving_workflow.storage.interfaces import ArtifactStore, ReviewStore, RunStore
-from reserving_workflow.storage.local import LocalArtifactStore, LocalReviewStore, LocalRunStore
+from reserving_workflow.storage.local import (
+    LocalArtifactStore,
+    LocalReviewStore,
+    LocalRunStore,
+    ReviewRecordReadError,
+)
 
 
 def test_local_run_store_tracks_history_and_lists_latest_first(tmp_path):
@@ -201,3 +212,167 @@ def test_local_review_store_rejects_nested_review_ids(tmp_path):
 
     with pytest.raises(ValueError, match="review_id must be a single safe path component"):
         store.submit_decision(review_id="nested/review", decision="approved")
+
+
+def test_local_review_store_rejects_symlinked_record_without_reading_target(tmp_path):
+    root = tmp_path / "reviews"
+    review_dir = root / "review-001"
+    review_dir.mkdir(parents=True)
+    outside = tmp_path / "outside-review.json"
+    outside.write_text('{"review_id":"foreign-review"}', encoding="utf-8")
+    try:
+        (review_dir / "review_record.json").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    store = LocalReviewStore(root)
+
+    with pytest.raises(ReviewRecordReadError) as exc_info:
+        store.get_review("review-001")
+
+    assert str(exc_info.value) == "Stored review record could not be read safely."
+    assert str(outside) not in str(exc_info.value)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO creation is unavailable")
+def test_local_review_store_rejects_fifo_without_blocking(tmp_path):
+    root = tmp_path / "reviews"
+    review_dir = root / "review-001"
+    review_dir.mkdir(parents=True)
+    os.mkfifo(review_dir / "review_record.json")
+    store = LocalReviewStore(root)
+
+    started = time.monotonic()
+    with pytest.raises(ReviewRecordReadError):
+        store.get_review("review-001")
+
+    assert time.monotonic() - started < 2
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(socket, "AF_UNIX"),
+    reason="POSIX socket fixture is unavailable",
+)
+def test_local_review_store_rejects_socket_record_without_blocking(tmp_path):
+    root = tmp_path / "reviews"
+    review_dir = root / "review-001"
+    review_dir.mkdir(parents=True)
+    target = review_dir / "review_record.json"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(str(target))
+        started = time.monotonic()
+        with pytest.raises(ReviewRecordReadError):
+            LocalReviewStore(root).get_review("review-001")
+        assert time.monotonic() - started < 2
+    finally:
+        listener.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX device fixture is unavailable")
+def test_local_review_store_rejects_device_record_without_blocking(tmp_path):
+    root = tmp_path / "reviews"
+    review_dir = root / "review-001"
+    review_dir.mkdir(parents=True)
+    target = review_dir / "review_record.json"
+    try:
+        os.mknod(target, stat.S_IFCHR | 0o600, os.makedev(1, 3))
+    except (AttributeError, OSError) as exc:
+        pytest.skip(f"device creation is unavailable: {exc}")
+    store = LocalReviewStore(root)
+
+    started = time.monotonic()
+    with pytest.raises(ReviewRecordReadError):
+        store.get_review("review-001")
+
+    assert time.monotonic() - started < 2
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="fd accounting is unavailable")
+def test_local_review_store_closes_descriptors_on_unsafe_record(tmp_path):
+    root = tmp_path / "reviews"
+    review_dir = root / "review-001"
+    review_dir.mkdir(parents=True)
+    (review_dir / "review_record.json").write_text("{broken", encoding="utf-8")
+    store = LocalReviewStore(root)
+    before = len(tuple(Path("/proc/self/fd").iterdir()))
+
+    for _ in range(50):
+        with pytest.raises(ReviewRecordReadError):
+            store.get_review("review-001")
+
+    assert len(tuple(Path("/proc/self/fd").iterdir())) == before
+
+
+def test_local_review_store_list_uses_safe_record_reader(tmp_path):
+    root = tmp_path / "reviews"
+    safe = root / "review-safe"
+    unsafe = root / "review-unsafe"
+    safe.mkdir(parents=True)
+    unsafe.mkdir()
+    (safe / "review_record.json").write_text(
+        '{"review_id":"review-safe","run_id":"run-safe"}',
+        encoding="utf-8",
+    )
+    (unsafe / "review_record.json").write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(ReviewRecordReadError) as exc_info:
+        LocalReviewStore(root).list_reviews()
+
+    assert str(exc_info.value) == "Stored review record could not be read safely."
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction fixture is unavailable")
+def test_local_review_store_rejects_junctioned_review_directory(tmp_path):
+    root = tmp_path / "reviews"
+    root.mkdir()
+    outside = tmp_path / "outside-review"
+    outside.mkdir()
+    (outside / "review_record.json").write_text(
+        '{"review_id":"foreign-review"}',
+        encoding="utf-8",
+    )
+    junction = root / "review-001"
+    completed = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        pytest.skip("junction creation is unavailable")
+    try:
+        with pytest.raises(ReviewRecordReadError):
+            LocalReviewStore(root).get_review("review-001")
+    finally:
+        os.rmdir(junction)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle accounting is unavailable")
+def test_local_review_store_closes_windows_handles_on_error(tmp_path):
+    import ctypes
+    from ctypes import wintypes
+
+    root = tmp_path / "reviews"
+    review_dir = root / "review-001"
+    review_dir.mkdir(parents=True)
+    (review_dir / "review_record.json").write_text("{broken", encoding="utf-8")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessHandleCount.argtypes = [wintypes.HANDLE, wintypes.LPDWORD]
+    kernel32.GetProcessHandleCount.restype = wintypes.BOOL
+
+    def handle_count():
+        count = wintypes.DWORD()
+        assert kernel32.GetProcessHandleCount(
+            kernel32.GetCurrentProcess(),
+            ctypes.byref(count),
+        )
+        return int(count.value)
+
+    store = LocalReviewStore(root)
+    before = handle_count()
+    for _ in range(50):
+        with pytest.raises(ReviewRecordReadError):
+            store.get_review("review-001")
+
+    assert handle_count() == before

@@ -640,10 +640,17 @@ def test_actual_asgi_adk_projection_redacts_natural_language_secrets_and_preserv
     payload["inputs"] = {
         "first_note": f"the access key is {opaque}",
         "second_note": f"Authorization header is {opaque}",
+        "compact_api": f"APIKEY {opaque}",
+        "compact_access": f"ACCESSKEY {opaque}",
+        "third_note": f"AUTHHEADER {opaque}",
+        "fourth_note": f"Proxy-Authorization Digest {opaque}",
+        "fifth_note": f"private key is {opaque}",
+        "mixed_usage": f"TokenCount 42; APIKEY {opaque}",
         "usage_space": "Token count is 42",
         "usage_dash": "token-count is 42",
         "usage_dot": "TOKEN.COUNT: 42",
         "usage_underscore": "token_count=42",
+        "usage_compact": "TokenCount 42",
     }
     _write_json(target, payload)
     before = _snapshot(roots)
@@ -656,12 +663,45 @@ def test_actual_asgi_adk_projection_redacts_natural_language_secrets_and_preserv
     assert inputs == {
         "first_note": "[redacted]",
         "second_note": "[redacted]",
+        "compact_api": "[redacted]",
+        "compact_access": "[redacted]",
+        "third_note": "[redacted]",
+        "fourth_note": "[redacted]",
+        "fifth_note": "[redacted]",
+        "mixed_usage": "[redacted]",
         "usage_space": "Token count is 42",
         "usage_dash": "token-count is 42",
         "usage_dot": "TOKEN.COUNT: 42",
         "usage_underscore": "token_count=42",
+        "usage_compact": "TokenCount 42",
     }
     assert opaque not in json.dumps(result)
+    assert _snapshot(roots) == before
+
+
+@pytest.mark.parametrize(
+    ("summary", "expected"),
+    (
+        ("APIKEY opaque-run-summary", "[redacted]"),
+        ("TokenCount 42", "TokenCount 42"),
+    ),
+)
+def test_actual_asgi_adk_get_run_applies_shared_value_semantics(
+    tmp_path: Path,
+    summary: str,
+    expected: str,
+) -> None:
+    fixture, roots = _tool_fixture(tmp_path)
+    registry = json.loads((roots[0] / "runs.json").read_text(encoding="utf-8"))
+    registry["runs"][0]["summary"] = summary
+    _write_json(roots[0] / "runs.json", registry)
+    before = _snapshot(roots)
+
+    with adk_tools.use_read_client_factory(fixture["client_factory"]):
+        result = adk_tools.get_run(fixture["run_id"])
+
+    assert result["ok"] is True
+    assert result["data"]["summary"] == expected
     assert _snapshot(roots) == before
 
 
@@ -818,6 +858,62 @@ def test_actual_adk_envelope_reports_response_identity_mismatch_safely() -> None
 
     with adk_tools.use_read_client_factory(factory):
         result = adk_tools.get_run("run-1")
+
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "invalid_contract",
+            "message": "Control plane returned an invalid response contract.",
+        },
+    }
+
+
+@pytest.mark.parametrize("relation", ("count", "event"))
+def test_actual_adk_reports_shared_envelope_relation_failures_safely(
+    relation: str,
+) -> None:
+    payload = (
+        {
+            "tool_count": 2,
+            "tools": [
+                {
+                    "tool_id": "chainladder",
+                    "method": "chainladder",
+                    "title": "Chainladder",
+                    "description": "Deterministic reserving",
+                }
+            ],
+        }
+        if relation == "count"
+        else {
+            "run_id": "run-1",
+            "event_count": 1,
+            "events": [
+                {
+                    "type": "run.completed",
+                    "run_id": "run-1",
+                    "status": "running",
+                    "payload": {},
+                }
+            ],
+        }
+    )
+
+    def factory() -> ReadOnlyControlPlaneClient:
+        return ReadOnlyControlPlaneClient(
+            "http://testserver",
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(200, json=payload)
+            ),
+            max_get_attempts=1,
+        )
+
+    with adk_tools.use_read_client_factory(factory):
+        result = (
+            adk_tools.list_tools()
+            if relation == "count"
+            else adk_tools.get_run_events("run-1")
+        )
 
     assert result == {
         "ok": False,
