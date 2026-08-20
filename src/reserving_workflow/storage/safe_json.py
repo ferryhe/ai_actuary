@@ -18,6 +18,7 @@ MAX_JSON_FIELDS = 5_000
 MAX_JSON_NODES = 20_000
 MAX_JSON_LIST_LENGTH = 2_000
 MAX_JSON_STRING_LENGTH = 100_000
+MAX_DIRECTORY_ENTRIES = 1_000
 
 
 class SafeJsonReadError(Exception):
@@ -126,6 +127,44 @@ class PinnedJsonRoot:
         )
         os.close(descriptor)
         return metadata
+
+    def list_directories(
+        self,
+        *,
+        max_entries: int = MAX_DIRECTORY_ENTRIES,
+        namespace: str | None = None,
+    ) -> list[str]:
+        list_namespace = namespace or self.namespace
+        if (
+            isinstance(max_entries, bool)
+            or not isinstance(max_entries, int)
+            or max_entries < 1
+        ):
+            raise ValueError("max_entries must be a positive integer")
+        try:
+            if self._root_descriptor is not None:
+                names = _list_directories_posix(
+                    self._root_descriptor,
+                    namespace=list_namespace,
+                    max_entries=max_entries,
+                )
+            elif self._root_handle is not None:
+                names = _list_directories_windows(
+                    self._root_handle,
+                    namespace=list_namespace,
+                    max_entries=max_entries,
+                )
+            else:
+                raise RuntimeError("Pinned JSON root is not open.")
+        except SafeJsonReadError:
+            raise
+        except OSError as exc:
+            raise _read_error(
+                list_namespace,
+                "unreadable",
+                "Registered JSON artifact could not be read safely.",
+            ) from exc
+        return sorted(names)
 
     def _open_regular(
         self,
@@ -361,6 +400,47 @@ def _open_relative_posix(
         os.close(current_fd)
 
 
+def _list_directories_posix(
+    root_descriptor: int,
+    *,
+    namespace: str,
+    max_entries: int,
+) -> list[str]:
+    names: list[str] = []
+    entry_count = 0
+    duplicate = os.dup(root_descriptor)
+    try:
+        with os.scandir(duplicate) as entries:
+            for entry in entries:
+                if entry.name in {".", ".."}:
+                    continue
+                entry_count += 1
+                if entry_count > max_entries:
+                    raise _read_error(
+                        namespace,
+                        "entry_limit_exceeded",
+                        "Registered directory contains too many entries.",
+                        status_code=422,
+                    )
+                try:
+                    metadata = os.stat(
+                        entry.name,
+                        dir_fd=root_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISDIR(metadata.st_mode):
+                    names.append(entry.name)
+    finally:
+        try:
+            os.close(duplicate)
+        except OSError as exc:
+            if exc.errno != errno.EBADF:
+                raise
+    return names
+
+
 def _open_trusted_root_windows(root: Path, *, namespace: str) -> int:
     if not root.anchor or not root.is_absolute():
         raise _read_error(
@@ -431,6 +511,140 @@ def _open_relative_windows(
             _windows_close_handle(final_handle)
         for handle in reversed(parent_handles):
             _windows_close_handle(handle)
+
+
+def _list_directories_windows(
+    root_handle: int,
+    *,
+    namespace: str,
+    max_entries: int,
+) -> list[str]:
+    names: list[str] = []
+    for name in _windows_query_directory_names(
+        root_handle,
+        namespace=namespace,
+        max_entries=max_entries,
+    ):
+        child_handle: int | None = None
+        try:
+            child_handle = _windows_open_relative_handle(
+                root_handle,
+                name,
+                expect_directory=True,
+                namespace=namespace,
+            )
+        except (FileNotFoundError, OSError, SafeJsonReadError):
+            continue
+        finally:
+            if child_handle is not None:
+                _windows_close_handle(child_handle)
+        names.append(name)
+    return names
+
+
+def _windows_query_directory_names(
+    root_handle: int,
+    *,
+    namespace: str,
+    max_entries: int,
+) -> list[str]:
+    import ctypes
+    from ctypes import wintypes
+
+    file_names_information = 12
+    status_no_more_files = 0x80000006
+    status_buffer_overflow = 0x80000005
+    buffer_size = 64 * 1024
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [
+            ("status", ctypes.c_void_p),
+            ("information", ctypes.c_size_t),
+        ]
+
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    ntdll.NtQueryDirectoryFile.argtypes = [
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(IoStatusBlock),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.BOOLEAN,
+        ctypes.c_void_p,
+        wintypes.BOOLEAN,
+    ]
+    ntdll.NtQueryDirectoryFile.restype = wintypes.LONG
+    ntdll.RtlNtStatusToDosError.argtypes = [wintypes.LONG]
+    ntdll.RtlNtStatusToDosError.restype = wintypes.ULONG
+
+    names: list[str] = []
+    restart_scan = True
+    while True:
+        buffer = ctypes.create_string_buffer(buffer_size)
+        io_status = IoStatusBlock()
+        status = int(
+            ntdll.NtQueryDirectoryFile(
+                wintypes.HANDLE(root_handle),
+                None,
+                None,
+                None,
+                ctypes.byref(io_status),
+                buffer,
+                buffer_size,
+                file_names_information,
+                False,
+                None,
+                restart_scan,
+            )
+        )
+        restart_scan = False
+        unsigned_status = status & 0xFFFFFFFF
+        if unsigned_status == status_no_more_files:
+            break
+        if status < 0 and unsigned_status != status_buffer_overflow:
+            error = int(ntdll.RtlNtStatusToDosError(status))
+            raise OSError(error, "Windows directory could not be enumerated safely")
+
+        returned = int(io_status.information)
+        offset = 0
+        while offset < returned:
+            if offset + 12 > returned:
+                raise _read_error(
+                    namespace,
+                    "unreadable",
+                    "Registered JSON artifact could not be read safely.",
+                )
+            next_offset = int.from_bytes(buffer[offset : offset + 4], "little")
+            name_length = int.from_bytes(buffer[offset + 8 : offset + 12], "little")
+            name_end = offset + 12 + name_length
+            if name_length % 2 or name_end > returned:
+                raise _read_error(
+                    namespace,
+                    "unreadable",
+                    "Registered JSON artifact could not be read safely.",
+                )
+            name = ctypes.wstring_at(
+                ctypes.addressof(buffer) + offset + 12,
+                name_length // 2,
+            )
+            if name not in {".", ".."}:
+                if len(names) >= max_entries:
+                    raise _read_error(
+                        namespace,
+                        "entry_limit_exceeded",
+                        "Registered directory contains too many entries.",
+                        status_code=422,
+                    )
+                names.append(name)
+            if next_offset == 0:
+                break
+            offset += next_offset
+        if returned == 0 and unsigned_status != status_buffer_overflow:
+            break
+    return names
 
 
 def _windows_open_handle(
@@ -832,6 +1046,7 @@ def _read_error(
 
 __all__ = [
     "MAX_ARTIFACT_BYTES",
+    "MAX_DIRECTORY_ENTRIES",
     "MAX_JSON_DEPTH",
     "MAX_JSON_FIELDS",
     "MAX_JSON_LIST_LENGTH",

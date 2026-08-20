@@ -5,6 +5,8 @@ import hashlib
 import importlib.util
 import inspect
 import json
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +63,23 @@ OPENAI_RUNTIME_RUNNER = (
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _make_directory_link(link: Path, target: Path) -> None:
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            pytest.skip("junction creation is unavailable")
+        return
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
 
 
 def _load_runtime_module(name: str, path: Path):
@@ -500,6 +519,167 @@ def test_actual_adk_review_envelope_rejects_packet_case_identity_mismatch() -> N
             "message": "Control plane returned an invalid response contract.",
         },
     }
+
+
+def test_actual_adk_rejects_review_decided_without_a_decision() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "run_id": "run-1",
+                "review": {
+                    "review_id": "review-run-1",
+                    "run_id": "run-1",
+                    "case_id": "case-1",
+                    "status": "review_decided",
+                    "review_required": True,
+                    "packet": {
+                        "run_id": "run-1",
+                        "case_id": "case-1",
+                        "status": "review_required",
+                    },
+                    "decision": None,
+                },
+            },
+        )
+
+    def factory() -> ReadOnlyControlPlaneClient:
+        return ReadOnlyControlPlaneClient(
+            "http://testserver",
+            transport=httpx.MockTransport(handler),
+            max_get_attempts=1,
+        )
+
+    with adk_tools.use_read_client_factory(factory):
+        result = adk_tools.get_run_review_snapshot("run-1")
+
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "invalid_contract",
+            "message": "Control plane returned an invalid response contract.",
+        },
+    }
+
+
+def test_linked_review_root_is_rejected_by_real_asgi_and_adk_without_reading_outside(
+    tmp_path: Path,
+) -> None:
+    fixture, roots = _tool_fixture(tmp_path)
+    run_id = fixture["run_id"]
+    review_id = f"review-{run_id}"
+    outside = tmp_path / "outside-review-root"
+    sentinel = "OUTSIDE-ROOT-REVIEW-SENTINEL"
+    _write_json(
+        outside / review_id / "review_record.json",
+        {
+            "review_id": review_id,
+            "run_id": run_id,
+            "case_id": "case-adk-read-1",
+            "workspace_id": "default-workspace",
+            "status": "review_required",
+            "review_required": True,
+            "assigned_to": sentinel,
+            "packet": {
+                "run_id": run_id,
+                "case_id": "case-adk-read-1",
+                "workspace_id": "default-workspace",
+                "status": "review_required",
+            },
+            "decision": None,
+        },
+    )
+    _make_directory_link(roots[-1], outside)
+
+    async def get_raw() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=fixture["app"]),
+            base_url="http://testserver",
+        ) as client:
+            return await client.get(f"/runs/{run_id}/review")
+
+    response = asyncio.run(get_raw())
+    with adk_tools.use_read_client_factory(fixture["client_factory"]):
+        result = adk_tools.get_run_review_snapshot(run_id)
+
+    assert response.status_code == 400
+    assert sentinel not in response.text
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "http_error",
+            "message": "Control plane rejected the request.",
+        },
+    }
+    assert sentinel not in json.dumps(result)
+
+
+def test_compact_path_keys_are_removed_by_direct_http_and_adk_projections(
+    tmp_path: Path,
+) -> None:
+    fixture, roots = _tool_fixture(tmp_path)
+    sentinel = "COMPACT-PATH-SENTINEL"
+    target = roots[1] / "validated_input.json"
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload["inputs"] = {
+        "ARTIFACTROOT": sentinel,
+        "ARTIFACTPATHS": sentinel,
+        "MANIFESTPATH": sentinel,
+        "RECORDPATH": sentinel,
+        "JSONPATH": sentinel,
+        "MARKDOWNPATH": sentinel,
+        "REVIEWDELIVERY": sentinel,
+        "OPERATORPARAMS": sentinel,
+        "OUTPUTPATH": sentinel,
+        "REVIEWPACKETPATH": sentinel,
+        "LOCALROOT": sentinel,
+        "SOURCEFILENAME": sentinel,
+        "ARTIFACTURL": sentinel,
+        "XURL": sentinel,
+        "SURL": sentinel,
+        "nested": [{"ARTIFACTPATH": sentinel, "TokenCount": 17}],
+        "TokenCount": 29,
+        "curl": "ordinary-business-value",
+    }
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    direct = project_artifact_projection(
+        ArtifactProjection(
+            run_id=fixture["run_id"],
+            artifact_id="validated_input",
+            case_id="case-adk-read-1",
+            tool_id="chainladder",
+            status="available",
+            provenance="deterministic",
+            data=payload,
+        )
+    )
+
+    async def get_raw() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=fixture["app"]),
+            base_url="http://testserver",
+        ) as client:
+            return await client.get(
+                f"/runs/{fixture['run_id']}/artifacts/validated_input/projection"
+            )
+
+    response = asyncio.run(get_raw())
+    with adk_tools.use_read_client_factory(fixture["client_factory"]):
+        adk_result = adk_tools.get_artifact_projection(
+            fixture["run_id"],
+            "validated_input",
+        )
+
+    assert response.status_code == 200
+    for result in (direct, response.json(), adk_result):
+        serialized = json.dumps(result)
+        assert sentinel not in serialized
+        assert "ARTIFACTROOT" not in serialized
+        assert "OPERATORPARAMS" not in serialized
+        assert "TokenCount" in serialized
+        assert "17" in serialized and "29" in serialized
+        assert "ordinary-business-value" in serialized
 
 
 @pytest.mark.parametrize(

@@ -508,6 +508,20 @@ def _forbidden_key(key: str) -> bool:
     compact = "".join(tokens)
     if _has_sensitive_semantics(tokens, compact=compact):
         return True
+    path_suffixes = (
+        "path",
+        "paths",
+        "root",
+        "roots",
+        "filename",
+        "filenames",
+        "url",
+        "urls",
+    )
+    if compact != "curl" and compact.endswith(path_suffixes):
+        return True
+    if compact in {"reviewdelivery", "operatorparams"}:
+        return True
     if "apikey" in compact or "accesskey" in compact:
         return True
     if compact in {

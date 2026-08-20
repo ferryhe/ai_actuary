@@ -237,15 +237,17 @@ def create_app(
             workspace_id=current_identity["workspace_id"],
         )
         selected_entry = _select_console_run(runs, run_id)
-        return _console_state_payload(
-            selected_entry,
-            runs,
-            all_runs=all_runs,
-            tool_registry=resolved_tool_registry,
-            review_store=_get_review_store(),
-            review_store_root=resolved_settings.review_store_dir,
-            filters=current_identity,
-        )
+        review_store = _get_review_store()
+        with review_store.pinned_reads():
+            return _console_state_payload(
+                selected_entry,
+                runs,
+                all_runs=all_runs,
+                tool_registry=resolved_tool_registry,
+                review_store=review_store,
+                review_store_root=resolved_settings.review_store_dir,
+                filters=current_identity,
+            )
 
     @app.get("/tools")
     async def list_tools() -> dict[str, Any]:
@@ -517,26 +519,28 @@ def create_app(
     async def get_run_review(run_id: str) -> dict[str, Any]:
         entry = _get_registry_entry(resolved_settings.registry_path, run_id)
         artifact_root = entry.get("artifact_root")
-        if artifact_root:
-            with TrustedArtifactRoot(
-                artifact_root,
-                namespace="review_packet",
-            ) as trusted_root:
-                return {
-                    "review": _review_payload_for_run(
-                        entry,
-                        review_store=_get_review_store(),
-                        review_store_root=resolved_settings.review_store_dir,
-                        trusted_root=trusted_root,
-                    )
-                }
-        return {
-            "review": _review_payload_for_run(
-                entry,
-                review_store=_get_review_store(),
-                review_store_root=resolved_settings.review_store_dir,
-            )
-        }
+        review_store = _get_review_store()
+        with review_store.pinned_reads():
+            if artifact_root:
+                with TrustedArtifactRoot(
+                    artifact_root,
+                    namespace="review_packet",
+                ) as trusted_root:
+                    return {
+                        "review": _review_payload_for_run(
+                            entry,
+                            review_store=review_store,
+                            review_store_root=resolved_settings.review_store_dir,
+                            trusted_root=trusted_root,
+                        )
+                    }
+            return {
+                "review": _review_payload_for_run(
+                    entry,
+                    review_store=review_store,
+                    review_store_root=resolved_settings.review_store_dir,
+                )
+            }
 
     @app.post("/runs/{run_id}/report-export")
     async def create_run_report_export(run_id: str) -> dict[str, Any]:
@@ -552,13 +556,15 @@ def create_app(
 
     @app.get("/reviews")
     async def list_reviews(request: Request, operator_id: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
-        reviews = _list_review_payloads(
-            registry_path=resolved_settings.registry_path,
-            review_store=_get_review_store(),
-            review_store_root=resolved_settings.review_store_dir,
-            operator_id=_normalize_identity_filter(operator_id, request=request, header_name="x-operator-id"),
-            workspace_id=_normalize_identity_filter(workspace_id, request=request, header_name="x-workspace-id"),
-        )
+        review_store = _get_review_store()
+        with review_store.pinned_reads():
+            reviews = _list_review_payloads(
+                registry_path=resolved_settings.registry_path,
+                review_store=review_store,
+                review_store_root=resolved_settings.review_store_dir,
+                operator_id=_normalize_identity_filter(operator_id, request=request, header_name="x-operator-id"),
+                workspace_id=_normalize_identity_filter(workspace_id, request=request, header_name="x-workspace-id"),
+            )
         return {"review_count": len(reviews), "reviews": reviews}
 
     @app.get("/reviews/{review_id}")
@@ -569,23 +575,24 @@ def create_app(
         review_store = _get_review_store()
         run_entry = _get_registry_entry(resolved_settings.registry_path, run_id)
         artifact_root = run_entry.get("artifact_root")
-        if artifact_root:
-            with TrustedArtifactRoot(
-                artifact_root,
-                namespace="review_packet",
-            ) as trusted_root:
+        with review_store.pinned_reads():
+            if artifact_root:
+                with TrustedArtifactRoot(
+                    artifact_root,
+                    namespace="review_packet",
+                ) as trusted_root:
+                    review = _review_payload_for_run(
+                        run_entry,
+                        review_store=review_store,
+                        review_store_root=resolved_settings.review_store_dir,
+                        trusted_root=trusted_root,
+                    )
+            else:
                 review = _review_payload_for_run(
                     run_entry,
                     review_store=review_store,
                     review_store_root=resolved_settings.review_store_dir,
-                    trusted_root=trusted_root,
                 )
-        else:
-            review = _review_payload_for_run(
-                run_entry,
-                review_store=review_store,
-                review_store_root=resolved_settings.review_store_dir,
-            )
         if review.get("review_id") != review_id:
             raise HTTPException(status_code=404, detail="Review not found.")
         return {"review": review}

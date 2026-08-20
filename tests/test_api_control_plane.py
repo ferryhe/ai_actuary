@@ -2044,6 +2044,96 @@ def test_review_get_rejects_packet_case_conflict_without_creating_review_root_or
     assert not Path(settings.review_store_dir).exists()
 
 
+@pytest.mark.parametrize("surface", ("reviews", "console"))
+def test_review_api_surfaces_pin_directory_enumeration_and_record_reads_to_one_root(
+    tmp_path,
+    monkeypatch,
+    surface,
+):
+    from reserving_workflow.storage.safe_json import PinnedJsonRoot
+
+    registry_path = tmp_path / "registry" / "runs.json"
+    run_id = "run-pinned-review-root"
+    LocalRunStore(registry_path).create_run(
+        task_id="task-pinned-review-root",
+        case_id="case-pinned-review-root",
+        run_id=run_id,
+        status="needs_review",
+        review_required=True,
+        operator_id="local-actuary",
+        workspace_id="default-workspace",
+    )
+    root = tmp_path / "reviews"
+    original_record = root / "legacy-record" / "review_record.json"
+    original_record.parent.mkdir(parents=True)
+    base_record = {
+        "run_id": run_id,
+        "case_id": "case-pinned-review-root",
+        "workspace_id": "default-workspace",
+        "status": "review_required",
+        "review_required": True,
+        "packet": {
+            "run_id": run_id,
+            "case_id": "case-pinned-review-root",
+            "workspace_id": "default-workspace",
+            "status": "review_required",
+        },
+        "decision": None,
+    }
+    original_record.write_text(
+        json.dumps({**base_record, "assigned_to": "original-reviewer"}),
+        encoding="utf-8",
+    )
+    replacement = tmp_path / "replacement"
+    replacement_record = replacement / "legacy-record" / "review_record.json"
+    replacement_record.parent.mkdir(parents=True)
+    replacement_record.write_text(
+        json.dumps({**base_record, "assigned_to": "replacement-reviewer"}),
+        encoding="utf-8",
+    )
+    settings = ApiSettings(
+        registry_path=registry_path,
+        artifact_root=tmp_path / "artifacts",
+        review_store_dir=root,
+    )
+    client = _client(tmp_path, settings=settings)
+    parked = tmp_path / "parked"
+    original_list = PinnedJsonRoot.list_directories
+    swapped = False
+
+    def list_then_swap(pinned, *, max_entries=1_000, namespace=None):
+        nonlocal swapped
+        names = original_list(
+            pinned,
+            max_entries=max_entries,
+            namespace=namespace,
+        )
+        if not swapped:
+            root.rename(parked)
+            replacement.rename(root)
+            swapped = True
+        return names
+
+    monkeypatch.setattr(PinnedJsonRoot, "list_directories", list_then_swap)
+    try:
+        response = client.get(
+            "/reviews"
+            if surface == "reviews"
+            else f"/console/state?run_id={run_id}"
+        )
+    finally:
+        if swapped:
+            root.rename(replacement)
+            parked.rename(root)
+
+    assert response.status_code == 200
+    payload = response.json()
+    review = payload["reviews"][0] if surface == "reviews" else payload["review_panel"]
+    assert review["assigned_to"] == "original-reviewer"
+    assert "replacement-reviewer" not in response.text
+    assert swapped is True
+
+
 def test_review_get_accepts_legacy_record_with_missing_identity_fields(tmp_path):
     settings = ApiSettings(
         registry_path=tmp_path / "registry" / "runs.json",

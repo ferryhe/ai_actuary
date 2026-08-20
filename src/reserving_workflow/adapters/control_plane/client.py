@@ -139,7 +139,13 @@ class ReadOnlyControlPlaneClient:
             f"/workflows/{safe_workflow_id}",
             Workflow,
         )
-        _require_contract_identity(workflow.workflow_id == safe_workflow_id)
+        step_ids = [step.step_id for step in workflow.steps]
+        _require_contract_identity(
+            workflow.workflow_id == safe_workflow_id
+            and workflow.step_count >= 0
+            and workflow.step_count == len(workflow.steps)
+            and len(step_ids) == len(set(step_ids))
+        )
         return workflow
 
     def list_runs(
@@ -241,10 +247,14 @@ class ReadOnlyControlPlaneClient:
             review.packet.get("workspace_id") if review.packet is not None else None
         )
         decision = review.decision
+        state_is_coherent = _review_state_is_coherent(
+            review,
+            expected_review_id=expected_review_id,
+        )
         _require_contract_identity(
             envelope.run_id in {None, safe_run_id}
             and review.run_id == safe_run_id
-            and (review.review_id is None or review.review_id == expected_review_id)
+            and state_is_coherent
             and (
                 review.packet is None
                 or "run_id" not in review.packet
@@ -518,6 +528,35 @@ def _event_type_matches_status(event: RunEvent) -> bool:
     suffix = event.type.rsplit(".", 1)[-1]
     expected_status = "running" if suffix == "started" else suffix
     return event.status == expected_status
+
+
+def _review_state_is_coherent(
+    review: Review,
+    *,
+    expected_review_id: str,
+) -> bool:
+    requires_review = review.status in {"review_required", "review_decided"}
+    if requires_review:
+        if not review.review_required or review.review_id != expected_review_id:
+            return False
+        if review.status == "review_decided":
+            if review.decision is None:
+                return False
+        elif review.decision is not None:
+            return False
+    elif review.review_required or review.review_id is not None or review.decision is not None:
+        return False
+
+    if review.packet is None or "status" not in review.packet:
+        return True
+    packet_status = review.packet["status"]
+    if not isinstance(packet_status, str):
+        return False
+    if requires_review:
+        return packet_status == "review_required"
+    if review.status == "not_required":
+        return packet_status in {"not_required", "pass"}
+    return packet_status == "not_available"
 
 
 __all__ = ["ReadOnlyControlPlaneClient"]

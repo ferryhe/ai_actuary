@@ -478,6 +478,110 @@ def test_review_snapshot_rejects_relational_identity_mismatches(
     assert exc_info.value.code == "invalid_contract"
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        {"status": "review_required", "review_required": False},
+        {"status": "review_required", "review_id": None},
+        {"status": "review_required", "decision": "present"},
+        {"status": "review_decided", "decision": None},
+        {"status": "not_required", "review_required": True, "review_id": None},
+        {"status": "not_required", "review_id": "review-run-1"},
+        {"status": "not_available", "decision": "present", "review_id": None},
+        {"status": "review_required", "packet_status": "pass"},
+        {"status": "review_decided", "packet_status": "review_decided"},
+    ),
+)
+def test_review_snapshot_rejects_incoherent_state_relationships(
+    mutation: dict[str, object],
+) -> None:
+    decision = {
+        "review_id": "review-run-1",
+        "run_id": "run-1",
+        "decision": "approved",
+    }
+    payload = {
+        "run_id": "run-1",
+        "review": {
+            "review_id": "review-run-1",
+            "run_id": "run-1",
+            "case_id": "case-1",
+            "status": "review_required",
+            "review_required": True,
+            "packet": {
+                "run_id": "run-1",
+                "case_id": "case-1",
+                "status": "review_required",
+            },
+            "decision": None,
+        },
+    }
+    review = payload["review"]
+    assert isinstance(review, dict)
+    packet_status = mutation.get("packet_status")
+    for key, value in mutation.items():
+        if key == "packet_status":
+            continue
+        if key == "decision" and value == "present":
+            review[key] = decision
+        else:
+            review[key] = value
+    if packet_status is not None:
+        review["packet"]["status"] = packet_status
+
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+        max_get_attempts=1,
+    )
+
+    with pytest.raises(ControlPlaneContractError) as exc_info:
+        client.get_run_review_snapshot("run-1")
+
+    assert exc_info.value.code == "invalid_contract"
+
+
+@pytest.mark.parametrize(
+    ("step_count", "step_ids"),
+    (
+        (2, ("execute",)),
+        (2, ("execute", "execute")),
+    ),
+)
+def test_workflow_detail_rejects_step_count_and_step_identity_inconsistency(
+    step_count: int,
+    step_ids: tuple[str, ...],
+) -> None:
+    payload = {
+        "workflow_id": "chainladder-basic",
+        "title": "Basic",
+        "description": "Run chainladder",
+        "builtin": True,
+        "step_count": step_count,
+        "steps": [
+            {
+                "step_id": step_id,
+                "tool_id": "chainladder",
+                "title": "Execute",
+                "step_kind": "execute",
+                "order": index,
+                "inputs": {},
+            }
+            for index, step_id in enumerate(step_ids, start=1)
+        ],
+    }
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+        max_get_attempts=1,
+    )
+
+    with pytest.raises(ControlPlaneContractError) as exc_info:
+        client.get_workflow("chainladder-basic")
+
+    assert exc_info.value.code == "invalid_contract"
+
+
 def test_read_only_client_owns_shared_run_polling_and_summary_behavior() -> None:
     with ReadOnlyControlPlaneClient(
         "http://testserver",
