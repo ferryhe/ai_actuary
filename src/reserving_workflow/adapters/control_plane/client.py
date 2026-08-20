@@ -158,6 +158,12 @@ class ReadOnlyControlPlaneClient:
     ) -> list[Run]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
+        if status is not None and (
+            not isinstance(status, str)
+            or status
+            not in {"accepted", "queued", "running", "completed", "needs_review", "failed"}
+        ):
+            raise ValueError("unsupported run status")
         safe_operator_id = (
             _identifier(operator_id, field_name="operator_id")
             if operator_id is not None
@@ -184,8 +190,6 @@ class ReadOnlyControlPlaneClient:
             )
         )
         if status is not None:
-            if status not in {"accepted", "queued", "running", "completed", "needs_review", "failed"}:
-                raise ValueError("unsupported run status")
             runs = [run for run in runs if run.status == status]
         return runs[:limit]
 

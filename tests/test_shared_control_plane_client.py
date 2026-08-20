@@ -230,6 +230,26 @@ def test_read_only_client_covers_all_public_read_surfaces_with_typed_contracts()
         assert not hasattr(client, "create_run")
 
 
+@pytest.mark.parametrize("invalid_status", ([], {}, True, 1, bytearray(b"running")))
+def test_list_runs_rejects_invalid_status_before_request(invalid_status: object) -> None:
+    request_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return _response_for(request)
+
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(ValueError, match="unsupported run status"):
+        client.list_runs(status=invalid_status)  # type: ignore[arg-type]
+
+    assert request_count == 0
+
+
 @pytest.mark.parametrize(
     ("method_name", "arguments", "field_path", "wrong_value"),
     (
