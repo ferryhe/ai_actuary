@@ -260,13 +260,28 @@ def record_run_event(
 
 
 def list_runs(registry_path: str | Path) -> list[dict[str, Any]]:
-    audit_adk_registry(registry_path)
-    return LocalRunStore(registry_path).list_runs()
+    return _read_audited_runs(registry_path)
 
 
 def get_run(registry_path: str | Path, run_id: str) -> dict[str, Any]:
-    audit_adk_registry(registry_path)
-    return LocalRunStore(registry_path).get_run(run_id)
+    for entry in _read_audited_runs(registry_path):
+        if entry.get("run_id") == run_id:
+            return entry
+    raise RunNotFoundError(f"Run id not found in registry: {run_id}")
+
+
+def _read_audited_runs(registry_path: str | Path) -> list[dict[str, Any]]:
+    path = resolve_registry_path(registry_path)
+    if not path.exists():
+        return []
+    with locked_registry_transaction(path):
+        payload = _read_registry_payload(path)
+        _audit_adk_payload(payload)
+        return sorted(
+            list(payload.get("runs", [])),
+            key=lambda item: item.get("updated_at", ""),
+            reverse=True,
+        )
 
 
 def get_run_scope_record(

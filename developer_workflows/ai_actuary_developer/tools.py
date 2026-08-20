@@ -76,9 +76,12 @@ _ExecutionClientFactory = Callable[[], AdkControlPlaneClient]
 
 
 def _default_client_factory() -> ReadOnlyControlPlaneClient:
-    return AdkControlPlaneClient(
+    credential = os.environ.get("AI_ACTUARY_ADK_CREDENTIAL", "")
+    if len(credential) < 8:
+        raise ValueError("ADK capability credential is not configured")
+    return ReadOnlyControlPlaneClient(
         CONTROL_PLANE_BASE_URL,
-        credential=os.environ.get("AI_ACTUARY_ADK_CREDENTIAL", ""),
+        headers={"Authorization": f"Bearer {credential}"},
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
 

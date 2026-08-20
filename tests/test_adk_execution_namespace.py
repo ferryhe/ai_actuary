@@ -950,11 +950,16 @@ def test_final_manifest_atomic_replace_does_not_mutate_outside_hardlink(tmp_path
         json=payload,
     )
     assert response.status_code == 202
+    assert get_run_status(settings.registry_path, response.json()["run_id"]) == "completed"
     assert outside.read_bytes() == initial_bytes[0]
     run_manifest = (
         settings.adk_artifact_root / response.json()["run_id"] / "run_manifest.json"
     )
     assert run_manifest.read_bytes() != initial_bytes[0]
+    manifest_payload = json.loads(run_manifest.read_text(encoding="utf-8"))
+    assert manifest_payload["artifact_paths"]["workflow_summary"] == (
+        "workflow_summary.json"
+    )
 
 
 @pytest.mark.parametrize("attack", ("hardlink", "directory_link"))

@@ -310,6 +310,45 @@ def test_adk_bearer_client_ignores_hostile_environment_proxy(
     )
 
 
+def test_default_read_tool_factory_keeps_adk_auth_with_a_read_only_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from developer_workflows.ai_actuary_developer import tools as adk_tools
+    from reserving_workflow.adapters.control_plane import ReadOnlyControlPlaneClient
+
+    target, target_thread, target_requests = _start_http_capture(
+        {"ok": True, "service": "control-plane"}
+    )
+    credential = "adk-read-only-regression-secret"
+    monkeypatch.setattr(
+        adk_tools,
+        "CONTROL_PLANE_BASE_URL",
+        f"http://127.0.0.1:{target.server_port}",
+    )
+    monkeypatch.setenv("AI_ACTUARY_ADK_CREDENTIAL", credential)
+    client = adk_tools._default_client_factory()
+    try:
+        assert type(client) is ReadOnlyControlPlaneClient
+        assert not hasattr(client, "start_workflow_run")
+    finally:
+        client.close()
+    try:
+        result = adk_tools.get_health()
+    finally:
+        _stop_http_capture(target, target_thread)
+
+    assert result == {
+        "ok": True,
+        "data": {"ok": True, "service": "control-plane"},
+    }
+    assert len(target_requests) == 1
+    assert target_requests[0]["method"] == "GET"
+    assert target_requests[0]["path"] == "/health"
+    assert target_requests[0]["headers"]["Authorization"] == (
+        f"Bearer {credential}"
+    )
+
+
 def test_launcher_bootstrap_approval_ignores_hostile_environment_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2171,7 +2171,7 @@ def _run_sequential_workflow_impl(
         "artifact_paths": {
             "run_manifest": "run_manifest.json",
             "workflow_summary": (
-                workflow_summary_path.relative_to(artifact_root).as_posix()
+                "workflow_summary.json"
                 if is_adk_run
                 else str(workflow_summary_path)
             ),

@@ -316,6 +316,60 @@ LocalRunStore(registry).create_run(
     }
 
 
+@pytest.mark.parametrize("reader", ("list", "get"))
+def test_registry_read_returns_the_same_snapshot_that_passed_adk_audit(
+    tmp_path, monkeypatch, reader
+):
+    from reserving_workflow.runtime import run_registry
+    from reserving_workflow.storage import local as local_storage
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text('{"runs": []}', encoding="utf-8")
+    audited_payload = {
+        "runs": [
+            {
+                "run_id": "snapshot-run",
+                "status": "completed",
+                "summary": "audited snapshot",
+                "updated_at": "2026-08-20T00:00:00+00:00",
+            }
+        ],
+        "adk_operations": [],
+    }
+    unaudited_payload = {
+        "runs": [
+            {
+                "run_id": "snapshot-run",
+                "status": "completed",
+                "summary": "unaudited replacement",
+                "source": "adk-developer",
+                "provenance": {"source": "adk-developer"},
+                "updated_at": "2026-08-20T00:00:01+00:00",
+            }
+        ],
+        "adk_operations": [],
+    }
+    monkeypatch.setattr(
+        run_registry,
+        "_read_registry_payload",
+        lambda path: audited_payload,
+    )
+    monkeypatch.setattr(
+        local_storage,
+        "_read_registry_payload",
+        lambda path: unaudited_payload,
+    )
+
+    result = (
+        run_registry.list_runs(registry_path)[0]
+        if reader == "list"
+        else run_registry.get_run(registry_path, "snapshot-run")
+    )
+
+    assert result["summary"] == "audited snapshot"
+    assert result.get("source") is None
+
+
 @pytest.mark.parametrize("tampered_source", (None, "operator-console"))
 def test_operation_bound_adk_run_rejects_missing_or_mismatched_source_on_all_reads(
     tmp_path, tampered_source
