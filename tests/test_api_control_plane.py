@@ -1818,7 +1818,7 @@ def test_review_decision_post_materializes_record_without_prior_get_and_later_ge
     assert _content_snapshot(roots) == before
 
 
-@pytest.mark.parametrize("identity_field", ("review_id", "run_id", "case_id"))
+@pytest.mark.parametrize("identity_field", ("review_id", "run_id", "case_id", "workspace_id"))
 @pytest.mark.parametrize(
     "route_template",
     (
@@ -1845,11 +1845,13 @@ def test_review_gets_reject_persisted_identity_conflicts_without_storage_changes
         "review_id": review_id,
         "run_id": run["run_id"],
         "case_id": "bound-review-case",
+        "workspace_id": DEFAULT_WORKSPACE_ID,
         "status": "review_required",
         "reason_codes": ["threshold"],
         "packet": {
             "run_id": run["run_id"],
             "case_id": "bound-review-case",
+            "workspace_id": DEFAULT_WORKSPACE_ID,
             "status": "review_required",
         },
         "decision": None,
@@ -1873,6 +1875,73 @@ def test_review_gets_reject_persisted_identity_conflicts_without_storage_changes
             "message": "Stored review identity conflicts with the registered run.",
         }
     }
+    assert _content_snapshot(roots) == before
+
+
+@pytest.mark.parametrize(
+    ("relation", "identity_field"),
+    (
+        ("packet", "run_id"),
+        ("packet", "case_id"),
+        ("packet", "workspace_id"),
+        ("decision", "review_id"),
+        ("decision", "run_id"),
+    ),
+)
+@pytest.mark.parametrize(
+    "route_template",
+    (
+        "/console/state?run_id={run_id}",
+        "/runs/{run_id}/review",
+        "/reviews",
+        "/reviews/{review_id}",
+    ),
+)
+def test_review_gets_reject_nested_identity_conflicts_without_storage_changes(
+    tmp_path,
+    relation,
+    identity_field,
+    route_template,
+):
+    settings = ApiSettings(
+        registry_path=tmp_path / "registry" / "runs.json",
+        artifact_root=tmp_path / "artifacts",
+        review_store_dir=tmp_path / "reviews",
+    )
+    client = _client(tmp_path, runner_module=ReviewRunnerModule, settings=settings)
+    run = client.post("/runs", json={"case_id": "nested-bound-review-case"}).json()
+    review_id = f"review-{run['run_id']}"
+    record = {
+        "review_id": review_id,
+        "run_id": run["run_id"],
+        "case_id": "nested-bound-review-case",
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "status": "review_required",
+        "reason_codes": ["threshold"],
+        "packet": {
+            "run_id": run["run_id"],
+            "case_id": "nested-bound-review-case",
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "status": "review_required",
+        },
+        "decision": {
+            "review_id": review_id,
+            "run_id": run["run_id"],
+            "decision": "approved",
+        },
+    }
+    record[relation][identity_field] = f"mismatched-{identity_field}"
+    record_path = Path(settings.review_store_dir) / review_id / "review_record.json"
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    artifact_root = Path(client.get(f"/runs/{run['run_id']}").json()["run"]["artifact_root"])
+    roots = [Path(settings.registry_path).parent, artifact_root, Path(settings.review_store_dir)]
+    before = _content_snapshot(roots)
+
+    response = client.get(route_template.format(run_id=run["run_id"], review_id=review_id))
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "review_identity_mismatch"
     assert _content_snapshot(roots) == before
 
 
@@ -1935,7 +2004,54 @@ def test_review_get_accepts_legacy_record_with_missing_identity_fields(tmp_path)
     assert review["review_id"] == review_id
     assert review["run_id"] == run["run_id"]
     assert review["case_id"] == "legacy-review-case"
+    assert review["workspace_id"] == DEFAULT_WORKSPACE_ID
     assert _content_snapshot(roots) == before
+
+
+def test_legacy_review_get_then_decision_post_persists_bound_identity(tmp_path):
+    settings = ApiSettings(
+        registry_path=tmp_path / "registry" / "runs.json",
+        artifact_root=tmp_path / "artifacts",
+        review_store_dir=tmp_path / "reviews",
+    )
+    client = _client(tmp_path, runner_module=ReviewRunnerModule, settings=settings)
+    run = client.post("/runs", json={"case_id": "legacy-review-decision-case"}).json()
+    review_id = f"review-{run['run_id']}"
+    record_path = Path(settings.review_store_dir) / review_id / "review_record.json"
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(
+        json.dumps(
+            {
+                "status": "review_required",
+                "reason_codes": ["threshold"],
+                "packet": {"status": "review_required"},
+                "decision": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    before_get = _content_snapshot([Path(settings.review_store_dir)])
+
+    get_response = client.get(f"/runs/{run['run_id']}/review")
+
+    assert get_response.status_code == 200
+    assert _content_snapshot([Path(settings.review_store_dir)]) == before_get
+
+    decision_response = client.post(
+        f"/reviews/{review_id}/decision",
+        json={"decision": "approved", "comment": "approved", "decided_by": "actuary"},
+    )
+
+    assert decision_response.status_code == 200
+    payload = decision_response.json()
+    assert payload["decision"]["run_id"] == run["run_id"]
+    assert payload["review"]["workspace_id"] == DEFAULT_WORKSPACE_ID
+    persisted = json.loads(record_path.read_text(encoding="utf-8"))
+    assert persisted["review_id"] == review_id
+    assert persisted["run_id"] == run["run_id"]
+    assert persisted["case_id"] == "legacy-review-decision-case"
+    assert persisted["workspace_id"] == DEFAULT_WORKSPACE_ID
+    assert client.get(f"/reviews/{review_id}").json()["review"]["status"] == "review_decided"
 
 
 def _content_snapshot(roots):

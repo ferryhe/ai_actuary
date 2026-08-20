@@ -6,7 +6,6 @@ boundaries instead of introducing a second runtime implementation.
 
 from __future__ import annotations
 
-import json
 import math
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,10 +22,11 @@ from reserving_workflow.adapters.control_plane.projections import (
     build_artifact_projection,
     provenance_for_artifact,
     read_bounded_json_object,
+    stat_regular_artifact,
     validate_artifact_projection_schema,
 )
 from reserving_workflow.artifacts import replay as replay_helpers
-from reserving_workflow.artifacts.storage import read_json_artifact, resolve_artifact_path, write_json_artifact
+from reserving_workflow.artifacts.storage import resolve_artifact_path, write_json_artifact
 from reserving_workflow.contracts.control_plane import (
     ArtifactRef,
     ChainladderToolInput,
@@ -51,6 +51,7 @@ from reserving_workflow.review import (
     build_review_contract,
     build_review_snapshot,
     ensure_review_record,
+    validate_review_packet_identity,
     write_run_review_decision_artifacts,
 )
 from reserving_workflow.reports import export_run_report
@@ -159,6 +160,16 @@ def create_app(
     ) -> JSONResponse:
         return JSONResponse(
             status_code=409,
+            content={"detail": {"code": exc.code, "message": exc.message}},
+        )
+
+    @app.exception_handler(ArtifactProjectionReadError)
+    async def _artifact_read_error_handler(
+        _request: Request,
+        exc: ArtifactProjectionReadError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
             content={"detail": {"code": exc.code, "message": exc.message}},
         )
 
@@ -382,7 +393,10 @@ def create_app(
             "run": run_payload,
             "events": [_event_from_history(run_id, item) for item in entry.get("status_history", [])],
             "artifact_manifest": artifact_manifest,
-            "artifacts": _artifact_refs_from_manifest(artifact_manifest),
+            "artifacts": _artifact_refs_from_manifest(
+                artifact_manifest,
+                artifact_root=entry.get("artifact_root"),
+            ),
             "review_packet": review_packet.get("packet") if review_packet.get("present") else None,
             "review_delivery": entry.get("review_delivery"),
         }
@@ -458,7 +472,10 @@ def create_app(
             "artifact_root": artifact_root,
             "artifact_manifest": manifest,
             "artifact_paths": manifest.get("artifact_paths", {}) if manifest else {},
-            "artifacts": _artifact_logical_metadata_from_manifest(manifest),
+            "artifacts": _artifact_logical_metadata_from_manifest(
+                manifest,
+                artifact_root=artifact_root,
+            ),
         }
 
     @app.get("/runs/{run_id}/artifacts/{artifact_id}/projection")
@@ -578,13 +595,14 @@ def create_app(
             if run_id is None:
                 raise HTTPException(status_code=404, detail="Review not found.")
             run_entry = _get_registry_entry(resolved_settings.registry_path, run_id)
-            bind_review_record_identity(review_record, run_entry=run_entry)
+            bound_review_record = bind_review_record_identity(review_record, run_entry=run_entry)
             decision_record = review_store.submit_decision(
                 review_id=review_id,
                 decision=decision_contract.decision,
                 comment=request.comment,
                 decided_by=request.decided_by,
                 follow_up_run_id=request.follow_up_run_id,
+                bound_review=bound_review_record,
             )
         except ReviewDecisionConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1719,6 +1737,8 @@ def _artifact_projection_for_run(entry: dict[str, Any], *, artifact_id: str) -> 
     return build_artifact_projection(
         run_id=run_id,
         artifact_id=artifact_id,
+        case_id=str(expected_case_id) if expected_case_id is not None else None,
+        tool_id=expected_tool_id,
         payload=payload,
     ).model_dump()
 
@@ -2027,14 +2047,14 @@ def _console_artifact_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
     manifest_error = None
     try:
         manifest = _load_manifest_for_entry(entry)
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+    except ArtifactProjectionReadError:
         manifest = None
         manifest_error = {
             "code": "manifest_unreadable",
             "message": "Run manifest could not be read safely.",
         }
     artifact_root = entry.get("artifact_root")
-    root = Path(artifact_root).expanduser().resolve() if artifact_root else None
+    root = Path(str(artifact_root)).expanduser().absolute() if artifact_root else None
     primary_refs = _console_expected_artifact_refs(root, manifest, category="primary")
     review_refs = _console_expected_artifact_refs(root, manifest, category="review")
     decision_refs = _console_expected_artifact_refs(root, manifest, category="decision")
@@ -2052,7 +2072,10 @@ def _console_artifact_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
         "artifact_root": artifact_root,
         "artifact_manifest": manifest,
         "artifact_paths": manifest.get("artifact_paths", {}) if manifest else {},
-        "artifacts": _artifact_logical_metadata_from_manifest(manifest),
+        "artifacts": _artifact_logical_metadata_from_manifest(
+            manifest,
+            artifact_root=artifact_root,
+        ),
         "primary_artifact_refs": primary_refs,
         "review_artifact_refs": review_refs,
         "decision_artifact_refs": decision_refs,
@@ -2127,24 +2150,64 @@ def _load_manifest_for_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
     artifact_root = entry.get("artifact_root")
     if not artifact_root:
         return None
-    manifest_path = Path(artifact_root).expanduser().resolve() / "run_manifest.json"
-    if not manifest_path.exists():
-        return None
-    return read_json_artifact(manifest_path)
+    try:
+        manifest = read_bounded_json_object(
+            artifact_root,
+            "run_manifest.json",
+            namespace="manifest",
+        )
+    except ArtifactProjectionReadError as exc:
+        if exc.code == "manifest_missing":
+            return None
+        raise
+    artifact_paths = manifest.get("artifact_paths")
+    if "artifact_paths" in manifest and not isinstance(artifact_paths, dict):
+        raise ArtifactProjectionReadError(
+            "manifest_invalid_shape",
+            "Run manifest has an invalid artifact registry.",
+            status_code=422,
+        )
+    for field, code, message in (
+        ("run_id", "manifest_run_mismatch", "Run manifest does not match the selected run."),
+        ("case_id", "manifest_case_mismatch", "Run manifest does not match the selected case."),
+    ):
+        expected_value = entry.get(field)
+        if field not in manifest or expected_value is None:
+            continue
+        if manifest[field] is None or str(manifest[field]) != str(expected_value):
+            raise ArtifactProjectionReadError(code, message, status_code=409)
+    return manifest
 
 
 def _load_review_packet_for_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    packet_paths = _review_packet_paths(entry)
-    packet_json = packet_paths.get("json")
-    markdown_path = packet_paths.get("markdown")
-    if packet_json is None or not Path(packet_json).exists():
-        return {"present": False, "run_id": entry.get("run_id"), "packet": None, "markdown_path": markdown_path}
+    artifact_root = entry.get("artifact_root")
+    if not artifact_root:
+        return {"present": False, "run_id": entry.get("run_id"), "packet": None}
+    root = Path(str(artifact_root)).expanduser().absolute()
+    packet_json = root / "review_packet.json"
+    markdown_path = root / "review_packet.md"
+    try:
+        packet = read_bounded_json_object(
+            root,
+            "review_packet.json",
+            namespace="review_packet",
+        )
+    except ArtifactProjectionReadError as exc:
+        if exc.code == "review_packet_missing":
+            return {
+                "present": False,
+                "run_id": entry.get("run_id"),
+                "packet": None,
+                "markdown_path": str(markdown_path),
+            }
+        raise
+    validate_review_packet_identity(packet, run_entry=entry)
     return {
         "present": True,
         "run_id": entry.get("run_id"),
-        "packet": read_json_artifact(packet_json),
+        "packet": packet,
         "json_path": str(packet_json),
-        "markdown_path": str(markdown_path) if markdown_path is not None else None,
+        "markdown_path": str(markdown_path),
     }
 
 
@@ -2262,19 +2325,19 @@ def _decision_artifacts_for_run(entry: dict[str, Any]) -> list[dict[str, Any]]:
     artifact_root = entry.get("artifact_root")
     if not artifact_root:
         return []
-    root = Path(artifact_root).expanduser().resolve()
+    root = Path(str(artifact_root)).expanduser().absolute()
     return [
         ArtifactRef(
             artifact_id="review_decision",
             path=str(root / "review_decision.json"),
             label="review decision",
-            present=(root / "review_decision.json").exists(),
+            present=_artifact_is_regular(root, "review_decision.json"),
         ).model_dump(),
         ArtifactRef(
             artifact_id="review_decision_markdown",
             path=str(root / "review_decision.md"),
             label="review decision markdown",
-            present=(root / "review_decision.md").exists(),
+            present=_artifact_is_regular(root, "review_decision.md"),
         ).model_dump(),
     ]
 
@@ -2288,22 +2351,32 @@ def _identity_filter_options(runs: list[dict[str, Any]], *, field_name: str) -> 
     return sorted(values)
 
 
-def _artifact_refs_from_manifest(manifest: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _artifact_refs_from_manifest(
+    manifest: dict[str, Any] | None,
+    *,
+    artifact_root: str | Path | None = None,
+) -> list[dict[str, Any]]:
     if manifest is None:
         return []
     artifact_paths = manifest.get("artifact_paths", {}) or {}
-    artifact_root = manifest.get("artifact_root")
-    root = Path(artifact_root).expanduser() if artifact_root else None
+    root = (
+        Path(str(artifact_root)).expanduser().absolute()
+        if artifact_root is not None
+        else None
+    )
     artifacts = []
     for artifact_id, path in artifact_paths.items():
-        artifact_path = Path(str(path)).expanduser()
-        if not artifact_path.is_absolute() and root is not None:
-            artifact_path = root / artifact_path
+        relative_ref = _trusted_root_relative_artifact_ref(root, path)
+        artifact_path = root / relative_ref if root is not None and relative_ref is not None else None
         artifact = ArtifactRef(
                 artifact_id=str(artifact_id),
                 label=str(artifact_id).replace("_", " "),
-                path=str(artifact_path),
-                present=artifact_path.exists(),
+                path=str(artifact_path) if artifact_path is not None else None,
+                present=(
+                    _artifact_is_regular(root, relative_ref)
+                    if root is not None and relative_ref is not None
+                    else False
+                ),
             ).model_dump()
         provenance = provenance_for_artifact(str(artifact_id))
         if provenance is not None:
@@ -2318,8 +2391,44 @@ def _artifact_refs_from_manifest(manifest: dict[str, Any] | None) -> list[dict[s
     return artifacts
 
 
+def _trusted_root_relative_artifact_ref(
+    artifact_root: Path | None,
+    raw_ref: Any,
+) -> str | None:
+    if artifact_root is None or not isinstance(raw_ref, str) or not raw_ref.strip():
+        return None
+    candidate = Path(raw_ref).expanduser()
+    if candidate.is_absolute():
+        try:
+            candidate = candidate.absolute().relative_to(artifact_root)
+        except ValueError:
+            return None
+    raw_relative = str(candidate)
+    if "/" in raw_relative or "\\" in raw_relative:
+        return None
+    if raw_relative in {"", ".", ".."} or ":" in raw_relative:
+        return None
+    return raw_relative
+
+
+def _regular_artifact_metadata(
+    artifact_root: Path,
+    relative_ref: str,
+):
+    try:
+        return stat_regular_artifact(artifact_root, relative_ref)
+    except ArtifactProjectionReadError:
+        return None
+
+
+def _artifact_is_regular(artifact_root: Path, relative_ref: str) -> bool:
+    return _regular_artifact_metadata(artifact_root, relative_ref) is not None
+
+
 def _artifact_logical_metadata_from_manifest(
     manifest: dict[str, Any] | None,
+    *,
+    artifact_root: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     return [
         {
@@ -2327,7 +2436,10 @@ def _artifact_logical_metadata_from_manifest(
             for key in ("artifact_id", "label", "present", "provenance", "category")
             if key in artifact
         }
-        for artifact in _artifact_refs_from_manifest(manifest)
+        for artifact in _artifact_refs_from_manifest(
+            manifest,
+            artifact_root=artifact_root,
+        )
     ]
 
 
@@ -2364,58 +2476,42 @@ def _console_expected_artifact_refs(
             and spec["artifact_id"] not in manifest_paths
         ):
             continue
-        artifact_path = _console_artifact_path(
+        relative_ref = _console_artifact_ref(
             artifact_root,
             manifest_paths.get(spec["artifact_id"]),
             fallback_filename=spec["filename"],
+        )
+        metadata = (
+            _regular_artifact_metadata(artifact_root, relative_ref)
+            if artifact_root is not None and relative_ref is not None
+            else None
         )
         refs.append(
             {
                 "artifact_id": spec["artifact_id"],
                 "label": spec["label"],
                 "category": category,
-                "present": artifact_path.exists() if artifact_path is not None else False,
-                "ref": _safe_artifact_ref(artifact_path, artifact_root),
-                "mtime": _artifact_mtime(artifact_path),
+                "present": metadata is not None,
+                "ref": relative_ref,
+                "mtime": (
+                    datetime.fromtimestamp(metadata.st_mtime, tz=timezone.utc).isoformat()
+                    if metadata is not None
+                    else None
+                ),
             }
         )
     return refs
 
 
-def _console_artifact_path(
+def _console_artifact_ref(
     artifact_root: Path | None,
     manifest_path: Any,
     *,
     fallback_filename: str,
-) -> Path | None:
+) -> str | None:
     if manifest_path is not None:
-        candidate = Path(str(manifest_path)).expanduser()
-        if not candidate.is_absolute() and artifact_root is not None:
-            candidate = artifact_root / candidate
-        resolved = candidate.resolve()
-        if artifact_root is not None and not resolved.is_relative_to(artifact_root):
-            return None
-        return resolved
-    if artifact_root is None:
-        return None
-    return (artifact_root / fallback_filename).resolve()
-
-
-def _safe_artifact_ref(path: Path | None, artifact_root: Path | None) -> str | None:
-    if path is None:
-        return None
-    if artifact_root is not None:
-        try:
-            return str(path.relative_to(artifact_root))
-        except ValueError:
-            pass
-    return path.name
-
-
-def _artifact_mtime(path: Path | None) -> str | None:
-    if path is None or not path.exists():
-        return None
-    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+        return _trusted_root_relative_artifact_ref(artifact_root, manifest_path)
+    return fallback_filename if artifact_root is not None else None
 
 
 def _artifact_panel_freshness(evidence_items: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -2429,23 +2525,6 @@ def _artifact_panel_freshness(evidence_items: list[dict[str, Any]]) -> dict[str,
         "present_artifact_count": len(present_items),
         "latest_mtime": latest_mtime,
         "run_manifest_mtime": manifest_mtime,
-    }
-
-
-def _review_packet_paths(entry: dict[str, Any]) -> dict[str, str | None]:
-    delivery_paths = (entry.get("review_delivery") or {}).get("delivered_paths")
-    if isinstance(delivery_paths, dict):
-        return {
-            "json": delivery_paths.get("json"),
-            "markdown": delivery_paths.get("markdown"),
-        }
-    artifact_root = entry.get("artifact_root")
-    if artifact_root is None:
-        return {"json": None, "markdown": None}
-    root = Path(artifact_root).expanduser().resolve()
-    return {
-        "json": str(root / "review_packet.json"),
-        "markdown": str(root / "review_packet.md"),
     }
 
 

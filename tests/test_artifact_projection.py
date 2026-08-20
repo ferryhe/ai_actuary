@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1058,6 +1059,11 @@ def test_free_map_sanitizer_redacts_compound_api_and_access_key_styles_without_t
                 **{key: opaque_value for key in sensitive_keys},
                 "note": f"x_api_key={opaque_value}",
                 "usage": "Token count is 120 for this model.",
+                "first_note": f"the access key is {opaque_value}",
+                "second_note": f"Authorization header is {opaque_value}",
+                "usage_dash": "token-count is 120",
+                "usage_dot": "TOKEN.COUNT: 120",
+                "usage_underscore": "token_count=120",
             },
         },
     )
@@ -1066,6 +1072,11 @@ def test_free_map_sanitizer_redacts_compound_api_and_access_key_styles_without_t
     assert projected["inputs"] == {
         "note": "[redacted]",
         "usage": "Token count is 120 for this model.",
+        "first_note": "[redacted]",
+        "second_note": "[redacted]",
+        "usage_dash": "token-count is 120",
+        "usage_dot": "TOKEN.COUNT: 120",
+        "usage_underscore": "token_count=120",
     }
 
 
@@ -1075,6 +1086,9 @@ def test_free_map_sanitizer_redacts_compound_api_and_access_key_styles_without_t
         "Token count: 42",
         "The token count is 42 for this model",
         "This model has a token count of 7.",
+        "TOKEN_COUNT=42",
+        "token-count is 42",
+        "token.count: 42",
     ),
 )
 def test_free_map_sanitizer_preserves_ordinary_token_count_language(
@@ -1097,6 +1111,10 @@ def test_free_map_sanitizer_preserves_ordinary_token_count_language(
     (
         "Token count: 42; x_api_key=opaque-9e47a2c1",
         "The token count is 42 for this model; Bearer opaque-7c39d0a5",
+        "the access key is opaque-7c39d0a5",
+        "Authorization header is opaque-7c39d0a5",
+        "token_count is 42; the API key is opaque-7c39d0a5",
+        "token.count is 42; Authorization header: opaque-7c39d0a5",
     ),
 )
 def test_token_count_language_does_not_bypass_other_secret_detection(
@@ -1135,6 +1153,11 @@ def test_http_projection_redacts_compound_api_and_access_key_styles_without_toke
                 "awsAccessKeyId": opaque_value,
                 "note": f"x_api_key={opaque_value}",
                 "usage": "Token count is 120 for this model.",
+                "first_note": f"the access key is {opaque_value}",
+                "second_note": f"Authorization header is {opaque_value}",
+                "usage_dash": "token-count is 120",
+                "usage_dot": "TOKEN.COUNT: 120",
+                "usage_underscore": "token_count=120",
             },
         },
     )
@@ -1147,6 +1170,11 @@ def test_http_projection_redacts_compound_api_and_access_key_styles_without_toke
     assert inputs == {
         "note": "[redacted]",
         "usage": "Token count is 120 for this model.",
+        "first_note": "[redacted]",
+        "second_note": "[redacted]",
+        "usage_dash": "token-count is 120",
+        "usage_dot": "TOKEN.COUNT: 120",
+        "usage_underscore": "token_count=120",
     }
 
 
@@ -1398,6 +1426,187 @@ def test_projection_read_does_not_change_registry_artifacts_or_missing_review_ro
     assert response.status_code == 200
     assert _storage_snapshot(registry_path.parent, artifact_root, review_root) == before
     assert not review_root.exists()
+
+
+def test_run_detail_presence_uses_registry_root_and_rejects_manifest_reported_outside_paths(
+    tmp_path: Path,
+) -> None:
+    client, artifact_root, registry_path, run_id = _projection_fixture(tmp_path)
+    outside = tmp_path / "outside.json"
+    _write_json(outside, {"identity": "outside"})
+    manifest_path = artifact_root / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifact_root"] = str(tmp_path)
+    manifest["artifact_paths"] = {
+        "outside_absolute": str(outside),
+        "outside_parent": "../outside.json",
+        "validated_input": "validated_input.json",
+    }
+    _write_json(manifest_path, manifest)
+    before = _storage_snapshot(registry_path.parent, artifact_root, tmp_path / "reviews")
+
+    response = client.get(f"/runs/{run_id}")
+
+    assert response.status_code == 200
+    artifacts = {item["artifact_id"]: item for item in response.json()["artifacts"]}
+    assert artifacts["outside_absolute"]["present"] is False
+    assert artifacts["outside_parent"]["present"] is False
+    assert artifacts["validated_input"]["present"] is True
+    assert _storage_snapshot(registry_path.parent, artifact_root, tmp_path / "reviews") == before
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_status", "expected_code"),
+    (
+        ({"run_id": "other-run"}, 409, "manifest_run_mismatch"),
+        ({"case_id": "other-case"}, 409, "manifest_case_mismatch"),
+        ({"artifact_paths": []}, 422, "manifest_invalid_shape"),
+    ),
+)
+@pytest.mark.parametrize("route", ("/runs/{run_id}", "/runs/{run_id}/artifacts"))
+def test_raw_manifest_gets_bind_present_identity_and_shape_without_storage_changes(
+    tmp_path: Path,
+    mutation: dict[str, Any],
+    expected_status: int,
+    expected_code: str,
+    route: str,
+) -> None:
+    client, artifact_root, registry_path, run_id = _projection_fixture(tmp_path)
+    manifest_path = artifact_root / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(mutation)
+    _write_json(manifest_path, manifest)
+    before = _storage_snapshot(registry_path.parent, artifact_root, tmp_path / "reviews")
+
+    response = client.get(route.format(run_id=run_id))
+
+    assert response.status_code == expected_status
+    assert response.json()["detail"]["code"] == expected_code
+    assert str(artifact_root) not in json.dumps(response.json())
+    assert _storage_snapshot(registry_path.parent, artifact_root, tmp_path / "reviews") == before
+
+
+def test_raw_manifest_gets_preserve_legacy_missing_identity_and_artifact_registry(
+    tmp_path: Path,
+) -> None:
+    client, artifact_root, registry_path, run_id = _projection_fixture(tmp_path)
+    manifest_path = artifact_root / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for field in ("run_id", "case_id", "artifact_paths"):
+        manifest.pop(field)
+    _write_json(manifest_path, manifest)
+    before = _storage_snapshot(registry_path.parent, artifact_root, tmp_path / "reviews")
+
+    detail = client.get(f"/runs/{run_id}")
+    artifacts = client.get(f"/runs/{run_id}/artifacts")
+
+    assert detail.status_code == 200
+    assert detail.json()["artifacts"] == []
+    assert artifacts.status_code == 200
+    assert artifacts.json()["artifacts"] == []
+    assert _storage_snapshot(registry_path.parent, artifact_root, tmp_path / "reviews") == before
+
+
+@pytest.mark.parametrize(
+    ("filename", "route", "expected_code"),
+    (
+        ("run_manifest.json", "/runs/{run_id}", "manifest_path_rejected"),
+        ("run_manifest.json", "/runs/{run_id}/artifacts", "manifest_path_rejected"),
+        ("review_packet.json", "/runs/{run_id}/review-packet", "review_packet_path_rejected"),
+        ("review_packet.json", "/runs/{run_id}/review", "review_packet_path_rejected"),
+    ),
+)
+def test_raw_get_fixed_json_loaders_reject_final_symlinks_without_storage_changes(
+    tmp_path: Path,
+    filename: str,
+    route: str,
+    expected_code: str,
+) -> None:
+    client, artifact_root, registry_path, run_id = _projection_fixture(tmp_path)
+    sentinel = "OUTSIDE-FIXED-JSON-SENTINEL"
+    outside = tmp_path / f"outside-{filename}"
+    _write_json(
+        outside,
+        {
+            "case_id": "case-projection-1",
+            "run_id": run_id,
+            "status": "review_required",
+            "artifact_paths": {},
+            "sentinel": sentinel,
+        },
+    )
+    target = artifact_root / filename
+    target.unlink()
+    try:
+        target.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    before = _storage_snapshot(registry_path.parent, artifact_root, tmp_path / "reviews")
+
+    response = client.get(route.format(run_id=run_id))
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "code": expected_code,
+        "message": "Registered artifact path failed safety validation.",
+    }
+    assert sentinel not in json.dumps(response.json())
+    assert str(outside) not in json.dumps(response.json())
+    assert _storage_snapshot(registry_path.parent, artifact_root, tmp_path / "reviews") == before
+
+
+def test_artifact_presence_rejects_final_symlink_without_reading_target(
+    tmp_path: Path,
+) -> None:
+    client, artifact_root, registry_path, run_id = _projection_fixture(tmp_path)
+    outside = tmp_path / "outside-present.json"
+    _write_json(outside, {"identity": "outside"})
+    target = artifact_root / "validated_input.json"
+    target.unlink()
+    try:
+        target.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    before = _storage_snapshot(registry_path.parent, artifact_root, tmp_path / "reviews")
+
+    response = client.get(f"/runs/{run_id}")
+
+    assert response.status_code == 200
+    metadata = next(
+        item for item in response.json()["artifacts"] if item["artifact_id"] == "validated_input"
+    )
+    assert metadata["present"] is False
+    assert _storage_snapshot(registry_path.parent, artifact_root, tmp_path / "reviews") == before
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO creation is unavailable")
+@pytest.mark.parametrize(
+    ("filename", "route", "expected_code"),
+    (
+        ("run_manifest.json", "/runs/{run_id}", "manifest_not_regular"),
+        ("review_packet.json", "/runs/{run_id}/review", "review_packet_not_regular"),
+    ),
+)
+def test_raw_get_fixed_json_loaders_reject_fifo_without_blocking(
+    tmp_path: Path,
+    filename: str,
+    route: str,
+    expected_code: str,
+) -> None:
+    client, artifact_root, registry_path, run_id = _projection_fixture(tmp_path)
+    target = artifact_root / filename
+    target.unlink()
+    os.mkfifo(target)
+    before = _storage_snapshot(registry_path.parent, artifact_root, tmp_path / "reviews")
+
+    started = time.monotonic()
+    response = client.get(route.format(run_id=run_id))
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == expected_code
+    assert _storage_snapshot(registry_path.parent, artifact_root, tmp_path / "reviews") == before
 
 
 def _storage_snapshot(*roots: Path) -> tuple[tuple[str, bool, tuple[tuple[str, str], ...]], ...]:

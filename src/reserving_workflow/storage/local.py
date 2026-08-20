@@ -358,8 +358,11 @@ class LocalReviewStore:
         comment: str | None = None,
         decided_by: str | None = None,
         follow_up_run_id: str | None = None,
+        bound_review: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        review = self.get_review(review_id)
+        review = dict(bound_review) if bound_review is not None else self.get_review(review_id)
+        if review.get("review_id") != review_id:
+            raise ValueError("Review identity does not match the requested review.")
         existing_decision = review.get("decision")
         candidate_decision = {
             "review_id": review_id,

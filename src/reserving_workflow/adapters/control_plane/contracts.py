@@ -121,6 +121,8 @@ class ArtifactProjection(ResponseContract):
 
     run_id: str
     artifact_id: str
+    case_id: str | None = None
+    tool_id: str | None = None
     status: Literal["available"]
     provenance: ArtifactProvenance
     data: dict[str, Any]

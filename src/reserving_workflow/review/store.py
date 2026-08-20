@@ -76,7 +76,7 @@ def build_review_snapshot(
         packet = record.get("packet")
         if packet is None and review_packet_result.get("present"):
             packet = review_packet_result.get("packet")
-        _validate_review_packet_identity(packet, run_entry=run_entry)
+        validate_review_packet_identity(packet, run_entry=run_entry)
         return build_review_contract(
             record,
             review_packet_result=review_packet_result,
@@ -85,7 +85,7 @@ def build_review_snapshot(
         )
 
     packet = review_packet_result.get("packet") if review_packet_result.get("present") else None
-    _validate_review_packet_identity(packet, run_entry=run_entry)
+    validate_review_packet_identity(packet, run_entry=run_entry)
     needs_review = _run_needs_review(run_entry, packet)
     status = "review_required" if needs_review else "not_required"
     packet_payload = packet if isinstance(packet, dict) else {}
@@ -121,6 +121,7 @@ def bind_review_record_identity(
             if run_entry.get("case_id") is not None
             else None
         ),
+        "workspace_id": _run_workspace_id(run_entry),
     }
     bound = dict(record)
     for field, expected_value in expected.items():
@@ -131,10 +132,12 @@ def bind_review_record_identity(
                 raise ReviewIdentityMismatchError()
         else:
             bound[field] = expected_value
+    validate_review_packet_identity(bound.get("packet"), run_entry=run_entry)
+    _validate_review_decision_identity(bound.get("decision"), run_entry=run_entry)
     return bound
 
 
-def _validate_review_packet_identity(
+def validate_review_packet_identity(
     packet: Any,
     *,
     run_entry: dict[str, Any],
@@ -144,11 +147,31 @@ def _validate_review_packet_identity(
     expected = {
         "run_id": run_entry.get("run_id"),
         "case_id": run_entry.get("case_id"),
+        "workspace_id": _run_workspace_id(run_entry),
     }
     for field, expected_value in expected.items():
         if field not in packet or expected_value is None:
             continue
         if packet[field] is None or str(packet[field]) != str(expected_value):
+            raise ReviewIdentityMismatchError()
+
+
+def _validate_review_decision_identity(
+    decision: Any,
+    *,
+    run_entry: dict[str, Any],
+) -> None:
+    if not isinstance(decision, dict):
+        return
+    run_id = str(run_entry.get("run_id"))
+    expected = {
+        "review_id": build_review_id(run_id),
+        "run_id": run_id,
+    }
+    for field, expected_value in expected.items():
+        if field not in decision:
+            continue
+        if decision[field] is None or str(decision[field]) != expected_value:
             raise ReviewIdentityMismatchError()
 
 

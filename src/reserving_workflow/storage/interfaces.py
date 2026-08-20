@@ -92,6 +92,7 @@ class ReviewStore(Protocol):
         comment: str | None = None,
         decided_by: str | None = None,
         follow_up_run_id: str | None = None,
+        bound_review: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
     def get_review(self, review_id: str) -> dict[str, Any]: ...

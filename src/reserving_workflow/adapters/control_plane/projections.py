@@ -129,23 +129,13 @@ def read_bounded_json_object(
 ) -> dict[str, Any]:
     """Open each component without following links, pin the final fd, then parse."""
 
-    parts = _safe_relative_parts(relative_path, namespace=namespace)
-    root = Path(os.path.abspath(os.path.expanduser(str(artifact_root))))
-    try:
-        descriptor = _open_descriptor_no_follow(root, parts, namespace=namespace)
-    except ArtifactProjectionReadError:
-        raise
-    except FileNotFoundError as exc:
-        raise _read_error(namespace, "missing", "Registered JSON artifact is missing.", status_code=404) from exc
-    except OSError as exc:
-        if exc.errno in {errno.ELOOP, errno.EMLINK}:
-            raise _read_error(namespace, "path_rejected", "Registered artifact path failed safety validation.") from exc
-        raise _read_error(namespace, "unreadable", "Registered JSON artifact could not be read safely.") from exc
+    descriptor, metadata = _open_regular_artifact(
+        artifact_root,
+        relative_path,
+        namespace=namespace,
+    )
 
     try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise _read_error(namespace, "not_regular", "Registered artifact must be a regular file.")
         if metadata.st_size > max_bytes:
             raise _read_error(
                 namespace,
@@ -192,6 +182,68 @@ def read_bounded_json_object(
         raise _read_error(namespace, "invalid_shape", "Registered artifact must be a JSON object.", status_code=422)
     _validate_json_complexity(payload, namespace=namespace)
     return payload
+
+
+def stat_regular_artifact(
+    artifact_root: str | Path,
+    relative_path: str,
+    *,
+    namespace: str = "artifact",
+) -> os.stat_result:
+    """Return metadata from a pinned regular file without following path links."""
+
+    descriptor, metadata = _open_regular_artifact(
+        artifact_root,
+        relative_path,
+        namespace=namespace,
+    )
+    os.close(descriptor)
+    return metadata
+
+
+def _open_regular_artifact(
+    artifact_root: str | Path,
+    relative_path: str,
+    *,
+    namespace: str,
+) -> tuple[int, os.stat_result]:
+    parts = _safe_relative_parts(relative_path, namespace=namespace)
+    root = Path(os.path.abspath(os.path.expanduser(str(artifact_root))))
+    try:
+        descriptor = _open_descriptor_no_follow(root, parts, namespace=namespace)
+    except ArtifactProjectionReadError:
+        raise
+    except FileNotFoundError as exc:
+        raise _read_error(
+            namespace,
+            "missing",
+            "Registered JSON artifact is missing.",
+            status_code=404,
+        ) from exc
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.EMLINK}:
+            raise _read_error(
+                namespace,
+                "path_rejected",
+                "Registered artifact path failed safety validation.",
+            ) from exc
+        raise _read_error(
+            namespace,
+            "unreadable",
+            "Registered JSON artifact could not be read safely.",
+        ) from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise _read_error(
+                namespace,
+                "not_regular",
+                "Registered artifact must be a regular file.",
+            )
+        return descriptor, metadata
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def project_artifact_payload(artifact_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -333,12 +385,16 @@ def build_artifact_projection(
     *,
     run_id: str,
     artifact_id: str,
+    case_id: str | None,
+    tool_id: str | None,
     payload: dict[str, Any],
 ) -> ArtifactProjection:
     spec = ARTIFACT_PROJECTION_SPECS[artifact_id]
     return ArtifactProjection(
         run_id=run_id,
         artifact_id=artifact_id,
+        case_id=case_id,
+        tool_id=tool_id,
         status="available",
         provenance=spec.provenance,
         data=project_artifact_payload(artifact_id, payload),
@@ -1114,7 +1170,6 @@ def _forbidden_key(key: str) -> bool:
         "session",
         "sessions",
         "secret",
-        "token",
         "auth",
         "authentication",
         "authorization",
@@ -1122,12 +1177,13 @@ def _forbidden_key(key: str) -> bool:
         "headers",
         "private",
     }
+    if sensitive_tokens:
+        return True
     if any(
-        token == "token" and index + 1 < len(tokens) and tokens[index + 1] == "count"
+        token == "token"
+        and (index + 1 >= len(tokens) or tokens[index + 1] != "count")
         for index, token in enumerate(tokens)
     ):
-        sensitive_tokens.discard("token")
-    if sensitive_tokens:
         return True
     normalized = "_".join(tokens)
     if normalized in {
@@ -1244,9 +1300,22 @@ def _looks_sensitive(value: str) -> bool:
         or _URL_USERINFO.search(value)
     ):
         return True
+    tokens = _semantic_tokens(value)
+    if any(
+        (token in {"api", "access"} and next_token == "key")
+        or (token in {"auth", "authorization"} and next_token == "header")
+        for token, next_token in zip(tokens, tokens[1:])
+    ):
+        return True
+    if any(
+        token == "token"
+        and (index + 1 >= len(tokens) or tokens[index + 1] != "count")
+        for index, token in enumerate(tokens)
+    ):
+        return True
     if re.search(
-        r"\b(?:secret|token(?!\s+count\b)|api[-_ ]?key|password|passphrase|credentials?|cookies?|sessionid|"
-        r"access[-_ ]?token|refresh[-_ ]?token|shared[-_ ]?secret|registry[-_ ]?path|"
+        r"\b(?:secret|password|passphrase|credentials?|cookies?|sessionid|"
+        r"shared[-_ ]?secret|registry[-_ ]?path|"
         r"file[-_ ]?name|basic[-_ ]?value)\b",
         lowered,
     ):
@@ -1301,6 +1370,7 @@ __all__ = [
     "project_workflow",
     "provenance_for_artifact",
     "read_bounded_json_object",
+    "stat_regular_artifact",
     "validate_artifact_projection_schema",
     "validate_projected_artifact_payload_schema",
 ]

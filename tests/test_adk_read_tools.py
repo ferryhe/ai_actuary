@@ -313,10 +313,12 @@ def test_adk_tools_redact_sensitive_values_even_in_allowed_fields(tool_name: str
             )
         return httpx.Response(
             200,
-            json={
-                "run_id": "run-1",
-                "artifact_id": "validated_input",
-                "status": "available",
+                json={
+                    "run_id": "run-1",
+                    "artifact_id": "validated_input",
+                    "case_id": "case-1",
+                    "tool_id": "chainladder",
+                    "status": "available",
                 "provenance": "deterministic",
                 "data": {
                     "case_id": "case-1",
@@ -355,6 +357,8 @@ def test_adk_tools_redact_sensitive_values_even_in_allowed_fields(tool_name: str
         "-----BEGIN PRIVATE KEY-----",
         "Authorization=opaque-value",
         "X-Auth-Header=opaque-value",
+        "the access key is opaque-value",
+        "Authorization header is opaque-value",
         "https://service-user:opaque-password@example.test",
     ),
 )
@@ -364,10 +368,12 @@ def test_actual_adk_projection_envelope_redacts_sensitive_free_map_values(
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={
-                "run_id": "run-1",
-                "artifact_id": "validated_input",
-                "status": "available",
+                json={
+                    "run_id": "run-1",
+                    "artifact_id": "validated_input",
+                    "case_id": "case-1",
+                    "tool_id": "chainladder",
+                    "status": "available",
                 "provenance": "deterministic",
                 "data": {
                     "case_id": "case-1",
@@ -398,10 +404,12 @@ def test_actual_adk_projection_envelope_normalizes_sensitive_key_styles() -> Non
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={
-                "run_id": "run-1",
-                "artifact_id": "validated_input",
-                "status": "available",
+                json={
+                    "run_id": "run-1",
+                    "artifact_id": "validated_input",
+                    "case_id": "case-1",
+                    "tool_id": "chainladder",
+                    "status": "available",
                 "provenance": "deterministic",
                 "data": {
                     "case_id": "case-1",
@@ -494,6 +502,54 @@ def test_actual_adk_review_envelope_rejects_packet_case_identity_mismatch() -> N
     }
 
 
+@pytest.mark.parametrize(
+    ("field_path", "wrong_value"),
+    (
+        (("data", "run_id"), "other-run"),
+        (("data", "case_id"), "other-case"),
+        (("data", "tool_id"), "other-tool"),
+    ),
+)
+def test_actual_adk_projection_rejects_inner_identity_mismatch_safely(
+    field_path: tuple[str, str],
+    wrong_value: str,
+) -> None:
+    payload = {
+        "run_id": "run-1",
+        "artifact_id": "validated_input",
+        "case_id": "case-1",
+        "tool_id": "chainladder",
+        "status": "available",
+        "provenance": "deterministic",
+        "data": {
+            "case_id": "case-1",
+            "run_id": "run-1",
+            "tool_id": "chainladder",
+            "inputs": {"sample_name": "RAA"},
+        },
+        "errors": [],
+    }
+    payload[field_path[0]][field_path[1]] = wrong_value
+
+    def factory() -> ReadOnlyControlPlaneClient:
+        return ReadOnlyControlPlaneClient(
+            "http://testserver",
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+            max_get_attempts=1,
+        )
+
+    with adk_tools.use_read_client_factory(factory):
+        result = adk_tools.get_artifact_projection("run-1", "validated_input")
+
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "invalid_contract",
+            "message": "Control plane returned an invalid response contract.",
+        },
+    }
+
+
 def test_actual_adk_review_packet_case_conflict_is_storage_invariant_and_keeps_review_root_missing(
     tmp_path: Path,
 ) -> None:
@@ -516,6 +572,176 @@ def test_actual_adk_review_packet_case_conflict_is_storage_invariant_and_keeps_r
     }
     assert _snapshot(roots) == before
     assert not roots[-1].exists()
+
+
+@pytest.mark.parametrize(
+    ("relation", "identity_field"),
+    (
+        ("outer", "workspace_id"),
+        ("packet", "workspace_id"),
+        ("decision", "review_id"),
+        ("decision", "run_id"),
+    ),
+)
+def test_actual_adk_rejects_persisted_review_identity_conflicts_without_storage_changes(
+    tmp_path: Path,
+    relation: str,
+    identity_field: str,
+) -> None:
+    fixture, roots = _tool_fixture(tmp_path)
+    run_id = fixture["run_id"]
+    review_id = f"review-{run_id}"
+    record = {
+        "review_id": review_id,
+        "run_id": run_id,
+        "case_id": "case-adk-read-1",
+        "workspace_id": "default-workspace",
+        "status": "review_required",
+        "reason_codes": ["threshold"],
+        "packet": {
+            "run_id": run_id,
+            "case_id": "case-adk-read-1",
+            "workspace_id": "default-workspace",
+            "status": "review_required",
+        },
+        "decision": {
+            "review_id": review_id,
+            "run_id": run_id,
+            "decision": "approved",
+        },
+    }
+    if relation == "outer":
+        record[identity_field] = f"mismatched-{identity_field}"
+    else:
+        record[relation][identity_field] = f"mismatched-{identity_field}"
+    _write_json(roots[-1] / review_id / "review_record.json", record)
+    before = _snapshot(roots)
+
+    with adk_tools.use_read_client_factory(fixture["client_factory"]):
+        result = adk_tools.get_run_review_snapshot(run_id)
+
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "http_error",
+            "message": "Control plane rejected the request.",
+        },
+    }
+    assert _snapshot(roots) == before
+
+
+def test_actual_asgi_adk_projection_redacts_natural_language_secrets_and_preserves_token_counts(
+    tmp_path: Path,
+) -> None:
+    fixture, roots = _tool_fixture(tmp_path)
+    opaque = "opaque-natural-language-value"
+    target = roots[1] / "validated_input.json"
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload["inputs"] = {
+        "first_note": f"the access key is {opaque}",
+        "second_note": f"Authorization header is {opaque}",
+        "usage_space": "Token count is 42",
+        "usage_dash": "token-count is 42",
+        "usage_dot": "TOKEN.COUNT: 42",
+        "usage_underscore": "token_count=42",
+    }
+    _write_json(target, payload)
+    before = _snapshot(roots)
+
+    with adk_tools.use_read_client_factory(fixture["client_factory"]):
+        result = adk_tools.get_artifact_projection(fixture["run_id"], "validated_input")
+
+    assert result["ok"] is True
+    inputs = result["data"]["data"]["inputs"]
+    assert inputs == {
+        "first_note": "[redacted]",
+        "second_note": "[redacted]",
+        "usage_space": "Token count is 42",
+        "usage_dash": "token-count is 42",
+        "usage_dot": "TOKEN.COUNT: 42",
+        "usage_underscore": "token_count=42",
+    }
+    assert opaque not in json.dumps(result)
+    assert _snapshot(roots) == before
+
+
+@pytest.mark.parametrize(
+    ("filename", "tool_name"),
+    (
+        ("run_manifest.json", "get_run"),
+        ("run_manifest.json", "get_run_artifacts"),
+        ("review_packet.json", "get_run_review_snapshot"),
+    ),
+)
+def test_actual_adk_fixed_json_symlinks_fail_safely_and_preserve_storage(
+    tmp_path: Path,
+    filename: str,
+    tool_name: str,
+) -> None:
+    fixture, roots = _tool_fixture(tmp_path)
+    sentinel = "ADK-OUTSIDE-FIXED-JSON-SENTINEL"
+    outside = tmp_path / f"outside-{filename}"
+    _write_json(
+        outside,
+        {
+            "case_id": "case-adk-read-1",
+            "run_id": fixture["run_id"],
+            "tool_id": "chainladder",
+            "status": "review_required",
+            "artifact_paths": {},
+            "sentinel": sentinel,
+        },
+    )
+    target = roots[1] / filename
+    target.unlink()
+    try:
+        target.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    before = _snapshot(roots)
+
+    with adk_tools.use_read_client_factory(fixture["client_factory"]):
+        result = _call_for(tool_name, fixture["run_id"])
+
+    assert result["ok"] is False
+    serialized = json.dumps(result)
+    assert sentinel not in serialized
+    assert str(outside) not in serialized
+    assert _snapshot(roots) == before
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        {"run_id": "other-run"},
+        {"case_id": "other-case"},
+        {"artifact_paths": []},
+    ),
+)
+@pytest.mark.parametrize("tool_name", ("get_run", "get_run_artifacts"))
+def test_actual_adk_manifest_identity_and_shape_fail_safely_without_storage_changes(
+    tmp_path: Path,
+    mutation: dict[str, Any],
+    tool_name: str,
+) -> None:
+    fixture, roots = _tool_fixture(tmp_path)
+    manifest_path = roots[1] / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(mutation)
+    _write_json(manifest_path, manifest)
+    before = _snapshot(roots)
+
+    with adk_tools.use_read_client_factory(fixture["client_factory"]):
+        result = _call_for(tool_name, fixture["run_id"])
+
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "http_error",
+            "message": "Control plane rejected the request.",
+        },
+    }
+    assert _snapshot(roots) == before
 
 
 def test_actual_adk_list_runs_reports_filtered_identity_mismatch_safely() -> None:

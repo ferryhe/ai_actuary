@@ -199,6 +199,8 @@ def _response_for(request: httpx.Request) -> httpx.Response:
             json={
                 "run_id": "run-1",
                 "artifact_id": "validated_input",
+                "case_id": "case-1",
+                "tool_id": "chainladder",
                 "status": "available",
                 "provenance": "deterministic",
                 "data": {"case_id": "case-1", "tool_id": "chainladder", "inputs": {"sample_name": "RAA"}},
@@ -255,6 +257,24 @@ def test_read_only_client_covers_all_public_read_surfaces_with_typed_contracts()
             ("run-1", "validated_input"),
             ("provenance",),
             "model_generated",
+        ),
+        (
+            "get_artifact_projection",
+            ("run-1", "validated_input"),
+            ("data", "run_id"),
+            "other-run",
+        ),
+        (
+            "get_artifact_projection",
+            ("run-1", "validated_input"),
+            ("data", "case_id"),
+            "other-case",
+        ),
+        (
+            "get_artifact_projection",
+            ("run-1", "validated_input"),
+            ("data", "tool_id"),
+            "other-tool",
         ),
     ),
 )
@@ -407,8 +427,10 @@ def test_artifact_metadata_derives_known_provenance_and_leaves_unknown_unclaimed
     (
         (("run_id",), "other-run"),
         (("review", "review_id"), "review-other-run"),
+        (("review", "review_id"), ""),
         (("review", "packet", "run_id"), "other-run"),
         (("review", "packet", "case_id"), "other-case"),
+        (("review", "packet", "workspace_id"), "other-workspace"),
         (("review", "decision", "run_id"), "other-run"),
         (("review", "decision", "review_id"), "review-other-run"),
         (("review", "decision", "review_id"), ""),
@@ -424,9 +446,14 @@ def test_review_snapshot_rejects_relational_identity_mismatches(
             "review_id": "review-run-1",
             "run_id": "run-1",
             "case_id": "case-1",
+            "workspace_id": "workspace-1",
             "status": "review_decided",
             "review_required": True,
-            "packet": {"run_id": "run-1", "status": "review_required"},
+            "packet": {
+                "run_id": "run-1",
+                "workspace_id": "workspace-1",
+                "status": "review_required",
+            },
             "decision": {
                 "review_id": "review-run-1",
                 "run_id": "run-1",
@@ -603,6 +630,8 @@ def test_client_rejects_unknown_raw_fields_in_safe_artifact_projection() -> None
             json={
                 "run_id": "run-1",
                 "artifact_id": "validated_input",
+                "case_id": "case-1",
+                "tool_id": "chainladder",
                 "status": "available",
                 "provenance": "deterministic",
                 "data": {

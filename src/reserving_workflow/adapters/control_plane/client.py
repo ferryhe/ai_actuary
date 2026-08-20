@@ -227,11 +227,14 @@ class ReadOnlyControlPlaneClient:
         expected_review_id = f"review-{safe_run_id}"
         packet_run_id = review.packet.get("run_id") if review.packet is not None else None
         packet_case_id = review.packet.get("case_id") if review.packet is not None else None
+        packet_workspace_id = (
+            review.packet.get("workspace_id") if review.packet is not None else None
+        )
         decision = review.decision
         _require_contract_identity(
             envelope.run_id in {None, safe_run_id}
             and review.run_id == safe_run_id
-            and (not review.review_id or review.review_id == expected_review_id)
+            and (review.review_id is None or review.review_id == expected_review_id)
             and (
                 review.packet is None
                 or "run_id" not in review.packet
@@ -242,6 +245,12 @@ class ReadOnlyControlPlaneClient:
                 or "case_id" not in review.packet
                 or review.case_id is None
                 or packet_case_id == review.case_id
+            )
+            and (
+                review.packet is None
+                or "workspace_id" not in review.packet
+                or review.workspace_id is None
+                or packet_workspace_id == review.workspace_id
             )
             and (
                 decision is None
@@ -267,11 +276,24 @@ class ReadOnlyControlPlaneClient:
             ArtifactProjection,
         )
         expected_spec = ARTIFACT_PROJECTION_SPECS.get(safe_artifact_id)
+        data_run_id = projection.data.get("run_id")
+        data_case_id = projection.data.get("case_id")
+        data_tool_id = projection.data.get("tool_id")
         _require_contract_identity(
             expected_spec is not None
             and projection.run_id == safe_run_id
             and projection.artifact_id == safe_artifact_id
             and projection.provenance == expected_spec.provenance
+            and projection.case_id is not None
+            and data_case_id == projection.case_id
+            and (data_run_id is None or data_run_id == safe_run_id)
+            and (
+                data_tool_id is None
+                or (
+                    projection.tool_id is not None
+                    and data_tool_id == projection.tool_id
+                )
+            )
         )
         return projection
 
