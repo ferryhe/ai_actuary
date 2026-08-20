@@ -44,6 +44,7 @@ from .errors import (
     error_for_status,
 )
 from .projections import (
+    ARTIFACT_PROJECTION_SPECS,
     ArtifactProjectionReadError,
     validate_projected_artifact_payload_schema,
 )
@@ -117,17 +118,23 @@ class ReadOnlyControlPlaneClient:
         return self._request_model("GET", "/tools", ToolListEnvelope).tools
 
     def get_tool(self, tool_id: str) -> ToolDetail:
-        return self._request_model("GET", f"/tools/{_identifier(tool_id, field_name='tool_id')}", ToolDetail)
+        safe_tool_id = _identifier(tool_id, field_name="tool_id")
+        tool = self._request_model("GET", f"/tools/{safe_tool_id}", ToolDetail)
+        _require_contract_identity(tool.tool_id == safe_tool_id)
+        return tool
 
     def list_workflows(self) -> list[WorkflowSummary]:
         return self._request_model("GET", "/workflows", WorkflowListEnvelope).workflows
 
     def get_workflow(self, workflow_id: str) -> Workflow:
-        return self._request_model(
+        safe_workflow_id = _identifier(workflow_id, field_name="workflow_id")
+        workflow = self._request_model(
             "GET",
-            f"/workflows/{_identifier(workflow_id, field_name='workflow_id')}",
+            f"/workflows/{safe_workflow_id}",
             Workflow,
         )
+        _require_contract_identity(workflow.workflow_id == safe_workflow_id)
+        return workflow
 
     def list_runs(
         self,
@@ -152,29 +159,41 @@ class ReadOnlyControlPlaneClient:
         return runs[:limit]
 
     def get_run(self, run_id: str) -> Run:
-        return self._request_model(
+        safe_run_id = _identifier(run_id, field_name="run_id")
+        run = self._request_model(
             "GET",
-            f"/runs/{_identifier(run_id, field_name='run_id')}",
+            f"/runs/{safe_run_id}",
             RunEnvelope,
         ).run
+        _require_contract_identity(run.run_id == safe_run_id)
+        return run
 
     def get_run_events(self, run_id: str) -> list[RunEvent]:
         safe_run_id = _identifier(run_id, field_name="run_id")
-        return self._request_model(
+        envelope = self._request_model(
             "GET", f"/runs/{safe_run_id}/events", RunEventListEnvelope
-        ).events
+        )
+        _require_contract_identity(
+            envelope.run_id == safe_run_id
+            and all(event.run_id == safe_run_id for event in envelope.events)
+        )
+        return envelope.events
 
     def get_run_artifacts(self, run_id: str) -> list[ArtifactMetadata]:
         safe_run_id = _identifier(run_id, field_name="run_id")
-        return self._request_model(
+        envelope = self._request_model(
             "GET", f"/runs/{safe_run_id}/artifacts", ArtifactListEnvelope
-        ).artifacts
+        )
+        _require_contract_identity(envelope.run_id == safe_run_id)
+        return envelope.artifacts
 
     def get_run_review_snapshot(self, run_id: str) -> Review:
         safe_run_id = _identifier(run_id, field_name="run_id")
-        return self._request_model(
+        review = self._request_model(
             "GET", f"/runs/{safe_run_id}/review", ReviewEnvelope
         ).review
+        _require_contract_identity(review.run_id == safe_run_id)
+        return review
 
     def get_run_review(self, run_id: str) -> Review:
         """Compatibility alias used by existing Hermes callers."""
@@ -184,11 +203,19 @@ class ReadOnlyControlPlaneClient:
     def get_artifact_projection(self, run_id: str, artifact_id: str) -> ArtifactProjection:
         safe_run_id = _identifier(run_id, field_name="run_id")
         safe_artifact_id = _identifier(artifact_id, field_name="artifact_id")
-        return self._request_model(
+        projection = self._request_model(
             "GET",
             f"/runs/{safe_run_id}/artifacts/{safe_artifact_id}/projection",
             ArtifactProjection,
         )
+        expected_spec = ARTIFACT_PROJECTION_SPECS.get(safe_artifact_id)
+        _require_contract_identity(
+            expected_spec is not None
+            and projection.run_id == safe_run_id
+            and projection.artifact_id == safe_artifact_id
+            and projection.provenance == expected_spec.provenance
+        )
+        return projection
 
     def wait_for_terminal_run(
         self,
@@ -372,6 +399,14 @@ def _identifier(value: str, *, field_name: str) -> str:
     if not _SAFE_IDENTIFIER.fullmatch(candidate):
         raise ValueError(f"{field_name} must be a bounded safe identifier")
     return candidate
+
+
+def _require_contract_identity(condition: bool) -> None:
+    if not condition:
+        raise ControlPlaneContractError(
+            code="invalid_contract",
+            message="Control plane returned an invalid response contract.",
+        )
 
 
 __all__ = ["ReadOnlyControlPlaneClient"]

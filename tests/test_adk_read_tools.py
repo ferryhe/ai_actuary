@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.util
 import inspect
 import json
 from pathlib import Path
@@ -51,10 +52,23 @@ READ_TOOL_NAMES = [
     "get_artifact_projection",
 ]
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+OPENAI_RUNTIME_RUNNER = (
+    REPO_ROOT / "workflows" / "agent-runtimes" / "openai-agents" / "runner.py"
+)
+
 
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _load_runtime_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def _tool_fixture(tmp_path: Path) -> tuple[dict[str, Any], list[Path]]:
@@ -328,6 +342,84 @@ def test_adk_tools_redact_sensitive_values_even_in_allowed_fields(tool_name: str
     assert "C:/private" not in serialized
 
 
+@pytest.mark.parametrize(
+    "unsafe_value",
+    (
+        "client_secret=opaque-value",
+        "clientSecret: opaque-value",
+        "private_key=opaque-value",
+        "-----BEGIN PRIVATE KEY-----",
+        "Authorization=opaque-value",
+        "X-Auth-Header=opaque-value",
+        "https://service-user:opaque-password@example.test",
+    ),
+)
+def test_actual_adk_projection_envelope_redacts_sensitive_free_map_values(
+    unsafe_value: str,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "run_id": "run-1",
+                "artifact_id": "validated_input",
+                "status": "available",
+                "provenance": "deterministic",
+                "data": {
+                    "case_id": "case-1",
+                    "tool_id": "chainladder",
+                    "inputs": {"note": unsafe_value},
+                },
+                "errors": [],
+            },
+        )
+
+    def factory() -> ReadOnlyControlPlaneClient:
+        return ReadOnlyControlPlaneClient(
+            "http://testserver",
+            transport=httpx.MockTransport(handler),
+            max_get_attempts=1,
+        )
+
+    with adk_tools.use_read_client_factory(factory):
+        result = adk_tools.get_artifact_projection("run-1", "validated_input")
+
+    assert result["ok"] is True
+    assert result["data"]["data"]["inputs"]["note"] == "[redacted]"
+
+
+def test_actual_adk_envelope_reports_response_identity_mismatch_safely() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "run": {
+                    "run_id": "cross-run",
+                    "case_id": "case-1",
+                    "status": "completed",
+                }
+            },
+        )
+
+    def factory() -> ReadOnlyControlPlaneClient:
+        return ReadOnlyControlPlaneClient(
+            "http://testserver",
+            transport=httpx.MockTransport(handler),
+            max_get_attempts=1,
+        )
+
+    with adk_tools.use_read_client_factory(factory):
+        result = adk_tools.get_run("run-1")
+
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "invalid_contract",
+            "message": "Control plane returned an invalid response contract.",
+        },
+    }
+
+
 def test_adk_run_manifest_accepts_the_server_safe_projection_without_raw_paths(
     tmp_path: Path,
 ) -> None:
@@ -525,6 +617,131 @@ def test_isolated_asgi_console_api_and_adk_share_authoritative_read_state(
     )
     assert _snapshot(roots) == before
     assert not roots[-1].exists()
+
+
+def test_real_builtin_workflow_parent_manifest_api_console_and_adk_artifacts_match(
+    tmp_path: Path,
+) -> None:
+    offline_runner = _load_runtime_module(
+        "pr2_real_builtin_offline_runner",
+        OPENAI_RUNTIME_RUNNER,
+    )
+
+    class ModelFreeGovernedRunner:
+        @staticmethod
+        def run_openai_governed_workflow(task, *, user_prompt=None):
+            del user_prompt
+            result = offline_runner.run_planner_workflow(task)
+            worker = result["worker_result"]
+            return {
+                "route": result["route"],
+                "trace": {"workflow_name": "model-free-real-builtin"},
+                "worker_result": worker,
+                "final_output": {
+                    "case_id": worker["case_id"],
+                    "worker_status": worker["status"],
+                    "deterministic_method": worker["deterministic_result"]["method"],
+                    "cited_values": worker["deterministic_result"]["reserve_summary"],
+                    "review_reasons": worker["review_reasons"],
+                    "artifact_manifest_path": worker["artifact_paths"]["run_manifest"],
+                    "narrative_summary": worker["narrative_draft"]["summary"],
+                },
+            }
+
+    settings = ApiSettings(
+        registry_path=tmp_path / "registry" / "runs.json",
+        artifact_root=tmp_path / "artifacts",
+        review_store_dir=tmp_path / "reviews-not-created",
+    )
+    app = create_app(settings=settings, runner_module=ModelFreeGovernedRunner)
+
+    async def request(method: str, path: str, **kwargs: Any) -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as local:
+            return await local.request(method, path, **kwargs)
+
+    run_response = asyncio.run(
+        request(
+            "POST",
+            "/runs",
+            json={
+                "case_id": "real-workflow-parity",
+                "workflow_id": "chainladder-basic",
+                "background": False,
+            },
+        )
+    )
+    assert run_response.status_code == 200, run_response.text
+    run = run_response.json()
+    run_id = run["run_id"]
+    manifest_path = Path(run["final_output"]["artifact_manifest_path"])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["artifact_paths"]["run_manifest"] == "run_manifest.json"
+
+    child_manifest_path = Path(
+        run["worker_result"]["artifact_paths"]["step_chainladder_run_manifest"]
+    )
+    child_manifest = json.loads(child_manifest_path.read_text(encoding="utf-8"))
+    deterministic_result = json.loads(
+        (child_manifest_path.parent / child_manifest["artifact_paths"]["deterministic_result"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert deterministic_result["method"] == "chainladder"
+    assert deterministic_result["reserve_summary"]["ibnr"] >= 0
+
+    api_artifacts = asyncio.run(request("GET", f"/runs/{run_id}/artifacts")).json()[
+        "artifacts"
+    ]
+    console = asyncio.run(request("GET", f"/console/state?run_id={run_id}")).json()
+    console_artifacts = console["artifact_panel"]["artifacts"]
+
+    def handler(request_value: httpx.Request) -> httpx.Response:
+        response = asyncio.run(
+            request(
+                request_value.method,
+                request_value.url.raw_path.decode("ascii"),
+                headers=request_value.headers,
+                content=request_value.content,
+            )
+        )
+        return httpx.Response(
+            response.status_code,
+            headers=response.headers,
+            content=response.content,
+        )
+
+    def client_factory() -> ReadOnlyControlPlaneClient:
+        return ReadOnlyControlPlaneClient(
+            "http://testserver",
+            transport=httpx.MockTransport(handler),
+            max_get_attempts=1,
+        )
+
+    with adk_tools.use_read_client_factory(client_factory):
+        adk_artifacts = adk_tools.get_run_artifacts(run_id)
+        adk_manifest = adk_tools.get_artifact_projection(run_id, "run_manifest")
+
+    api_ids = [item["artifact_id"] for item in api_artifacts]
+    assert api_ids == [item["artifact_id"] for item in console_artifacts]
+    assert api_ids == [item["artifact_id"] for item in adk_artifacts["data"]]
+    assert api_ids == [
+        "run_manifest",
+        "step_chainladder_run_manifest",
+        "workflow_summary",
+    ]
+    assert adk_manifest["ok"] is True
+    assert adk_manifest["data"]["run_id"] == run_id
+    assert adk_manifest["data"]["artifact_id"] == "run_manifest"
+    assert adk_manifest["data"]["provenance"] == "system_manifest"
+    serialized_metadata = json.dumps(
+        [api_artifacts, console_artifacts, adk_artifacts, adk_manifest]
+    )
+    assert str(tmp_path) not in serialized_metadata
+    assert all("path" not in item and "ref" not in item for item in api_artifacts)
+    assert all("path" not in item and "ref" not in item for item in console_artifacts)
 
 
 def _snapshot(roots: list[Path]) -> tuple[tuple[str, bool, tuple[tuple[str, str], ...]], ...]:

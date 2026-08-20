@@ -10,9 +10,9 @@ from reserving_workflow.api.app import ApiSettings, create_app
 from reserving_workflow.interfaces.operator_console import load_operator_console_html
 
 
-EXPECTED_CONSOLE_CHARACTER_COUNT = 53_797
-EXPECTED_CONSOLE_UTF8_BYTE_COUNT = 53_825
-EXPECTED_CONSOLE_SHA256 = "ad84892a79563005ca85b70c785e171ef899a34a8ddd3fddbd627d3e609ad0a3"
+EXPECTED_CONSOLE_CHARACTER_COUNT = 53_910
+EXPECTED_CONSOLE_UTF8_BYTE_COUNT = 53_938
+EXPECTED_CONSOLE_SHA256 = "0a6c0dc7ec1cb2ff38444c24f45cb3d00271759587f4d45c3870ae02b871ed27"
 
 
 def test_operator_console_asset_matches_reviewed_pr1_document() -> None:

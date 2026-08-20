@@ -446,7 +446,7 @@ def create_app(
             "artifact_root": artifact_root,
             "artifact_manifest": manifest,
             "artifact_paths": manifest.get("artifact_paths", {}) if manifest else {},
-            "artifacts": _artifact_refs_from_manifest(manifest),
+            "artifacts": _artifact_logical_metadata_from_manifest(manifest),
         }
 
     @app.get("/runs/{run_id}/artifacts/{artifact_id}/projection")
@@ -1243,6 +1243,7 @@ def _run_sequential_workflow(
         "run_id": parent_run_id,
         "artifact_root": str(artifact_root),
         "artifact_paths": {
+            "run_manifest": "run_manifest.json",
             "workflow_summary": str(workflow_summary_path),
             **step_artifact_paths,
         },
@@ -2044,7 +2045,7 @@ def _console_artifact_panel(entry: dict[str, Any] | None) -> dict[str, Any]:
         "artifact_root": artifact_root,
         "artifact_manifest": manifest,
         "artifact_paths": manifest.get("artifact_paths", {}) if manifest else {},
-        "artifacts": _artifact_refs_from_manifest(manifest),
+        "artifacts": _artifact_logical_metadata_from_manifest(manifest),
         "primary_artifact_refs": primary_refs,
         "review_artifact_refs": review_refs,
         "decision_artifact_refs": decision_refs,
@@ -2308,6 +2309,19 @@ def _artifact_refs_from_manifest(manifest: dict[str, Any] | None) -> list[dict[s
             }[provenance]
         artifacts.append(artifact)
     return artifacts
+
+
+def _artifact_logical_metadata_from_manifest(
+    manifest: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            key: artifact[key]
+            for key in ("artifact_id", "label", "present", "provenance", "category")
+            if key in artifact
+        }
+        for artifact in _artifact_refs_from_manifest(manifest)
+    ]
 
 
 _CONSOLE_ARTIFACT_SPECS: tuple[dict[str, str], ...] = (

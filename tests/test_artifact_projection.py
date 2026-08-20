@@ -805,6 +805,39 @@ def test_nested_free_map_sanitizer_redacts_sensitive_keys_paths_and_credentials(
 
 
 @pytest.mark.parametrize(
+    "unsafe_value",
+    (
+        "client_secret=opaque-value",
+        "clientSecret: opaque-value",
+        "CLIENT-SECRET = opaque-value",
+        "private_key=opaque-value",
+        "privateKey: opaque-value",
+        "-----BEGIN PRIVATE KEY-----",
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "Authorization=opaque-value",
+        "authorization : opaque-value",
+        "X-Auth-Header=opaque-value",
+        "x_auth_header: opaque-value",
+        "https://service-user:opaque-password@example.test",
+        "postgresql://service-user@database.example.test",
+    ),
+)
+def test_free_map_sanitizer_redacts_assignment_pem_and_url_userinfo_values(
+    unsafe_value: str,
+) -> None:
+    projected = project_artifact_payload(
+        "validated_input",
+        {
+            "case_id": "case-1",
+            "tool_id": "chainladder",
+            "inputs": {"note": unsafe_value},
+        },
+    )
+
+    assert projected["inputs"]["note"] == "[redacted]"
+
+
+@pytest.mark.parametrize(
     ("artifact_id", "missing_field"),
     (
         ("run_manifest", "case_id"),

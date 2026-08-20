@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from reserving_workflow.adapters.control_plane import (
+    ControlPlaneContractError,
     ControlPlaneError,
     ReadOnlyControlPlaneClient,
 )
@@ -225,6 +226,69 @@ def test_read_only_client_covers_all_public_read_surfaces_with_typed_contracts()
         assert client.get_run_review_snapshot("run-1").review_id == "review-run-1"
         assert client.get_artifact_projection("run-1", "validated_input").data["case_id"] == "case-1"
         assert not hasattr(client, "create_run")
+
+
+@pytest.mark.parametrize(
+    ("method_name", "arguments", "field_path", "wrong_value"),
+    (
+        ("get_tool", ("chainladder",), ("tool_id",), "other-tool"),
+        ("get_workflow", ("chainladder-basic",), ("workflow_id",), "other-workflow"),
+        ("get_run", ("run-1",), ("run", "run_id"), "run-2"),
+        ("get_run_events", ("run-1",), ("run_id",), "run-2"),
+        ("get_run_events", ("run-1",), ("events", 0, "run_id"), "run-2"),
+        ("get_run_artifacts", ("run-1",), ("run_id",), "run-2"),
+        ("get_run_review_snapshot", ("run-1",), ("review", "run_id"), "run-2"),
+        (
+            "get_artifact_projection",
+            ("run-1", "validated_input"),
+            ("run_id",),
+            "run-2",
+        ),
+        (
+            "get_artifact_projection",
+            ("run-1", "validated_input"),
+            ("artifact_id",),
+            "deterministic_result",
+        ),
+        (
+            "get_artifact_projection",
+            ("run-1", "validated_input"),
+            ("provenance",),
+            "model_generated",
+        ),
+    ),
+)
+def test_parameterized_reads_bind_response_identity_to_the_request(
+    method_name: str,
+    arguments: tuple[str, ...],
+    field_path: tuple[str | int, ...],
+    wrong_value: str,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = _response_for(request).json()
+        target = payload
+        for key in field_path[:-1]:
+            target = target[key]
+        target[field_path[-1]] = wrong_value
+        return httpx.Response(200, json=payload)
+
+    client = ReadOnlyControlPlaneClient(
+        "http://testserver",
+        transport=httpx.MockTransport(handler),
+        max_get_attempts=1,
+    )
+
+    with pytest.raises(ControlPlaneContractError) as exc_info:
+        getattr(client, method_name)(*arguments)
+
+    assert exc_info.value.code == "invalid_contract"
+    assert exc_info.value.to_envelope() == {
+        "ok": False,
+        "error": {
+            "code": "invalid_contract",
+            "message": "Control plane returned an invalid response contract.",
+        },
+    }
 
 
 def test_read_only_client_owns_shared_run_polling_and_summary_behavior() -> None:

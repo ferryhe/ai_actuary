@@ -36,6 +36,17 @@ MAX_JSON_LIST_LENGTH = 2_000
 MAX_JSON_STRING_LENGTH = 100_000
 MAX_PROJECTED_OUTPUT_BYTES = 500_000
 
+_SENSITIVE_ASSIGNMENT = re.compile(
+    r"(?i)(?:^|[^A-Za-z0-9])(?:client[-_ ]*secret|private[-_ ]*key|"
+    r"authorization|x[-_ ]*auth[-_ ]*header)\s{0,16}[:=]"
+)
+_PEM_PRIVATE_KEY_MARKER = re.compile(
+    r"(?i)-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
+)
+_URL_USERINFO = re.compile(
+    r"(?i)\b[A-Z][A-Z0-9+.-]{1,31}://[^\s/@]{1,256}@"
+)
+
 
 @dataclass(frozen=True)
 class ArtifactProjectionSpec:
@@ -1030,6 +1041,12 @@ def _looks_like_absolute_path(value: str) -> bool:
 
 def _looks_sensitive(value: str) -> bool:
     lowered = value.lower()
+    if (
+        _SENSITIVE_ASSIGNMENT.search(value)
+        or _PEM_PRIVATE_KEY_MARKER.search(value)
+        or _URL_USERINFO.search(value)
+    ):
+        return True
     if re.search(
         r"\b(?:secret|token|api[-_ ]?key|password|passphrase|credentials?|cookies?|sessionid|"
         r"access[-_ ]?token|refresh[-_ ]?token|shared[-_ ]?secret|registry[-_ ]?path|"

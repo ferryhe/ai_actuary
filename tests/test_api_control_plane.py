@@ -1931,8 +1931,25 @@ def test_post_run_with_workflow_id_executes_steps_sequentially_and_records_workf
     detail = client.get(f"/runs/{run_id}").json()
     assert detail["run"]["workflow_id"] == "chainladder-basic"
     assert detail["artifact_manifest"]["workflow_id"] == "chainladder-basic"
+    assert detail["artifact_manifest"]["artifact_paths"]["run_manifest"] == "run_manifest.json"
     assert detail["artifact_manifest"]["artifact_paths"]["workflow_summary"].endswith("workflow_summary.json")
     assert any(artifact["artifact_id"] == "step_chainladder_run_manifest" for artifact in detail["artifacts"])
+
+    api_artifacts = client.get(f"/runs/{run_id}/artifacts").json()["artifacts"]
+    console_artifacts = client.get(f"/console/state?run_id={run_id}").json()["artifact_panel"]["artifacts"]
+    assert [item["artifact_id"] for item in api_artifacts] == [
+        item["artifact_id"] for item in console_artifacts
+    ]
+    assert all("path" not in item and "ref" not in item for item in api_artifacts)
+    assert all("path" not in item and "ref" not in item for item in console_artifacts)
+
+
+def test_console_renders_manifest_derived_artifact_metadata_as_canonical_truth(tmp_path):
+    client = _client(tmp_path)
+
+    html = client.get("/console").text
+
+    assert 'renderArtifactGroup(container, "Manifest Artifacts", panel.artifacts' in html
 
 
 def test_post_run_with_validation_workflow_records_validation_then_execution(tmp_path):
