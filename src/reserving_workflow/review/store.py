@@ -7,7 +7,23 @@ from typing import Any
 
 from reserving_workflow.artifacts.storage import read_json_artifact, write_json_artifact
 from reserving_workflow.contracts.control_plane import Review, ReviewDecisionArtifact
-from reserving_workflow.storage.local import LocalArtifactStore, LocalReviewStore, resolve_artifact_path, resolve_artifact_root
+from reserving_workflow.storage.local import (
+    LocalArtifactStore,
+    LocalReviewStore,
+    ReviewNotFoundError,
+    resolve_artifact_path,
+    resolve_artifact_root,
+)
+
+
+class ReviewIdentityMismatchError(ValueError):
+    """A persisted review or packet conflicts with authoritative run identity."""
+
+    code = "review_identity_mismatch"
+    message = "Stored review identity conflicts with the registered run."
+
+    def __init__(self) -> None:
+        super().__init__(self.message)
 
 
 def ensure_review_record(
@@ -36,6 +52,127 @@ def ensure_review_record(
         workspace_id=_run_workspace_id(run_entry),
         packet=packet_payload or None,
     )
+
+
+def build_review_snapshot(
+    *,
+    review_store: LocalReviewStore,
+    run_entry: dict[str, Any],
+    review_packet_result: dict[str, Any] | None = None,
+    review_store_root: str | Path | None = None,
+    decision_artifacts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build a stable review view without creating a persistent record."""
+
+    review_packet_result = review_packet_result or {}
+    run_id = str(run_entry.get("run_id"))
+    expected_review_id = build_review_id(run_id)
+    try:
+        record = review_store.get_review(expected_review_id)
+    except ReviewNotFoundError:
+        record = review_store.get_review_for_run(run_id)
+    if record is not None:
+        record = bind_review_record_identity(record, run_entry=run_entry)
+        packet = record.get("packet")
+        if packet is None and review_packet_result.get("present"):
+            packet = review_packet_result.get("packet")
+        validate_review_packet_identity(packet, run_entry=run_entry)
+        return build_review_contract(
+            record,
+            review_packet_result=review_packet_result,
+            review_store_root=review_store_root,
+            decision_artifacts=decision_artifacts,
+        )
+
+    packet = review_packet_result.get("packet") if review_packet_result.get("present") else None
+    validate_review_packet_identity(packet, run_entry=run_entry)
+    needs_review = _run_needs_review(run_entry, packet)
+    status = "review_required" if needs_review else "not_required"
+    packet_payload = packet if isinstance(packet, dict) else {}
+    return Review(
+        status=status,
+        review_id=build_review_id(run_id) if needs_review else None,
+        run_id=run_id,
+        case_id=run_entry.get("case_id"),
+        workspace_id=_run_workspace_id(run_entry),
+        review_required=needs_review,
+        reason_codes=_extract_reason_codes(run_entry, packet_payload) if needs_review else [],
+        assigned_to=_review_assignee(run_entry, packet_payload) if needs_review else None,
+        packet=packet if isinstance(packet, dict) else None,
+        json_path=review_packet_result.get("json_path"),
+        markdown_path=review_packet_result.get("markdown_path"),
+        review_delivery=run_entry.get("review_delivery"),
+    ).model_dump(exclude_none=True)
+
+
+def bind_review_record_identity(
+    record: dict[str, Any],
+    *,
+    run_entry: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind present persisted identities and fill legacy omissions in memory."""
+
+    run_id = str(run_entry.get("run_id"))
+    expected: dict[str, str | None] = {
+        "review_id": build_review_id(run_id),
+        "run_id": run_id,
+        "case_id": (
+            str(run_entry["case_id"])
+            if run_entry.get("case_id") is not None
+            else None
+        ),
+        "workspace_id": _run_workspace_id(run_entry),
+    }
+    bound = dict(record)
+    for field, expected_value in expected.items():
+        if expected_value is None:
+            continue
+        if field in record and record[field] is not None:
+            if str(record[field]) != expected_value:
+                raise ReviewIdentityMismatchError()
+        else:
+            bound[field] = expected_value
+    validate_review_packet_identity(bound.get("packet"), run_entry=run_entry)
+    _validate_review_decision_identity(bound.get("decision"), run_entry=run_entry)
+    return bound
+
+
+def validate_review_packet_identity(
+    packet: Any,
+    *,
+    run_entry: dict[str, Any],
+) -> None:
+    if not isinstance(packet, dict):
+        return
+    expected = {
+        "run_id": run_entry.get("run_id"),
+        "case_id": run_entry.get("case_id"),
+        "workspace_id": _run_workspace_id(run_entry),
+    }
+    for field, expected_value in expected.items():
+        if field not in packet or expected_value is None:
+            continue
+        if packet[field] is None or str(packet[field]) != str(expected_value):
+            raise ReviewIdentityMismatchError()
+
+
+def _validate_review_decision_identity(
+    decision: Any,
+    *,
+    run_entry: dict[str, Any],
+) -> None:
+    if not isinstance(decision, dict):
+        return
+    run_id = str(run_entry.get("run_id"))
+    expected = {
+        "review_id": build_review_id(run_id),
+        "run_id": run_id,
+    }
+    for field, expected_value in expected.items():
+        if field not in decision:
+            continue
+        if decision[field] is None or str(decision[field]) != expected_value:
+            raise ReviewIdentityMismatchError()
 
 
 def build_review_contract(
@@ -145,7 +282,7 @@ def _decision_artifacts(record: dict[str, Any], *, review_store_root: str | Path
     if not review_store_root or not record.get("decision"):
         return []
     review_id = record.get("review_id")
-    review_root = resolve_artifact_root(review_store_root) / str(review_id)
+    review_root = Path(review_store_root).expanduser().resolve() / str(review_id)
     return [
         ReviewDecisionArtifact(
             artifact_id="review_decision",
@@ -201,7 +338,7 @@ def _run_workspace_id(run_entry: dict[str, Any]) -> str | None:
 
 
 def _review_record_path(review_store_root: str | Path, review_id: Any) -> Path:
-    return resolve_artifact_root(review_store_root) / str(review_id) / "review_record.json"
+    return Path(review_store_root).expanduser().resolve() / str(review_id) / "review_record.json"
 
 
 def _render_run_decision_markdown(run_entry: dict[str, Any], decision_record: dict[str, Any]) -> str:

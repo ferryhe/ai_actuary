@@ -174,6 +174,7 @@ def run_operator_flow(
         artifact_dir=artifact_dir,
         validated_input_path=validated_input_path,
     )
+    _attach_review_packet_artifacts(normalized, artifact_dir=artifact_dir)
     if review_delivery_dir is not None and normalized.get("status") == "needs_review" and normalized.get("review_packet"):
         try:
             delivery_module = _load_review_delivery_module()
@@ -358,7 +359,12 @@ def _attach_validated_input_artifact(
     if manifest_path is not None and manifest_path.exists():
         manifest = read_json_artifact(manifest_path)
         artifact_paths = dict(manifest.get("artifact_paths", {}) or {})
-        artifact_paths["validated_input"] = str(Path(validated_input_path).expanduser().resolve())
+        artifact_root = Path(manifest.get("artifact_root") or manifest_path.parent).expanduser().resolve()
+        resolved_validated_input = Path(validated_input_path).expanduser().resolve()
+        try:
+            artifact_paths["validated_input"] = resolved_validated_input.relative_to(artifact_root).as_posix()
+        except ValueError as exc:
+            raise ValueError("Validated input artifact must remain inside the run artifact root.") from exc
         manifest["artifact_paths"] = artifact_paths
         write_json_artifact(manifest_path, manifest)
 
@@ -366,6 +372,35 @@ def _attach_validated_input_artifact(
     artifact_paths = dict(worker_result.get("artifact_paths", {}) or {})
     artifact_paths["validated_input"] = str(Path(validated_input_path).expanduser().resolve())
     worker_result["artifact_paths"] = artifact_paths
+
+
+def _attach_review_packet_artifacts(result: dict[str, Any], *, artifact_dir: str | Path) -> None:
+    review_packet = result.get("review_packet")
+    if not isinstance(review_packet, dict):
+        return
+    packet_paths = review_packet.get("packet_paths")
+    if not isinstance(packet_paths, dict):
+        return
+    manifest_path = _resolve_manifest_path(result, artifact_dir=artifact_dir)
+    if manifest_path is None or not manifest_path.exists():
+        return
+    manifest = read_json_artifact(manifest_path)
+    artifact_root = Path(manifest.get("artifact_root") or manifest_path.parent).expanduser().resolve()
+    artifact_paths = dict(manifest.get("artifact_paths", {}) or {})
+    for artifact_id, packet_key in (
+        ("review_packet", "json"),
+        ("review_packet_markdown", "markdown"),
+    ):
+        raw_path = packet_paths.get(packet_key)
+        if raw_path is None:
+            continue
+        resolved_path = Path(raw_path).expanduser().resolve()
+        try:
+            artifact_paths[artifact_id] = resolved_path.relative_to(artifact_root).as_posix()
+        except ValueError:
+            continue
+    manifest["artifact_paths"] = artifact_paths
+    write_json_artifact(manifest_path, manifest)
 
 
 def _resolve_manifest_path(result: dict[str, Any], *, artifact_dir: str | Path) -> Path | None:

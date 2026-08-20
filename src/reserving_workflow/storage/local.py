@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any
+from typing import Any, Iterator
 
 from reserving_workflow.contracts.control_plane import validate_run_status
+from reserving_workflow.storage.safe_json import (
+    PinnedJsonRoot,
+    SafeJsonReadError,
+)
 
 
 DEFAULT_REGISTRY_PAYLOAD = {"runs": []}
@@ -24,6 +30,16 @@ class ReviewNotFoundError(ValueError):
 
 class ReviewDecisionConflictError(ValueError):
     """Raised when a submitted review decision conflicts with a stored decision."""
+
+
+class ReviewRecordReadError(RuntimeError):
+    """Raised when a persisted review record cannot be read safely."""
+
+    code = "review_record_unsafe"
+    message = "Stored review record could not be read safely."
+
+    def __init__(self) -> None:
+        super().__init__(self.message)
 
 
 class LocalRunStore:
@@ -297,7 +313,9 @@ class LocalArtifactStore:
         raise ValueError(f"Unsupported artifact format: {format!r}")
 
     def list_artifacts(self, root: str | Path) -> list[str]:
-        base = resolve_artifact_root(root)
+        base = Path(root).expanduser().resolve()
+        if not base.exists():
+            return []
         return sorted(
             str(path.relative_to(base)).replace("\\", "/")
             for path in base.rglob("*")
@@ -309,8 +327,38 @@ class LocalReviewStore:
     """Artifact-backed local placeholder for persistent review records."""
 
     def __init__(self, root: str | Path):
-        self.root = resolve_artifact_root(root)
+        self.root = Path(os.path.abspath(os.path.expanduser(str(root))))
         self.artifact_store = LocalArtifactStore()
+        self._trusted_read_root: PinnedJsonRoot | None = None
+        self._trusted_read_root_missing = False
+
+    @contextmanager
+    def pinned_reads(self) -> Iterator["LocalReviewStore"]:
+        if self._trusted_read_root is not None or self._trusted_read_root_missing:
+            yield self
+            return
+        trusted_root = PinnedJsonRoot(
+            self.root,
+            namespace="review_record",
+            allow_nested=True,
+        )
+        try:
+            trusted_root.__enter__()
+        except SafeJsonReadError as exc:
+            if exc.code != "review_record_missing":
+                raise ReviewRecordReadError() from exc
+            self._trusted_read_root_missing = True
+            try:
+                yield self
+            finally:
+                self._trusted_read_root_missing = False
+            return
+        self._trusted_read_root = trusted_root
+        try:
+            yield self
+        finally:
+            self._trusted_read_root = None
+            trusted_root.close()
 
     def create_review(
         self,
@@ -356,8 +404,11 @@ class LocalReviewStore:
         comment: str | None = None,
         decided_by: str | None = None,
         follow_up_run_id: str | None = None,
+        bound_review: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        review = self.get_review(review_id)
+        review = dict(bound_review) if bound_review is not None else self.get_review(review_id)
+        if review.get("review_id") != review_id:
+            raise ValueError("Review identity does not match the requested review.")
         existing_decision = review.get("decision")
         candidate_decision = {
             "review_id": review_id,
@@ -369,6 +420,12 @@ class LocalReviewStore:
         }
         if isinstance(existing_decision, dict):
             if _decision_payload_matches(existing_decision, candidate_decision):
+                if bound_review is not None and self.get_review(review_id) != review:
+                    self.artifact_store.write_artifact(
+                        root=self.root,
+                        relative_path=Path(review_id) / "review_record.json",
+                        payload=review,
+                    )
                 return existing_decision
             raise ReviewDecisionConflictError("Review decision already recorded with different content.")
         now = _utc_now()
@@ -398,10 +455,28 @@ class LocalReviewStore:
         return decision_record
 
     def get_review(self, review_id: str) -> dict[str, Any]:
-        review_path = self._review_path(review_id, create_parent=False)
-        if not review_path.exists():
+        _validate_artifact_component(review_id, field_name="review_id")
+        if self._trusted_read_root_missing:
             raise ReviewNotFoundError(f"Review id not found: {review_id}")
-        return self.artifact_store.read_artifact(review_path)
+        if self._trusted_read_root is not None:
+            return self._read_review_from_trusted_root(
+                review_id,
+                trusted_root=self._trusted_read_root,
+            )
+        try:
+            with PinnedJsonRoot(
+                self.root,
+                namespace="review_record",
+                allow_nested=True,
+            ) as trusted_root:
+                return self._read_review_from_trusted_root(
+                    review_id,
+                    trusted_root=trusted_root,
+                )
+        except SafeJsonReadError as exc:
+            if exc.code == "review_record_missing":
+                raise ReviewNotFoundError(f"Review id not found: {review_id}") from None
+            raise ReviewRecordReadError() from exc
 
     def get_review_for_run(self, run_id: str) -> dict[str, Any] | None:
         for review in self.list_reviews():
@@ -410,12 +485,66 @@ class LocalReviewStore:
         return None
 
     def list_reviews(self) -> list[dict[str, Any]]:
+        if self._trusted_read_root_missing:
+            return []
+        if self._trusted_read_root is not None:
+            return self._list_reviews_from_trusted_root(self._trusted_read_root)
+        try:
+            with PinnedJsonRoot(
+                self.root,
+                namespace="review_record",
+                allow_nested=True,
+            ) as trusted_root:
+                return self._list_reviews_from_trusted_root(trusted_root)
+        except SafeJsonReadError as exc:
+            if exc.code == "review_record_missing":
+                return []
+            raise ReviewRecordReadError() from exc
+
+    def _list_reviews_from_trusted_root(
+        self,
+        trusted_root: PinnedJsonRoot,
+    ) -> list[dict[str, Any]]:
         reviews: list[dict[str, Any]] = []
-        if not self.root.exists():
-            return reviews
-        for review_path in self.root.glob("*/review_record.json"):
-            reviews.append(self.artifact_store.read_artifact(review_path))
-        return sorted(reviews, key=lambda item: item.get("updated_at", ""), reverse=True)
+        try:
+            review_ids = trusted_root.list_directories()
+            for review_id in review_ids:
+                try:
+                    _validate_artifact_component(
+                        review_id,
+                        field_name="review_id",
+                    )
+                    reviews.append(
+                        self._read_review_from_trusted_root(
+                            review_id,
+                            trusted_root=trusted_root,
+                        )
+                    )
+                except ReviewNotFoundError:
+                    continue
+        except SafeJsonReadError as exc:
+            raise ReviewRecordReadError() from exc
+        return sorted(
+            reviews,
+            key=lambda item: item.get("updated_at", ""),
+            reverse=True,
+        )
+
+    def _read_review_from_trusted_root(
+        self,
+        review_id: str,
+        *,
+        trusted_root: PinnedJsonRoot,
+    ) -> dict[str, Any]:
+        try:
+            return trusted_root.read_bounded_json_object(
+                f"{review_id}/review_record.json",
+                namespace="review_record",
+            )
+        except SafeJsonReadError as exc:
+            if exc.code == "review_record_missing":
+                raise ReviewNotFoundError(f"Review id not found: {review_id}") from None
+            raise ReviewRecordReadError() from exc
 
     def _review_path(self, review_id: str, *, create_parent: bool) -> Path:
         _validate_artifact_component(review_id, field_name="review_id")
@@ -430,9 +559,7 @@ class LocalReviewStore:
 
 
 def resolve_registry_path(path: str | Path) -> Path:
-    target = Path(path).expanduser().resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    return target
+    return Path(path).expanduser().resolve()
 
 
 def resolve_artifact_root(root: str | Path) -> Path:
@@ -470,6 +597,7 @@ def _read_registry_payload(path: Path) -> dict[str, Any]:
 
 
 def _write_registry_payload(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     serialized = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
     with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
         handle.write(serialized)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import signal
 import socket
 import subprocess
@@ -14,6 +13,7 @@ from typing import Any
 from urllib.error import URLError
 from urllib.request import urlopen
 
+import httpx
 import pytest
 
 
@@ -53,8 +53,13 @@ def test_adk_is_a_python311_only_optional_extra() -> None:
 def test_importing_control_plane_does_not_import_google_adk() -> None:
     probe = """
 import sys
+sys.path.insert(0, 'src')
+from developer_workflows.ai_actuary_developer import tools as adk_read_tools
+from reserving_workflow.adapters.control_plane import ReadOnlyControlPlaneClient
 from reserving_workflow.api.app import create_app
 create_app()
+assert adk_read_tools.READ_TOOL_NAMES
+assert not hasattr(ReadOnlyControlPlaneClient, 'create_run')
 assert not any(name == 'google.adk' or name.startswith('google.adk.') for name in sys.modules)
 """
     result = subprocess.run(
@@ -766,46 +771,56 @@ raise SystemExit(
     not _google_adk_available(),
     reason="google-adk is intentionally absent from the default dev extra",
 )
-def test_developer_agent_is_code_first_gemini_and_health_only(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from developer_workflows.ai_actuary_developer import agent
+def test_developer_agent_is_code_first_gemini_and_read_only() -> None:
+    from developer_workflows.ai_actuary_developer import agent, tools
+    from reserving_workflow.adapters.control_plane import ReadOnlyControlPlaneClient
 
     assert agent.root_agent.name == "ai_actuary_developer"
     assert agent.root_agent.model == "gemini-2.5-flash"
     assert agent.describe_development_environment()["model"] == agent.root_agent.model
     assert "development-only" in agent.root_agent.description.lower()
     assert "http://127.0.0.1:8000/console" in agent.root_agent.description
-    assert [tool.__name__ for tool in agent.root_agent.tools] == [
-        "describe_development_environment",
-        "check_control_plane_health",
-        "check_control_plane_preflight",
-    ]
-    assert all(not tool.__name__.startswith(("run", "review", "workflow")) for tool in agent.root_agent.tools)
+    assert [tool.__name__ for tool in agent.root_agent.tools] == list(tools.READ_TOOL_NAMES)
+    assert "strictly read-only" in agent.root_agent.instruction
+    assert "Never start or invoke" in agent.root_agent.instruction
+    assert "review decision" in agent.root_agent.instruction
+    assert not any(
+        forbidden in tool.__name__
+        for tool in agent.root_agent.tools
+        for forbidden in ("create", "start", "rerun", "replay", "benchmark", "report", "decision")
+    )
 
     requested: list[str] = []
 
-    class _Response:
-        status = 200
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"ok": True, "service": "control-plane"})
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "service": "control-plane",
+                "status": "ok",
+                "readiness": "ready",
+                "warnings": [],
+                "errors": [],
+                "summary": {"check_count": 0, "ok_count": 0, "warning_count": 0, "error_count": 0},
+                "configuration": {"catalog": {}},
+                "runtime": {},
+                "checks": [],
+            },
+        )
 
-        def __enter__(self) -> "_Response":
-            return self
+    def factory() -> ReadOnlyControlPlaneClient:
+        return ReadOnlyControlPlaneClient(
+            "http://127.0.0.1:8000",
+            transport=httpx.MockTransport(handler),
+        )
 
-        def __exit__(self, *args: object) -> None:
-            del args
-
-        def read(self) -> bytes:
-            return json.dumps({"ok": True}).encode("utf-8")
-
-    def urlopen(request: object, timeout: float) -> _Response:
-        assert timeout == 2.0
-        requested.append(request.full_url)  # type: ignore[attr-defined]
-        return _Response()
-
-    monkeypatch.setattr(agent, "urlopen", urlopen)
-
-    assert agent.check_control_plane_health()["payload"] == {"ok": True}
-    assert agent.check_control_plane_preflight()["payload"] == {"ok": True}
+    with tools.use_read_client_factory(factory):
+        assert agent.check_control_plane_health()["data"] == {"ok": True, "service": "control-plane"}
+        assert agent.check_control_plane_preflight()["data"]["readiness"] == "ready"
     environment = agent.describe_development_environment()
 
     assert requested == [
@@ -814,3 +829,4 @@ def test_developer_agent_is_code_first_gemini_and_health_only(
     ]
     assert environment["console_url"] == "http://127.0.0.1:8000/console"
     assert environment["scope"] == "development-only"
+    assert environment["capability"] == "read-only control-plane inspection"

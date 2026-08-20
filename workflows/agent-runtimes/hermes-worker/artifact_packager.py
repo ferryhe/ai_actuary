@@ -53,5 +53,18 @@ def write_artifacts(manifest: RunArtifactManifest, artifacts: Mapping[str, Any])
             manifest.artifact_paths[artifact_name] = target_path
         write_json_artifact(target_path, payload)
 
-    write_json_artifact(manifest.artifact_paths["run_manifest"], manifest)
+    serialized_manifest = manifest.model_dump(mode="json")
+    serialized_manifest["artifact_paths"] = {
+        artifact_id: _manifest_relative_ref(artifact_root, artifact_path)
+        for artifact_id, artifact_path in manifest.artifact_paths.items()
+    }
+    write_json_artifact(manifest.artifact_paths["run_manifest"], serialized_manifest)
     return manifest
+
+
+def _manifest_relative_ref(artifact_root: Path, artifact_path: str | Path) -> str:
+    path = Path(artifact_path).expanduser().resolve()
+    try:
+        return path.relative_to(artifact_root).as_posix()
+    except ValueError as exc:
+        raise ValueError("Artifact manifest entry must remain inside its artifact root.") from exc
