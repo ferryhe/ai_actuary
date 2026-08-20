@@ -5,8 +5,9 @@ import hashlib
 from pathlib import Path
 
 import httpx
+from conftest import create_authenticated_app
 
-from reserving_workflow.api.app import ApiSettings, create_app
+from reserving_workflow.api.app import ApiSettings, _inject_console_csrf_transport
 from reserving_workflow.interfaces.operator_console import load_operator_console_html
 
 
@@ -25,7 +26,7 @@ def test_operator_console_asset_matches_reviewed_pr1_document() -> None:
 
 
 def test_console_route_serves_extracted_asset_without_behavior_change(tmp_path: Path) -> None:
-    app = create_app(
+    app = create_authenticated_app(
         settings=ApiSettings(
             registry_path=tmp_path / "run-registry.json",
             artifact_root=tmp_path / "artifacts",
@@ -43,7 +44,8 @@ def test_console_route_serves_extracted_asset_without_behavior_change(tmp_path: 
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
-    assert response.text == load_operator_console_html()
+    reviewed_asset = load_operator_console_html()
+    assert response.text == _inject_console_csrf_transport(reviewed_asset)
 
 
 def test_api_module_no_longer_embeds_console_document() -> None:

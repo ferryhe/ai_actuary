@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import math
 import re
@@ -17,6 +19,11 @@ from reserving_workflow.contracts import (
     Run,
     RunEvent,
     is_terminal_run_status,
+)
+from reserving_workflow.runtime.adk_execution import (
+    AdkStartRequest,
+    request_fingerprint,
+    validate_adk_provenance,
 )
 
 from .contracts import (
@@ -86,6 +93,7 @@ class ReadOnlyControlPlaneClient:
             headers=client_headers,
             timeout=timeout,
             transport=transport,
+            trust_env=False,
         )
         self._max_response_bytes = max_response_bytes
         self._max_get_attempts = max_get_attempts
@@ -496,6 +504,129 @@ class ReadOnlyControlPlaneClient:
         return payload
 
 
+class AdkControlPlaneClient(ReadOnlyControlPlaneClient):
+    """Credential-bound client for the four Phase-3 ADK execution tools."""
+
+    def __init__(self, base_url: str, *, credential: str, **kwargs: Any) -> None:
+        if not isinstance(credential, str) or len(credential) < 8:
+            raise ValueError("ADK capability credential is not configured")
+        supplied_headers = dict(kwargs.pop("headers", {}) or {})
+        supplied_headers["Authorization"] = f"Bearer {credential}"
+        super().__init__(base_url, headers=supplied_headers, **kwargs)
+        self._confirmation_key = credential.encode("utf-8")
+
+    def start_workflow_run(
+        self,
+        *,
+        workflow_id: str,
+        case_id: str,
+        inputs: dict[str, Any],
+        adk_app: str,
+        adk_session_id: str,
+        adk_invocation_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        request = AdkStartRequest(
+            workflow_id=workflow_id,
+            case_id=case_id,
+            inputs=inputs,
+            adk_app=adk_app,
+            adk_session_id=adk_session_id,
+            adk_invocation_id=adk_invocation_id,
+        )
+        fingerprint = request_fingerprint(request)
+        confirmation = hmac.new(
+            self._confirmation_key,
+            f"{idempotency_key}:{fingerprint}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        payload = self._request_json(
+            "POST",
+            "/adk/runs",
+            headers={
+                "Idempotency-Key": idempotency_key,
+                "X-ADK-Confirmation": confirmation,
+            },
+            json=request.model_dump(mode="json", exclude_none=True),
+        )
+        required = {"run_id", "case_id", "status", "operation_id", "correlation_id"}
+        if required - payload.keys() or payload.get("status") not in {
+            "accepted", "queued", "running", "completed", "needs_review", "failed"
+        }:
+            raise ControlPlaneContractError(
+                code="invalid_contract",
+                message="Control plane returned an invalid response contract.",
+            )
+        return {key: payload[key] for key in required} | {
+            "idempotent_replay": bool(payload.get("idempotent_replay"))
+        }
+
+    def get_run_status(self, run_id: str) -> dict[str, Any]:
+        safe_run_id = _identifier(run_id, field_name="run_id")
+        payload = self._request_json("GET", f"/runs/{safe_run_id}")
+        envelope = self._validate_contract(RunEnvelope, payload)
+        projection = envelope.run.model_dump(mode="json", exclude_none=True)
+        raw_run = payload.get("run")
+        if not isinstance(raw_run, dict):
+            raise ControlPlaneContractError(
+                code="invalid_contract",
+                message="Control plane returned an invalid response contract.",
+            )
+        if raw_run.get("source") == "adk-developer":
+            try:
+                provenance = validate_adk_provenance(raw_run.get("provenance"))
+            except ValueError as exc:
+                raise ControlPlaneContractError(
+                    code="invalid_contract",
+                    message="Control plane returned an invalid response contract.",
+                ) from exc
+            projection["source"] = "adk-developer"
+            projection["provenance"] = provenance
+        recovery_state = raw_run.get("recovery_state")
+        if recovery_state is not None:
+            if recovery_state != "stale":
+                raise ControlPlaneContractError(
+                    code="invalid_contract",
+                    message="Control plane returned an invalid response contract.",
+                )
+            projection["recovery_state"] = recovery_state
+        return projection
+
+    def wait_run(
+        self,
+        *,
+        run_id: str,
+        timeout_seconds: float,
+        poll_interval_seconds: float,
+    ) -> dict[str, Any]:
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not 0 <= timeout_seconds <= 30
+            or isinstance(poll_interval_seconds, bool)
+            or not isinstance(poll_interval_seconds, (int, float))
+            or not 0.05 <= poll_interval_seconds <= 2
+        ):
+            raise ValueError("wait bounds are invalid")
+        deadline = time.monotonic() + float(timeout_seconds)
+        run = self.get_run_status(run_id)
+        while not is_terminal_run_status(str(run["status"])) and time.monotonic() < deadline:
+            time.sleep(min(float(poll_interval_seconds), max(0.0, deadline - time.monotonic())))
+            run = self.get_run_status(run_id)
+        status = str(run["status"])
+        result = {
+            "run_id": str(run["run_id"]),
+            "run_status": status,
+            "wait_outcome": "terminal" if is_terminal_run_status(status) else "poll_timeout",
+            "terminal": is_terminal_run_status(status),
+            "summary": run.get("summary"),
+        }
+        for key in ("source", "provenance", "recovery_state"):
+            if key in run:
+                result[key] = run[key]
+        return result
+
+
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-standard JSON constant: {value}")
 
@@ -563,4 +694,4 @@ def _review_state_is_coherent(
     return packet_status == "not_available"
 
 
-__all__ = ["ReadOnlyControlPlaneClient"]
+__all__ = ["AdkControlPlaneClient", "ReadOnlyControlPlaneClient"]

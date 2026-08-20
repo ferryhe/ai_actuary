@@ -15,6 +15,7 @@ from reserving_workflow.storage.safe_json import (
     PinnedJsonRoot,
     SafeJsonReadError,
 )
+from reserving_workflow.storage.registry_transactions import locked_registry_transaction
 
 
 DEFAULT_REGISTRY_PAYLOAD = {"runs": []}
@@ -68,6 +69,8 @@ class LocalRunStore:
         event_type: str | None = None,
         event_payload: dict[str, Any] | None = None,
         workflow_id: str | None = None,
+        source: str | None = None,
+        provenance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._upsert_run(
             task_id=task_id,
@@ -87,6 +90,8 @@ class LocalRunStore:
             event_type=event_type,
             event_payload=event_payload,
             workflow_id=workflow_id,
+            source=source,
+            provenance=provenance,
             create_if_missing=True,
             reject_existing=True,
         )
@@ -111,6 +116,8 @@ class LocalRunStore:
         event_type: str | None = None,
         event_payload: dict[str, Any] | None = None,
         workflow_id: str | None = None,
+        source: str | None = None,
+        provenance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._upsert_run(
             task_id=task_id,
@@ -130,6 +137,8 @@ class LocalRunStore:
             event_type=event_type,
             event_payload=event_payload,
             workflow_id=workflow_id,
+            source=source,
+            provenance=provenance,
             create_if_missing=False,
             reject_existing=False,
         )
@@ -152,6 +161,8 @@ class LocalRunStore:
             errors=list(entry.get("errors", []) or []),
             review_delivery=entry.get("review_delivery"),
             workflow_id=entry.get("workflow_id"),
+            source=entry.get("source"),
+            provenance=entry.get("provenance"),
         )
 
     def get_run(self, run_id: str) -> dict[str, Any]:
@@ -165,7 +176,11 @@ class LocalRunStore:
         runs = list(payload.get("runs", []))
         return sorted(runs, key=lambda item: item.get("updated_at", ""), reverse=True)
 
-    def _upsert_run(
+    def _upsert_run(self, **kwargs: Any) -> dict[str, Any]:
+        with locked_registry_transaction(self.registry_path):
+            return self._upsert_run_unlocked(**kwargs)
+
+    def _upsert_run_unlocked(
         self,
         *,
         task_id: str,
@@ -185,6 +200,8 @@ class LocalRunStore:
         event_type: str | None,
         event_payload: dict[str, Any] | None,
         workflow_id: str | None,
+        source: str | None,
+        provenance: dict[str, Any] | None,
         create_if_missing: bool,
         reject_existing: bool,
     ) -> dict[str, Any]:
@@ -220,6 +237,23 @@ class LocalRunStore:
         if entry is not None and reject_existing:
             raise ValueError(f"Run id already exists in registry: {run_id}")
 
+        existing_provenance = entry.get("provenance") if entry is not None else None
+        if existing_provenance is not None and provenance is not None:
+            if _to_serializable(existing_provenance) != _to_serializable(provenance):
+                raise ValueError("Run provenance is immutable")
+        resolved_provenance = provenance if provenance is not None else existing_provenance
+        if resolved_provenance is not None:
+            history_item["provenance"] = _to_serializable(resolved_provenance)
+        resolved_source = source
+        if resolved_source is None and isinstance(resolved_provenance, dict):
+            candidate_source = resolved_provenance.get("source")
+            if candidate_source is not None:
+                resolved_source = str(candidate_source)
+        if entry is not None and entry.get("source") is not None:
+            if resolved_source is not None and str(entry["source"]) != resolved_source:
+                raise ValueError("Run source is immutable")
+            resolved_source = str(entry["source"])
+
         if entry is None:
             if not create_if_missing:
                 raise RunNotFoundError(f"Run id not found in registry: {run_id}")
@@ -241,6 +275,8 @@ class LocalRunStore:
                 "review_delivery": _to_serializable(review_delivery),
                 "operator_params": _to_serializable(operator_params or {}),
                 "workflow_id": resolved_workflow_id,
+                "source": resolved_source,
+                "provenance": _to_serializable(resolved_provenance),
                 "status_history": [history_item],
             }
             runs.append(entry)
@@ -272,6 +308,10 @@ class LocalRunStore:
                 entry["operator_params"] = _to_serializable(operator_params)
             if resolved_workflow_id is not None:
                 entry["workflow_id"] = resolved_workflow_id
+            if resolved_source is not None:
+                entry["source"] = resolved_source
+            if resolved_provenance is not None:
+                entry["provenance"] = _to_serializable(resolved_provenance)
             entry.setdefault("status_history", []).append(history_item)
 
         _write_registry_payload(self.registry_path, payload)

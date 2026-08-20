@@ -783,6 +783,7 @@ __all__ = [
     "TrustedArtifactRoot",
     "build_artifact_projection",
     "project_artifact_projection",
+    "project_artifact_payload",
     "project_artifact_metadata",
     "project_event",
     "project_health",

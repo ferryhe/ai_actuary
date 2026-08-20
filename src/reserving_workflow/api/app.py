@@ -7,20 +7,36 @@ boundaries instead of introducing a second runtime implementation.
 from __future__ import annotations
 
 import math
+import hashlib
+import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from reserving_workflow import operator_entrypoint
+from reserving_workflow.api.capabilities import (
+    CapabilityAuthority,
+    Principal,
+    assert_route_matrix_complete,
+    object_in_scope,
+    route_policy_for_scope,
+)
 from reserving_workflow.adapters.control_plane.projections import (
     ARTIFACT_PROJECTION_SPECS,
     ArtifactProjectionReadError,
     TrustedArtifactRoot,
     build_artifact_projection,
+    project_artifact_payload,
+    project_review,
     provenance_for_artifact,
     read_bounded_json_object,
     stat_regular_artifact,
@@ -62,6 +78,20 @@ from reserving_workflow.storage.local import (
     ReviewRecordReadError,
 )
 from reserving_workflow.runtime import build_preflight_report, run_registry
+from reserving_workflow.runtime.adk_execution import (
+    ADK_SOURCE,
+    ADK_WORKSPACE_ID,
+    AdkStartRequest,
+    build_adk_provenance,
+    prepare_isolated_run_root,
+    request_fingerprint,
+    validate_adk_provenance,
+)
+from reserving_workflow.storage.safe_json import (
+    PinnedJsonRoot,
+    SafeJsonReadError,
+    write_json_object_exclusive,
+)
 from reserving_workflow.tools import build_builtin_tool_registry
 from reserving_workflow.validation import (
     ReservingValidationError,
@@ -80,6 +110,15 @@ MODEL_COMPARISON_TOOL_RUNNERS = {
 MAX_RESULT_ARTIFACT_BYTES = 1_000_000
 MAX_PROJECTED_RESULTS = 1_000
 UNAVAILABLE = "unavailable"
+ADK_STEP_JSON_ARTIFACTS = (
+    "validated_input.json",
+    "case_input.json",
+    "deterministic_result.json",
+    "narrative_draft.json",
+    "constitution_check.json",
+    "review_packet.json",
+    "run_manifest.json",
+)
 
 
 class ApiSettings(BaseModel):
@@ -89,6 +128,14 @@ class ApiSettings(BaseModel):
     artifact_root: str | Path = Field(default="./tmp/api-artifacts")
     review_delivery_dir: str | Path | None = None
     review_store_dir: str | Path = Field(default="./tmp/reviews")
+    adk_artifact_root: Path | None = None
+    operator_credential: str | None = None
+    adk_credential: str | None = None
+    operator_bootstrap_token: str | None = None
+    operator_origin: str = "http://127.0.0.1:8000"
+    capability_enforcement: bool | None = None
+    operator_session_ttl_seconds: float = Field(default=900.0, gt=0, le=3600.0)
+    operator_bootstrap_ttl_seconds: float = Field(default=60.0, gt=0, le=300.0)
 
 
 class RunCreateRequest(BaseModel):
@@ -134,7 +181,25 @@ class ReviewDecisionRequest(BaseModel):
     follow_up_run_id: str | None = None
 
 
-def create_app(
+class OperatorBootstrapRequest(BaseModel):
+    bootstrap_token: str = Field(min_length=8, max_length=256)
+
+
+class OperatorHandoffCreateRequest(BaseModel):
+    claim_token: str = Field(min_length=32, max_length=256)
+
+
+class OperatorHandoffApproveRequest(BaseModel):
+    handoff_id: str = Field(min_length=16, max_length=128)
+    bootstrap_token: str = Field(min_length=8, max_length=256)
+
+
+class OperatorHandoffClaimRequest(BaseModel):
+    handoff_id: str = Field(min_length=16, max_length=128)
+    claim_token: str = Field(min_length=32, max_length=256)
+
+
+def _create_app(
     *,
     settings: ApiSettings | None = None,
     runner_module=None,
@@ -156,7 +221,97 @@ def create_app(
     resolved_batch_runner_module = batch_runner_module
     resolved_tool_registry = tool_registry or build_builtin_tool_registry()
     resolved_workflow_catalog = workflow_catalog or build_builtin_workflow_catalog()
-    app = FastAPI(title="AI Actuary Control Plane", version="0.1.0")
+    operator_credential = resolved_settings.operator_credential or os.environ.get(
+        "AI_ACTUARY_OPERATOR_CREDENTIAL"
+    )
+    adk_credential = resolved_settings.adk_credential or os.environ.get(
+        "AI_ACTUARY_ADK_CREDENTIAL"
+    )
+    bootstrap_token = resolved_settings.operator_bootstrap_token or os.environ.get(
+        "AI_ACTUARY_OPERATOR_BOOTSTRAP_TOKEN"
+    )
+    operator_origin = (
+        resolved_settings.operator_origin
+        if settings is not None
+        else os.environ.get("AI_ACTUARY_OPERATOR_ORIGIN", resolved_settings.operator_origin)
+    )
+    supplied_secret_count = sum(
+        value is not None for value in (operator_credential, adk_credential, bootstrap_token)
+    )
+    if resolved_settings.capability_enforcement is False:
+        raise ValueError("Runtime capability enforcement cannot be disabled")
+    if supplied_secret_count != 3:
+        raise ValueError("All runtime capability credentials must be configured together")
+    enforcement_enabled = True
+    authority = CapabilityAuthority(
+        operator_credential=str(operator_credential),
+        adk_credential=str(adk_credential),
+        operator_bootstrap_token=str(bootstrap_token),
+        session_ttl_seconds=resolved_settings.operator_session_ttl_seconds,
+        bootstrap_ttl_seconds=resolved_settings.operator_bootstrap_ttl_seconds,
+    )
+    app = FastAPI(
+        title="AI Actuary Control Plane",
+        version="0.1.0",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
+    app.state.capability_authority = authority
+    app.state.capability_enforcement = enforcement_enabled
+    app.state.adk_artifact_root = (
+        resolved_settings.adk_artifact_root
+        or Path(resolved_settings.artifact_root).expanduser().absolute() / ADK_WORKSPACE_ID
+    )
+    if enforcement_enabled:
+        run_registry.mark_incomplete_adk_runs_stale(resolved_settings.registry_path)
+
+    @app.middleware("http")
+    async def _capability_middleware(request: Request, call_next):
+        request.state.principal = None
+        policy = route_policy_for_scope(
+            app,
+            method=request.method,
+            path=request.url.path,
+        )
+        if policy is None:
+            return await call_next(request)
+        if not enforcement_enabled:
+            return await call_next(request)
+
+        expected_origin = operator_origin.rstrip("/")
+        expected_host = urlsplit(expected_origin).netloc
+        is_mutation = request.method.upper() not in {"GET", "HEAD"}
+        if (is_mutation or request.url.path == "/console") and request.headers.get("host", "") != expected_host:
+            return _safe_auth_error(403, "request_context_forbidden", "Request context is not allowed.")
+        if policy.anonymous:
+            if is_mutation and request.headers.get("origin") != expected_origin:
+                return _safe_auth_error(403, "request_context_forbidden", "Request context is not allowed.")
+            return await call_next(request)
+
+        assert authority is not None
+        principal = authority.authenticate_bearer(request.headers.get("authorization"))
+        if principal is None:
+            principal = authority.authenticate_session(
+                request.cookies.get(authority.session_cookie_name)
+            )
+        if principal is None:
+            return _safe_auth_error(401, "authentication_required", "Authentication is required.")
+        if principal.capability_class not in policy.capabilities:
+            return _safe_auth_error(403, "capability_forbidden", "Capability is not allowed.")
+        if (
+            is_mutation
+            and principal.capability_class == "operator-console"
+            and request.headers.get("origin") != expected_origin
+        ):
+            return _safe_auth_error(403, "request_context_forbidden", "Request context is not allowed.")
+        if is_mutation and principal.transport == "session":
+            if not authority.session_csrf_matches(
+                principal.session_id, request.headers.get("x-csrf-token")
+            ):
+                return _safe_auth_error(403, "csrf_forbidden", "CSRF validation failed.")
+        request.state.principal = principal
+        return await call_next(request)
 
     @app.exception_handler(ReviewIdentityMismatchError)
     async def _review_identity_mismatch_handler(
@@ -194,6 +349,80 @@ def create_app(
         except OSError as exc:  # pragma: no cover - exercised through API surface
             raise HTTPException(status_code=503, detail="Review store unavailable.") from exc
 
+    def _get_scoped_entry(request: Request, run_id: str) -> dict[str, Any]:
+        try:
+            entry, authoritative_adk = run_registry.get_run_scope_record(
+                resolved_settings.registry_path, run_id
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "object_not_found", "message": "Object was not found."},
+            ) from exc
+        principal = getattr(request.state, "principal", None)
+        scope_entry = entry
+        if authoritative_adk:
+            scope_entry = {
+                **entry,
+                "workspace_id": "adk-development",
+                "source": "adk-developer",
+            }
+        if isinstance(principal, Principal) and not object_in_scope(
+            principal, scope_entry
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "object_not_found", "message": "Object was not found."},
+            )
+        authoritative_adk_runs = _audit_adk_registry()
+        _validate_adk_entry_provenance(
+            entry, authoritative_adk=run_id in authoritative_adk_runs
+        )
+        return entry
+
+    def _audit_adk_registry() -> set[str]:
+        try:
+            return run_registry.audit_adk_registry(resolved_settings.registry_path)
+        except run_registry.RegistryIntegrityError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": "ADK registry integrity is invalid."},
+            ) from exc
+
+    def _validate_adk_entry_provenance(
+        entry: dict[str, Any], *, authoritative_adk: bool
+    ) -> None:
+        if authoritative_adk:
+            try:
+                if entry.get("source") != ADK_SOURCE:
+                    raise ValueError("adk_source_invalid")
+                provenance = validate_adk_provenance(entry.get("provenance"))
+                if provenance.get("source") != entry.get("source"):
+                    raise ValueError("adk_source_invalid")
+                manifest = read_bounded_json_object(
+                    entry.get("artifact_root"),
+                    "run_manifest.json",
+                    namespace="manifest",
+                )
+                persisted_manifest_provenance = {
+                    key: manifest.get(key)
+                    for key in provenance
+                }
+                validate_adk_provenance(persisted_manifest_provenance)
+                if persisted_manifest_provenance != provenance:
+                    raise ValueError("adk_provenance_mismatch")
+            except (ArtifactProjectionReadError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "adk_provenance_invalid", "message": "Run provenance is invalid."},
+                ) from exc
+
+    def _trusted_list_scope(request: Request) -> tuple[str | None, str | None, str | None]:
+        principal = getattr(request.state, "principal", None)
+        if not isinstance(principal, Principal):
+            return None, None, None
+        return principal.operator_id, principal.workspace_id, principal.source
+
     @app.get("/health")
     async def health() -> dict[str, Any]:
         return {"ok": True, "service": "ai-actuary-control-plane"}
@@ -214,9 +443,117 @@ def create_app(
         )
 
     @app.get("/console", response_class=HTMLResponse)
-    async def operator_console() -> str:
-        return load_operator_console_html()
+    async def operator_console() -> HTMLResponse:
+        console_html = load_operator_console_html()
+        if authority is not None:
+            console_html = _inject_console_csrf_transport(console_html)
+        return HTMLResponse(console_html)
 
+    @app.post("/auth/operator/bootstrap")
+    async def operator_bootstrap(request: OperatorBootstrapRequest) -> JSONResponse:
+        if authority is None:
+            raise HTTPException(status_code=404, detail="Bootstrap is not configured.")
+        try:
+            session_id, csrf_token, max_age = authority.exchange_bootstrap(
+                request.bootstrap_token
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "bootstrap_invalid", "message": "Bootstrap was not accepted."},
+            ) from exc
+        response = JSONResponse(
+            content={"ok": True, "csrf_token": csrf_token, "expires_in": max_age}
+        )
+        _set_operator_session_cookies(
+            response,
+            authority=authority,
+            session_id=session_id,
+            csrf_token=csrf_token,
+            max_age=max_age,
+        )
+        return response
+
+    @app.post("/auth/operator/handoff/request")
+    async def operator_handoff_request(
+        request: OperatorHandoffCreateRequest,
+    ) -> dict[str, Any]:
+        assert authority is not None
+        try:
+            handoff_id, expires_in = authority.create_bootstrap_handoff(
+                request.claim_token
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "bootstrap_invalid", "message": "Bootstrap was not accepted."},
+            ) from exc
+        return {
+            "ok": True,
+            "handoff_id": handoff_id,
+            "expires_in": expires_in,
+        }
+
+    @app.post("/auth/operator/handoff/approve")
+    async def operator_handoff_approve(
+        request: OperatorHandoffApproveRequest,
+    ) -> dict[str, bool]:
+        assert authority is not None
+        try:
+            authority.approve_bootstrap_handoff(
+                request.bootstrap_token,
+                request.handoff_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "bootstrap_invalid", "message": "Bootstrap was not accepted."},
+            ) from exc
+        return {"ok": True}
+
+    @app.post("/auth/operator/handoff/claim")
+    async def operator_handoff_claim(
+        request: OperatorHandoffClaimRequest,
+    ) -> JSONResponse:
+        assert authority is not None
+        try:
+            session_id, csrf_token, max_age = authority.claim_bootstrap_handoff(
+                request.handoff_id,
+                request.claim_token,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "bootstrap_invalid", "message": "Bootstrap was not accepted."},
+            ) from exc
+        response = JSONResponse(
+            content={"ok": True, "csrf_token": csrf_token, "expires_in": max_age}
+        )
+        _set_operator_session_cookies(
+            response,
+            authority=authority,
+            session_id=session_id,
+            csrf_token=csrf_token,
+            max_age=max_age,
+        )
+        return response
+
+    @app.exception_handler(RequestValidationError)
+    async def _request_validation_handler(
+        request: Request,
+        exc: RequestValidationError,
+    ) -> JSONResponse:
+        if enforcement_enabled:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": {
+                        "code": "request_invalid",
+                        "message": "Request failed validation.",
+                    }
+                },
+            )
+        return await request_validation_exception_handler(request, exc)
     @app.get("/console/state")
     async def operator_console_state(
         request: Request,
@@ -231,6 +568,9 @@ def create_app(
             fallback_to_defaults=True,
         )
         all_runs = run_registry.list_runs(resolved_settings.registry_path)
+        principal = getattr(request.state, "principal", None)
+        if isinstance(principal, Principal):
+            all_runs = [entry for entry in all_runs if object_in_scope(principal, entry)]
         runs = _filter_run_entries(
             all_runs,
             operator_id=current_identity["operator_id"],
@@ -388,20 +728,53 @@ def create_app(
 
     @app.get("/runs")
     async def list_runs(request: Request, operator_id: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
-        runs = _filter_run_entries(
-            run_registry.list_runs(resolved_settings.registry_path),
-            operator_id=_normalize_identity_filter(operator_id, request=request, header_name="x-operator-id"),
-            workspace_id=_normalize_identity_filter(workspace_id, request=request, header_name="x-workspace-id"),
+        authoritative_adk_runs = _audit_adk_registry()
+        trusted_operator, trusted_workspace, trusted_source = _trusted_list_scope(request)
+        requested_operator = _normalize_identity_filter(
+            operator_id, request=request, header_name="x-operator-id"
         )
+        requested_workspace = _normalize_identity_filter(
+            workspace_id, request=request, header_name="x-workspace-id"
+        )
+        filters_are_in_scope = (
+            trusted_operator is None
+            or requested_operator is None
+            or requested_operator == trusted_operator
+        ) and (
+            trusted_workspace is None
+            or requested_workspace is None
+            or requested_workspace == trusted_workspace
+        )
+        runs = (
+            _filter_run_entries(
+                run_registry.list_runs(resolved_settings.registry_path),
+                operator_id=trusted_operator or requested_operator,
+                workspace_id=trusted_workspace or requested_workspace,
+            )
+            if filters_are_in_scope
+            else []
+        )
+        if trusted_source is not None:
+            runs = [entry for entry in runs if object_in_scope(request.state.principal, entry)]
+        if trusted_source == ADK_SOURCE:
+            for entry in runs:
+                _validate_adk_entry_provenance(
+                    entry,
+                    authoritative_adk=str(entry.get("run_id")) in authoritative_adk_runs,
+                )
+        summaries = [_run_summary(entry) for entry in runs]
+        if trusted_source == ADK_SOURCE:
+            summaries = [_path_free_run_payload(item) for item in summaries]
         return {
-            "registry_path": str(Path(resolved_settings.registry_path)),
             "run_count": len(runs),
-            "runs": [_run_summary(entry) for entry in runs],
+            "runs": summaries,
         }
 
     @app.get("/runs/{run_id}")
-    async def get_run_detail(run_id: str) -> dict[str, Any]:
-        entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+    async def get_run_detail(run_id: str, request: Request) -> dict[str, Any]:
+        entry = _get_scoped_entry(request, run_id)
+        if getattr(request.state, "principal", None) is not None and request.state.principal.source == ADK_SOURCE:
+            return {"run": _path_free_run_payload(_run_summary(entry))}
         artifact_root = entry.get("artifact_root")
         if artifact_root:
             with TrustedArtifactRoot(artifact_root, namespace="manifest") as trusted_root:
@@ -409,14 +782,14 @@ def create_app(
         return _run_detail_payload(entry)
 
     @app.get("/runs/{run_id}/events")
-    async def get_run_events(run_id: str) -> dict[str, Any]:
-        entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+    async def get_run_events(run_id: str, request: Request) -> dict[str, Any]:
+        entry = _get_scoped_entry(request, run_id)
         events = [_event_from_history(run_id, item) for item in entry.get("status_history", [])]
         return {"run_id": run_id, "event_count": len(events), "events": events}
 
     @app.post("/runs/{run_id}/rerun")
-    def rerun(run_id: str, request: RerunRequest) -> dict[str, Any]:
-        entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+    def rerun(run_id: str, request: RerunRequest, http_request: Request) -> dict[str, Any]:
+        entry = _get_scoped_entry(http_request, run_id)
         operator_params = dict(entry.get("operator_params", {}) or {})
         if operator_params.get("workflow_id"):
             operator_params["artifact_dir"] = str(request.artifact_dir or entry.get("artifact_root") or _default_artifact_dir(resolved_settings, str(entry.get("case_id") or "case")))
@@ -470,16 +843,19 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/runs/{run_id}/artifacts")
-    async def get_artifacts(run_id: str) -> dict[str, Any]:
-        entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+    async def get_artifacts(run_id: str, request: Request) -> dict[str, Any]:
+        entry = _get_scoped_entry(request, run_id)
         artifact_root = entry.get("artifact_root")
         if artifact_root:
             with TrustedArtifactRoot(artifact_root, namespace="manifest") as trusted_root:
-                return _run_artifact_metadata_payload(entry, trusted_root=trusted_root)
-        return _run_artifact_metadata_payload(entry)
+                payload = _run_artifact_metadata_payload(entry, trusted_root=trusted_root)
+                principal = getattr(request.state, "principal", None)
+                return _path_free_artifact_payload(payload) if isinstance(principal, Principal) and principal.source == ADK_SOURCE else payload
+        payload = _run_artifact_metadata_payload(entry)
+        return _path_free_artifact_payload(payload) if getattr(request.state, "principal", None) is not None and request.state.principal.source == ADK_SOURCE else payload
 
     @app.get("/runs/{run_id}/artifacts/{artifact_id}/projection")
-    async def get_artifact_projection(run_id: str, artifact_id: str) -> dict[str, Any]:
+    async def get_artifact_projection(run_id: str, artifact_id: str, request: Request) -> dict[str, Any]:
         if artifact_id not in ARTIFACT_PROJECTION_SPECS:
             raise HTTPException(
                 status_code=400,
@@ -489,7 +865,7 @@ def create_app(
                 },
             )
         try:
-            entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+            entry = _get_scoped_entry(request, run_id)
         except HTTPException as exc:
             if exc.status_code != 404:
                 raise
@@ -506,18 +882,31 @@ def create_app(
             ) from exc
 
     @app.get("/runs/{run_id}/results")
-    async def get_results(run_id: str) -> dict[str, Any]:
-        entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+    async def get_results(run_id: str, request: Request) -> dict[str, Any]:
+        entry = _get_scoped_entry(request, run_id)
         return _result_panel_projection(entry)
 
     @app.get("/runs/{run_id}/review-packet")
-    async def get_review_packet(run_id: str) -> dict[str, Any]:
-        entry = _get_registry_entry(resolved_settings.registry_path, run_id)
-        return _load_review_packet_for_entry(entry)
+    async def get_review_packet(run_id: str, request: Request) -> dict[str, Any]:
+        entry = _get_scoped_entry(request, run_id)
+        payload = _load_review_packet_for_entry(entry)
+        principal = getattr(request.state, "principal", None)
+        if not isinstance(principal, Principal) or principal.source != ADK_SOURCE:
+            return payload
+        packet = payload.get("packet")
+        return {
+            "present": bool(payload.get("present")),
+            "run_id": payload.get("run_id"),
+            "packet": (
+                project_artifact_payload("review_packet", packet)
+                if isinstance(packet, dict)
+                else None
+            ),
+        }
 
     @app.get("/runs/{run_id}/review")
-    async def get_run_review(run_id: str) -> dict[str, Any]:
-        entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+    async def get_run_review(run_id: str, request: Request) -> dict[str, Any]:
+        entry = _get_scoped_entry(request, run_id)
         artifact_root = entry.get("artifact_root")
         review_store = _get_review_store()
         with review_store.pinned_reads():
@@ -526,24 +915,26 @@ def create_app(
                     artifact_root,
                     namespace="review_packet",
                 ) as trusted_root:
-                    return {
-                        "review": _review_payload_for_run(
-                            entry,
-                            review_store=review_store,
-                            review_store_root=resolved_settings.review_store_dir,
-                            trusted_root=trusted_root,
-                        )
-                    }
-            return {
-                "review": _review_payload_for_run(
+                    review = _review_payload_for_run(
+                        entry,
+                        review_store=review_store,
+                        review_store_root=resolved_settings.review_store_dir,
+                        trusted_root=trusted_root,
+                    )
+            else:
+                review = _review_payload_for_run(
                     entry,
                     review_store=review_store,
                     review_store_root=resolved_settings.review_store_dir,
                 )
-            }
+        principal = getattr(request.state, "principal", None)
+        if isinstance(principal, Principal) and principal.source == ADK_SOURCE:
+            review = project_review(Review.model_validate(review))
+        return {"review": review}
 
     @app.post("/runs/{run_id}/report-export")
-    async def create_run_report_export(run_id: str) -> dict[str, Any]:
+    async def create_run_report_export(run_id: str, request: Request) -> dict[str, Any]:
+        _get_scoped_entry(request, run_id)
         try:
             report = export_run_report(
                 registry_path=resolved_settings.registry_path,
@@ -556,24 +947,58 @@ def create_app(
 
     @app.get("/reviews")
     async def list_reviews(request: Request, operator_id: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
+        authoritative_adk_runs = _audit_adk_registry()
+        trusted_operator, trusted_workspace, trusted_source = _trusted_list_scope(request)
+        requested_operator = _normalize_identity_filter(
+            operator_id, request=request, header_name="x-operator-id"
+        )
+        requested_workspace = _normalize_identity_filter(
+            workspace_id, request=request, header_name="x-workspace-id"
+        )
+        filters_are_in_scope = (
+            trusted_operator is None
+            or requested_operator is None
+            or requested_operator == trusted_operator
+        ) and (
+            trusted_workspace is None
+            or requested_workspace is None
+            or requested_workspace == trusted_workspace
+        )
+        if trusted_source == ADK_SOURCE:
+            for entry in run_registry.list_runs(resolved_settings.registry_path):
+                if object_in_scope(request.state.principal, entry):
+                    _validate_adk_entry_provenance(
+                        entry,
+                        authoritative_adk=(
+                            str(entry.get("run_id")) in authoritative_adk_runs
+                        ),
+                    )
         review_store = _get_review_store()
         with review_store.pinned_reads():
-            reviews = _list_review_payloads(
-                registry_path=resolved_settings.registry_path,
-                review_store=review_store,
-                review_store_root=resolved_settings.review_store_dir,
-                operator_id=_normalize_identity_filter(operator_id, request=request, header_name="x-operator-id"),
-                workspace_id=_normalize_identity_filter(workspace_id, request=request, header_name="x-workspace-id"),
+            reviews = (
+                _list_review_payloads(
+                    registry_path=resolved_settings.registry_path,
+                    review_store=review_store,
+                    review_store_root=resolved_settings.review_store_dir,
+                    principal=request.state.principal,
+                    operator_id=trusted_operator or requested_operator,
+                    workspace_id=trusted_workspace or requested_workspace,
+                )
+                if filters_are_in_scope
+                else []
             )
         return {"review_count": len(reviews), "reviews": reviews}
 
     @app.get("/reviews/{review_id}")
-    async def get_review(review_id: str) -> dict[str, Any]:
+    async def get_review(review_id: str, request: Request) -> dict[str, Any]:
         run_id = _run_id_from_review_id(review_id)
         if run_id is None:
-            raise HTTPException(status_code=404, detail="Review not found.")
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "object_not_found", "message": "Object was not found."},
+            )
         review_store = _get_review_store()
-        run_entry = _get_registry_entry(resolved_settings.registry_path, run_id)
+        run_entry = _get_scoped_entry(request, run_id)
         artifact_root = run_entry.get("artifact_root")
         with review_store.pinned_reads():
             if artifact_root:
@@ -595,10 +1020,20 @@ def create_app(
                 )
         if review.get("review_id") != review_id:
             raise HTTPException(status_code=404, detail="Review not found.")
+        principal = getattr(request.state, "principal", None)
+        if isinstance(principal, Principal) and principal.source == ADK_SOURCE:
+            review = project_review(Review.model_validate(review))
         return {"review": review}
 
     @app.post("/reviews/{review_id}/decision")
-    async def submit_review_decision(review_id: str, request: ReviewDecisionRequest) -> dict[str, Any]:
+    async def submit_review_decision(review_id: str, request: ReviewDecisionRequest, http_request: Request) -> dict[str, Any]:
+        run_id = _run_id_from_review_id(review_id)
+        if run_id is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "object_not_found", "message": "Object was not found."},
+            )
+        run_entry = _get_scoped_entry(http_request, run_id)
         try:
             decision_contract = ReviewDecision(
                 review_id=review_id,
@@ -623,10 +1058,6 @@ def create_app(
             if review_record is None:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
         try:
-            run_id = _run_id_from_review_id(review_id)
-            if run_id is None:
-                raise HTTPException(status_code=404, detail="Review not found.")
-            run_entry = _get_registry_entry(resolved_settings.registry_path, run_id)
             bound_review_record = bind_review_record_identity(review_record, run_entry=run_entry)
             decision_record = review_store.submit_decision(
                 review_id=review_id,
@@ -655,6 +1086,134 @@ def create_app(
         )
         return {"review": review, "decision": decision_record, "run_status": run_entry.get("status")}
 
+    @app.post("/adk/runs")
+    def start_adk_workflow_run(
+        request: AdkStartRequest,
+        http_request: Request,
+        background_tasks: BackgroundTasks,
+    ) -> JSONResponse:
+        if authority is None:
+            raise HTTPException(status_code=503, detail="ADK execution is not configured.")
+        idempotency_key = http_request.headers.get("idempotency-key")
+        confirmation = http_request.headers.get("x-adk-confirmation")
+        if not idempotency_key:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "idempotency_key_required", "message": "Idempotency key is required."},
+            )
+        fingerprint = request_fingerprint(request)
+        if not authority.verify_adk_confirmation(
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+            candidate=confirmation,
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "confirmation_invalid", "message": "Confirmation binding is invalid."},
+            )
+        try:
+            workflow_entry = resolved_workflow_catalog.get_workflow(request.workflow_id)
+            if not workflow_entry.builtin:
+                raise ValueError("Workflow is not published for ADK execution")
+            if request.parent_run_id is not None:
+                _get_scoped_entry(http_request, request.parent_run_id)
+            adk_root = Path(app.state.adk_artifact_root).expanduser().absolute()
+            run_id = f"adk-{uuid4_hex()}"
+            operation_id = f"op_{uuid4_hex()}"
+            artifact_dir = adk_root / run_id
+            run_request = RunCreateRequest(
+                case_id=request.case_id,
+                workflow_id=request.workflow_id,
+                inputs=dict(request.inputs),
+                background=True,
+            )
+            operator_params = _workflow_operator_params_from_request(
+                run_request,
+                workflow_entry=workflow_entry,
+                artifact_dir=artifact_dir,
+                review_delivery_dir=None,
+                registry_path=resolved_settings.registry_path,
+                ownership={
+                    "created_by": "adk-developer",
+                    "operator_id": "adk-developer",
+                    "workspace_id": ADK_WORKSPACE_ID,
+                },
+                runner_module=runner_module,
+                task_contracts_module=task_contracts_module,
+                tool_registry=resolved_tool_registry,
+            )
+            provenance = build_adk_provenance(request, workflow_entry=workflow_entry)
+            entry, created = run_registry.accept_adk_run(
+                registry_path=resolved_settings.registry_path,
+                idempotency_key=idempotency_key,
+                request_fingerprint=fingerprint,
+                confirmation_grant_digest=hashlib.sha256(str(confirmation).encode("utf-8")).hexdigest(),
+                run_id=run_id,
+                operation_id=operation_id,
+                task_id=f"adk-{request.case_id}",
+                case_id=request.case_id,
+                artifact_root=str(artifact_dir),
+                workflow_id=request.workflow_id,
+                provenance=provenance,
+            )
+        except run_registry.IdempotencyConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": "Start request conflicts with a persisted binding."},
+            ) from exc
+        except run_registry.RegistryIntegrityError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": "ADK registry integrity is invalid."},
+            ) from exc
+        except (ValidationError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "adk_start_invalid", "message": "ADK start request is invalid."},
+            ) from exc
+
+        if created:
+            operator_params["run_id"] = str(entry["run_id"])
+            operator_params["provenance"] = provenance
+            try:
+                isolated_root = prepare_isolated_run_root(adk_root, str(entry["run_id"]))
+                _write_initial_adk_manifest(
+                    isolated_root,
+                    entry=entry,
+                    provenance=provenance,
+                )
+                scheduler = background_task_runner or background_tasks.add_task
+                scheduler(_run_workflow_background, operator_params)
+            except Exception as exc:
+                _record_run_failure(operator_params, exc, execution_mode="background")
+        return JSONResponse(
+            status_code=202,
+            content={
+                "ok": True,
+                "status": str(entry.get("status")),
+                "run_id": str(entry.get("run_id")),
+                "operation_id": str(entry.get("operation_id")),
+                "case_id": str(entry.get("case_id")),
+                "correlation_id": str((entry.get("provenance") or {}).get("correlation_id")),
+                "idempotent_replay": not created,
+            },
+        )
+
+    @app.exception_handler(run_registry.RegistryIntegrityError)
+    async def _registry_integrity_handler(
+        _request: Request,
+        exc: run_registry.RegistryIntegrityError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": {
+                    "code": exc.code,
+                    "message": "ADK registry integrity is invalid.",
+                }
+            },
+        )
+
     @app.post("/replay")
     async def replay_case(request: ReplayRequest) -> dict[str, Any]:
         try:
@@ -677,7 +1236,167 @@ def create_app(
         artifact_root = request.artifact_root or (Path(resolved_settings.artifact_root).expanduser().resolve() / "batch")
         return resolved_batch_runner_module.run_batch_benchmark(cases=request.cases, artifact_root=artifact_root)
 
+    assert_route_matrix_complete(app)
     return app
+
+
+def create_app(**kwargs: Any) -> FastAPI:
+    """Create a deployable fail-closed control-plane application."""
+
+    return _create_app(**kwargs)
+
+
+def _safe_auth_error(status_code: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": {"code": code, "message": message}},
+        headers={"WWW-Authenticate": "Bearer"} if status_code == 401 else None,
+    )
+
+
+def _set_operator_session_cookies(
+    response: JSONResponse | HTMLResponse,
+    *,
+    authority: CapabilityAuthority,
+    session_id: str,
+    csrf_token: str,
+    max_age: int,
+) -> None:
+    response.set_cookie(
+        key=authority.session_cookie_name,
+        value=session_id,
+        max_age=max_age,
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+    response.set_cookie(
+        key="ai_actuary_csrf",
+        value=csrf_token,
+        max_age=max_age,
+        httponly=False,
+        samesite="strict",
+        path="/",
+    )
+
+
+def _inject_console_csrf_transport(html: str) -> str:
+    script = """<script>
+    (() => {
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = (url, options = {}) => {
+        const request = { ...options, headers: { ...(options.headers || {}) } };
+        const method = String(request.method || "GET").toUpperCase();
+        if (!(method === "GET" || method === "HEAD")) {
+          const prefix = "ai_actuary_csrf=";
+          const cookie = document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith(prefix));
+          request.headers["X-CSRF-Token"] = cookie ? decodeURIComponent(cookie.slice(prefix.length)) : "";
+        }
+        return nativeFetch(url, request);
+      };
+      window.addEventListener("DOMContentLoaded", () => {
+        if (document.cookie.includes("ai_actuary_csrf=")) return;
+        const panel = document.createElement("div");
+        panel.setAttribute("role", "status");
+        panel.style.cssText = "position:fixed;right:1rem;bottom:1rem;z-index:9999;max-width:28rem;padding:1rem;background:#102235;color:#fff;border-radius:.5rem";
+        const message = document.createElement("div");
+        message.textContent = "Operator session is locked. Request a one-time launcher handoff.";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "Request launcher handoff";
+        button.style.cssText = "margin-top:.75rem;padding:.5rem";
+        panel.append(message, button);
+        document.body.append(panel);
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          const bytes = new Uint8Array(32);
+          crypto.getRandomValues(bytes);
+          const claimToken = btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+          const requested = await nativeFetch("/auth/operator/handoff/request", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ claim_token: claimToken }),
+          });
+          if (!requested.ok) {
+            message.textContent = "A launcher handoff is unavailable.";
+            return;
+          }
+          const handoff = await requested.json();
+          message.textContent = `Enter this handoff ID in the launcher: ${handoff.handoff_id}`;
+          const deadline = Date.now() + (handoff.expires_in * 1000);
+          while (Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            const claimed = await nativeFetch("/auth/operator/handoff/claim", {
+              method: "POST",
+              credentials: "same-origin",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ handoff_id: handoff.handoff_id, claim_token: claimToken }),
+            });
+            if (claimed.ok) {
+              window.location.reload();
+              return;
+            }
+          }
+          message.textContent = "The launcher handoff expired. Request a new workbench session.";
+        });
+      });
+    })();
+  </script>
+  """
+    marker = "<script>"
+    if marker not in html:
+        raise RuntimeError("Operator Console script marker is missing")
+    return html.replace(marker, script + marker, 1)
+
+
+def uuid4_hex() -> str:
+    return uuid.uuid4().hex
+
+
+def _write_initial_adk_manifest(
+    artifact_root: Path,
+    *,
+    entry: dict[str, Any],
+    provenance: dict[str, Any],
+) -> Path:
+    payload = {
+        "case_id": entry.get("case_id"),
+        "run_id": entry.get("run_id"),
+        "workflow_id": entry.get("workflow_id"),
+        "artifact_paths": {"run_manifest": "run_manifest.json"},
+        **dict(provenance),
+    }
+    write_json_object_exclusive(
+        artifact_root,
+        "run_manifest.json",
+        payload,
+        namespace="manifest",
+    )
+    return artifact_root / "run_manifest.json"
+
+
+def _path_free_run_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    safe = dict(payload)
+    safe.pop("artifact_root", None)
+    return safe
+
+
+def _path_free_artifact_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    safe = {"run_id": payload.get("run_id")}
+    artifacts: list[dict[str, Any]] = []
+    for artifact in payload.get("artifacts", []) or []:
+        if not isinstance(artifact, dict):
+            continue
+        artifacts.append(
+            {
+                key: value
+                for key, value in artifact.items()
+                if key not in {"path", "absolute_path", "artifact_root"}
+            }
+        )
+    safe["artifacts"] = artifacts
+    return safe
 
 
 def _default_artifact_dir(settings: ApiSettings, case_id: str) -> Path:
@@ -935,7 +1654,13 @@ def _record_run_failure(
     run_id = operator_params.get("run_id") or _generate_api_run_id(str(case_id or "case"))
     default_failure_dir = f"./tmp/api-artifacts/{execution_mode}-failed"
     artifact_dir = operator_params.get("artifact_dir") or default_failure_dir
-    artifact_root = Path(artifact_dir).expanduser().resolve()
+    provenance = operator_params.get("provenance")
+    is_adk = isinstance(provenance, dict) and provenance.get("source") == ADK_SOURCE
+    artifact_root = (
+        Path(os.path.abspath(os.path.expanduser(str(artifact_dir))))
+        if is_adk
+        else Path(artifact_dir).expanduser().resolve()
+    )
     if operator_params.get("tool_id") in MODEL_COMPARISON_TOOL_RUNNERS:
         artifact_root = (artifact_root / str(run_id)).resolve()
     execution_label = execution_mode.capitalize()
@@ -952,7 +1677,9 @@ def _record_run_failure(
         workspace_id=operator_params.get("workspace_id"),
         review_required=False,
         error_category=f"{execution_mode}_runtime",
-        errors=[str(exc)],
+        errors=["ADK workflow execution failed."] if is_adk else [str(exc)],
+        source=ADK_SOURCE if is_adk else None,
+        provenance=provenance if isinstance(provenance, dict) else None,
     )
 
 
@@ -984,6 +1711,22 @@ def _resolve_current_identity(
     request: Request,
     fallback_to_defaults: bool,
 ) -> dict[str, str]:
+    principal = getattr(request.state, "principal", None)
+    if isinstance(principal, Principal):
+        requested_operator = _normalize_identity_value(operator_id)
+        requested_workspace = _normalize_identity_value(workspace_id)
+        return {
+            "operator_id": (
+                requested_operator
+                if requested_operator == principal.operator_id
+                else principal.operator_id
+            ),
+            "workspace_id": (
+                requested_workspace
+                if requested_workspace == principal.workspace_id
+                else principal.workspace_id
+            ),
+        }
     resolved_operator_id = _normalize_identity_filter(operator_id, request=request, header_name="x-operator-id")
     resolved_workspace_id = _normalize_identity_filter(workspace_id, request=request, header_name="x-workspace-id")
     if fallback_to_defaults:
@@ -996,6 +1739,13 @@ def _resolve_current_identity(
 
 
 def _resolve_request_ownership(request: RunCreateRequest, http_request: Request) -> dict[str, str]:
+    principal = getattr(http_request.state, "principal", None)
+    if isinstance(principal, Principal):
+        return {
+            "created_by": principal.operator_id,
+            "operator_id": principal.operator_id,
+            "workspace_id": principal.workspace_id,
+        }
     operator_id = _normalize_identity_value(request.operator_id) or _normalize_identity_value(
         http_request.headers.get("x-operator-id")
     ) or DEFAULT_OPERATOR_ID
@@ -1097,7 +1847,30 @@ def _normalize_tool_invocation(request: RunCreateRequest, *, tool_registry) -> V
     raise ValueError(f"Unknown tool_id: {tool_invocation.tool_id}")
 
 
-def _run_sequential_workflow(
+def _run_sequential_workflow(**operator_params: Any) -> dict[str, Any]:
+    provenance = operator_params.get("provenance")
+    if not isinstance(provenance, dict) or provenance.get("source") != ADK_SOURCE:
+        return _run_sequential_workflow_impl(**operator_params)
+
+    registered_root = Path(
+        os.path.abspath(os.path.expanduser(str(operator_params["artifact_dir"])))
+    )
+    with PinnedJsonRoot(
+        registered_root,
+        namespace="artifact",
+        allow_nested=True,
+        protect_writes=True,
+    ) as pinned_root:
+        pinned_params = dict(operator_params)
+        pinned_params["artifact_dir"] = pinned_root.execution_path()
+        pinned_params["_registered_artifact_root"] = registered_root
+        pinned_params["_pinned_adk_root"] = pinned_root
+        result = _run_sequential_workflow_impl(**pinned_params)
+        pinned_root.verify_configured_root_identity(namespace="artifact")
+        return result
+
+
+def _run_sequential_workflow_impl(
     *,
     case_id: str,
     artifact_dir: str | Path,
@@ -1115,14 +1888,25 @@ def _run_sequential_workflow(
     tool_registry=None,
     workflow_entry=None,
     workflow_inputs: dict[str, Any] | None = None,
+    provenance: dict[str, Any] | None = None,
+    _registered_artifact_root: str | Path | None = None,
+    _pinned_adk_root: PinnedJsonRoot | None = None,
 ) -> dict[str, Any]:
     if workflow_entry is None:
         workflow_catalog = build_builtin_workflow_catalog()
         workflow_entry = workflow_catalog.get_workflow(workflow_id)
     if tool_registry is None:
         tool_registry = build_builtin_tool_registry()
-    artifact_root = Path(artifact_dir).expanduser().resolve()
-    artifact_root.mkdir(parents=True, exist_ok=True)
+    is_adk_run = isinstance(provenance, dict) and provenance.get("source") == ADK_SOURCE
+    if is_adk_run:
+        if _registered_artifact_root is None or _pinned_adk_root is None:
+            raise ValueError("ADK workflow storage root is not pinned.")
+        artifact_root = Path(artifact_dir)
+        registered_artifact_root = Path(_registered_artifact_root)
+    else:
+        artifact_root = Path(artifact_dir).expanduser().resolve()
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        registered_artifact_root = artifact_root
     parent_run_id = run_id or _generate_api_run_id(case_id)
     task_id = f"operator-{case_id}"
     workflow_steps: list[dict[str, Any]] = []
@@ -1139,7 +1923,7 @@ def _run_sequential_workflow(
         case_id=case_id,
         run_id=parent_run_id,
         status="queued",
-        artifact_root=str(artifact_root),
+        artifact_root=str(registered_artifact_root),
         summary=f"Queued workflow run for {case_id}",
         workflow_id=workflow_id,
         operator_params={
@@ -1161,7 +1945,7 @@ def _run_sequential_workflow(
         case_id=case_id,
         run_id=parent_run_id,
         status="running",
-        artifact_root=str(artifact_root),
+        artifact_root=str(registered_artifact_root),
         summary=f"Running workflow run for {case_id}",
         workflow_id=workflow_id,
         operator_params={
@@ -1182,7 +1966,7 @@ def _run_sequential_workflow(
         task_id=task_id,
         case_id=case_id,
         run_id=parent_run_id,
-        artifact_root=artifact_root,
+        artifact_root=registered_artifact_root,
         status="running",
         summary=f"Workflow {workflow_id} started for {case_id}",
         workflow_id=workflow_id,
@@ -1200,6 +1984,12 @@ def _run_sequential_workflow(
         )
         step_inputs = _normalize_tool_invocation(step_request, tool_registry=tool_registry)
         step_artifact_dir = artifact_root / step.step_id
+        if is_adk_run:
+            assert _pinned_adk_root is not None
+            _pinned_adk_root.create_directory_exclusive(
+                step.step_id,
+                namespace="artifact",
+            )
         case_payload = _case_payload_from_tool_input(case_id, step_inputs)
         step_payload = {
             "workflow_id": workflow_id,
@@ -1213,7 +2003,7 @@ def _run_sequential_workflow(
             task_id=task_id,
             case_id=case_id,
             run_id=parent_run_id,
-            artifact_root=artifact_root,
+            artifact_root=registered_artifact_root,
             status="running",
             summary=f"Workflow step {step.step_id} started for {case_id}",
             workflow_id=workflow_id,
@@ -1226,6 +2016,24 @@ def _run_sequential_workflow(
                 artifact_dir=step_artifact_dir,
                 tool_input=step_inputs,
                 case_payload=case_payload,
+                pinned_adk_root=_pinned_adk_root if is_adk_run else None,
+                step_id=step.step_id if is_adk_run else None,
+            )
+        elif is_adk_run:
+            assert _pinned_adk_root is not None
+            step_result = _run_adk_operator_step_staged(
+                pinned_root=_pinned_adk_root,
+                step_id=step.step_id,
+                case_id=case_id,
+                objective=objective,
+                step_inputs=step_inputs,
+                case_payload=case_payload,
+                user_prompt=user_prompt,
+                created_by=created_by,
+                operator_id=operator_id,
+                workspace_id=workspace_id,
+                runner_module=runner_module,
+                task_contracts_module=task_contracts_module,
             )
         else:
             step_result = operator_entrypoint.run_operator_flow(
@@ -1251,27 +2059,48 @@ def _run_sequential_workflow(
             )
         last_result = step_result
         step_status = step_result.get("status", "failed")
-        step_manifest_path = Path(step_result.get("final_output", {}).get("artifact_manifest_path") or step_artifact_dir / "run_manifest.json").expanduser().resolve()
-        if step_manifest_path.exists():
-            step_artifact_paths[f"step_{step.step_id}_run_manifest"] = str(step_manifest_path)
-        workflow_steps.append(
-            {
-                "step_id": step.step_id,
-                "tool_id": step.tool_id,
-                "step_kind": step.step_kind,
-                "title": step.title,
-                "status": step_status,
-                "artifact_dir": str(step_artifact_dir),
-                "run_id": step_result.get("run_id"),
-            }
-        )
+        step_manifest_path = Path(
+                step_result.get("final_output", {}).get("artifact_manifest_path")
+                or step_artifact_dir / "run_manifest.json"
+            ).expanduser().resolve()
+        if is_adk_run:
+            assert _pinned_adk_root is not None
+            try:
+                _pinned_adk_root.stat_regular_artifact(
+                    f"{step.step_id}/run_manifest.json",
+                    namespace="manifest",
+                )
+                step_manifest_exists = True
+            except SafeJsonReadError as exc:
+                if exc.code != "manifest_missing":
+                    raise
+                step_manifest_exists = False
+        else:
+            step_manifest_exists = step_manifest_path.exists()
+        if step_manifest_exists:
+            step_artifact_paths[f"step_{step.step_id}_run_manifest"] = (
+                f"{step.step_id}/run_manifest.json"
+                if is_adk_run
+                else str(step_manifest_path)
+            )
+        step_record = {
+            "step_id": step.step_id,
+            "tool_id": step.tool_id,
+            "step_kind": step.step_kind,
+            "title": step.title,
+            "status": step_status,
+            "run_id": step_result.get("run_id"),
+        }
+        if not is_adk_run:
+            step_record["artifact_dir"] = str(step_artifact_dir)
+        workflow_steps.append(step_record)
         step_finished_event_type = _workflow_step_finished_event_type(step_status)
         _record_workflow_event(
             registry_path=registry_path,
             task_id=task_id,
             case_id=case_id,
             run_id=parent_run_id,
-            artifact_root=artifact_root,
+            artifact_root=registered_artifact_root,
             status="running" if step_status == "completed" else step_status,
             summary=f"Workflow step {step.step_id} finished with status {step_status}",
             workflow_id=workflow_id,
@@ -1283,36 +2112,96 @@ def _run_sequential_workflow(
             final_summary = f"Workflow {workflow_id} ended with status {step_status} for {case_id}"
             break
 
-    workflow_summary_path = write_json_artifact(
-        resolve_artifact_path(artifact_root, "workflow_summary.json"),
-        {
-            "workflow_id": workflow_id,
-            "case_id": case_id,
-            "run_id": parent_run_id,
-            "status": final_status,
-            "step_count": len(workflow_steps),
-            "steps": workflow_steps,
-        },
-    )
+    if final_status == "needs_review" and isinstance(last_result, dict):
+        step_review_packet = last_result.get("review_packet")
+        if isinstance(step_review_packet, dict):
+            parent_review_packet = {
+                key: value
+                for key, value in step_review_packet.items()
+                if key != "packet_paths"
+            }
+            parent_review_packet.update(
+                {
+                    "run_id": parent_run_id,
+                    "case_id": case_id,
+                    "workspace_id": workspace_id,
+                }
+            )
+            if is_adk_run:
+                assert _pinned_adk_root is not None
+                _pinned_adk_root.write_json_object_exclusive(
+                    "review_packet.json",
+                    parent_review_packet,
+                    namespace="review_packet",
+                )
+            else:
+                write_json_artifact(
+                    resolve_artifact_path(artifact_root, "review_packet.json"),
+                    parent_review_packet,
+                )
+            step_artifact_paths["review_packet"] = "review_packet.json"
+
+    workflow_summary_payload = {
+        "workflow_id": workflow_id,
+        "case_id": case_id,
+        "run_id": parent_run_id,
+        "status": final_status,
+        "step_count": len(workflow_steps),
+        "steps": workflow_steps,
+    }
+    if provenance is not None:
+        workflow_summary_payload["provenance"] = dict(provenance)
+    if is_adk_run:
+        assert _pinned_adk_root is not None
+        _pinned_adk_root.write_json_object_exclusive(
+            "workflow_summary.json",
+            workflow_summary_payload,
+            namespace="artifact",
+        )
+        workflow_summary_path = registered_artifact_root / "workflow_summary.json"
+    else:
+        workflow_summary_path = write_json_artifact(
+            resolve_artifact_path(artifact_root, "workflow_summary.json"),
+            workflow_summary_payload,
+        )
     manifest_payload = {
         "workflow_id": workflow_id,
         "case_id": case_id,
         "run_id": parent_run_id,
-        "artifact_root": str(artifact_root),
         "artifact_paths": {
             "run_manifest": "run_manifest.json",
-            "workflow_summary": str(workflow_summary_path),
+            "workflow_summary": (
+                "workflow_summary.json"
+                if is_adk_run
+                else str(workflow_summary_path)
+            ),
             **step_artifact_paths,
         },
     }
-    run_manifest_path = write_json_artifact(resolve_artifact_path(artifact_root, "run_manifest.json"), manifest_payload)
+    if not is_adk_run:
+        manifest_payload["artifact_root"] = str(artifact_root)
+    if provenance is not None:
+        manifest_payload.update(provenance)
+    if is_adk_run:
+        assert _pinned_adk_root is not None
+        _pinned_adk_root.write_json_object_atomic(
+            "run_manifest.json",
+            manifest_payload,
+            namespace="manifest",
+        )
+        run_manifest_path = registered_artifact_root / "run_manifest.json"
+    else:
+        run_manifest_path = write_json_artifact(
+            resolve_artifact_path(artifact_root, "run_manifest.json"),
+            manifest_payload,
+        )
 
     _record_workflow_event(
         registry_path=registry_path,
         task_id=task_id,
         case_id=case_id,
         run_id=parent_run_id,
-        artifact_root=artifact_root,
+        artifact_root=registered_artifact_root,
         status=final_status if final_status != "completed" else "running",
         summary=final_summary,
         workflow_id=workflow_id,
@@ -1325,13 +2214,13 @@ def _run_sequential_workflow(
         case_id=case_id,
         run_id=parent_run_id,
         status=final_status,
-        artifact_root=str(artifact_root),
+        artifact_root=str(registered_artifact_root),
         summary=final_summary,
         review_required=final_status == "needs_review",
         workflow_id=workflow_id,
         operator_params={
             "case_id": case_id,
-            "artifact_dir": str(artifact_root),
+            "artifact_dir": str(registered_artifact_root),
             "objective": objective,
             "workflow_id": workflow_id,
             "user_prompt": user_prompt,
@@ -1375,6 +2264,8 @@ def _run_sequential_workflow(
         "errors": list((last_result or {}).get("errors", []) or []),
         "error_category": (last_result or {}).get("error_category"),
     }
+    if provenance is not None:
+        result["provenance"] = dict(provenance)
     if last_result is not None:
         result["route"] = last_result.get("route", {})
         result["trace"] = last_result.get("trace", {})
@@ -1388,28 +2279,143 @@ def _run_sequential_workflow(
     return result
 
 
+def _run_adk_operator_step_staged(
+    *,
+    pinned_root: PinnedJsonRoot,
+    step_id: str,
+    case_id: str,
+    objective: str,
+    step_inputs: ValidatedToolInput,
+    case_payload: dict[str, Any],
+    user_prompt: str | None,
+    created_by: str | None,
+    operator_id: str | None,
+    workspace_id: str | None,
+    runner_module: Any,
+    task_contracts_module: Any,
+) -> dict[str, Any]:
+    """Run legacy calculation code in private staging, then publish safely."""
+
+    with TemporaryDirectory(prefix="ai-actuary-adk-step-") as temporary_root:
+        staging_root = Path(temporary_root)
+        step_result = operator_entrypoint.run_operator_flow(
+            case_id=case_id,
+            artifact_dir=staging_root,
+            objective=objective,
+            sample_name=step_inputs.inputs.get("sample_name", "RAA"),
+            method=step_inputs.inputs.get("method_variant", "chainladder"),
+            review_threshold_origin_count=step_inputs.inputs.get(
+                "review_threshold_origin_count"
+            ),
+            case_payload=case_payload,
+            user_prompt=user_prompt,
+            review_delivery_dir=None,
+            created_by=created_by,
+            operator_id=operator_id,
+            workspace_id=workspace_id,
+            validated_input={
+                "case_id": case_id,
+                "tool_id": step_inputs.tool_id,
+                "inputs": dict(step_inputs.inputs),
+            },
+            runner_module=runner_module,
+            task_contracts_module=task_contracts_module,
+        )
+        with PinnedJsonRoot(
+            staging_root,
+            namespace="staged_artifact",
+        ) as staged_root:
+            for filename in ADK_STEP_JSON_ARTIFACTS:
+                try:
+                    payload = staged_root.read_bounded_json_object(
+                        filename,
+                        namespace="staged_artifact",
+                    )
+                except SafeJsonReadError as exc:
+                    if exc.code == "staged_artifact_missing":
+                        continue
+                    raise
+                pinned_root.write_json_object_exclusive(
+                    f"{step_id}/{filename}",
+                    _sanitize_adk_step_payload(filename, payload),
+                    namespace="artifact",
+                )
+
+    review_packet = step_result.get("review_packet")
+    if isinstance(review_packet, dict):
+        step_result["review_packet"] = {
+            key: value for key, value in review_packet.items() if key != "packet_paths"
+        }
+    return step_result
+
+
+def _sanitize_adk_step_payload(
+    filename: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    sanitized = dict(payload)
+    sanitized.pop("artifact_root", None)
+    artifact_paths = sanitized.get("artifact_paths")
+    if isinstance(artifact_paths, dict):
+        sanitized["artifact_paths"] = {
+            str(artifact_id): Path(str(path)).name
+            for artifact_id, path in artifact_paths.items()
+        }
+    if filename == "review_packet.json":
+        sanitized.pop("packet_paths", None)
+        artifact_links = sanitized.get("artifact_links")
+        if isinstance(artifact_links, dict):
+            sanitized["artifact_links"] = {
+                str(artifact_id): Path(str(path)).name
+                for artifact_id, path in artifact_links.items()
+            }
+    return sanitized
+
+
 def _run_validation_step(
     *,
     case_id: str,
     artifact_dir: str | Path,
     tool_input: ValidatedToolInput,
     case_payload: dict[str, Any],
+    pinned_adk_root: PinnedJsonRoot | None = None,
+    step_id: str | None = None,
 ) -> dict[str, Any]:
-    artifact_root = Path(artifact_dir).expanduser().resolve()
-    artifact_root.mkdir(parents=True, exist_ok=True)
+    if pinned_adk_root is None:
+        artifact_root = Path(artifact_dir).expanduser().resolve()
+        artifact_root.mkdir(parents=True, exist_ok=True)
+    elif step_id is None:
+        raise ValueError("Pinned ADK validation storage requires a step id.")
+    else:
+        artifact_root = Path(artifact_dir)
     validated_input_payload = {
         "case_id": case_id,
         "tool_id": tool_input.tool_id,
         "inputs": dict(tool_input.inputs),
     }
-    validated_input_path = write_json_artifact(
-        resolve_artifact_path(artifact_root, "validated_input.json"),
-        validated_input_payload,
-    )
-    case_input_path = write_json_artifact(
-        resolve_artifact_path(artifact_root, "case_input.json"),
-        case_payload,
-    )
+    if pinned_adk_root is not None:
+        assert step_id is not None
+        pinned_adk_root.write_json_object_exclusive(
+            f"{step_id}/validated_input.json",
+            validated_input_payload,
+            namespace="artifact",
+        )
+        pinned_adk_root.write_json_object_exclusive(
+            f"{step_id}/case_input.json",
+            case_payload,
+            namespace="artifact",
+        )
+        validated_input_path = artifact_root / "validated_input.json"
+        case_input_path = artifact_root / "case_input.json"
+    else:
+        validated_input_path = write_json_artifact(
+            resolve_artifact_path(artifact_root, "validated_input.json"),
+            validated_input_payload,
+        )
+        case_input_path = write_json_artifact(
+            resolve_artifact_path(artifact_root, "case_input.json"),
+            case_payload,
+        )
     try:
         case_input = build_chainladder_case_input(case_id=case_id, tool_inputs=tool_input.inputs)
         validated_source = validate_chainladder_case(case_input)
@@ -1432,23 +2438,54 @@ def _run_validation_step(
         summary = f"Validation failed for {case_id}"
         errors = [str(exc)]
         error_category = "validation"
-    validation_result_path = write_json_artifact(
-        resolve_artifact_path(artifact_root, "validation_result.json"),
-        validation_result,
-    )
+    if pinned_adk_root is not None:
+        assert step_id is not None
+        pinned_adk_root.write_json_object_exclusive(
+            f"{step_id}/validation_result.json",
+            validation_result,
+            namespace="artifact",
+        )
+        validation_result_path = artifact_root / "validation_result.json"
+    else:
+        validation_result_path = write_json_artifact(
+            resolve_artifact_path(artifact_root, "validation_result.json"),
+            validation_result,
+        )
     manifest_payload = {
         "case_id": case_id,
         "run_id": None,
-        "artifact_root": str(artifact_root),
         "artifact_paths": {
-            "validated_input": str(validated_input_path),
-            "case_input": str(case_input_path),
-            "validation_result": str(validation_result_path),
+            "validated_input": (
+                "validated_input.json"
+                if pinned_adk_root is not None
+                else str(validated_input_path)
+            ),
+            "case_input": (
+                "case_input.json"
+                if pinned_adk_root is not None
+                else str(case_input_path)
+            ),
+            "validation_result": (
+                "validation_result.json"
+                if pinned_adk_root is not None
+                else str(validation_result_path)
+            ),
         },
     }
-    run_manifest_path = resolve_artifact_path(artifact_root, "run_manifest.json")
-    manifest_payload["artifact_paths"]["run_manifest"] = str(run_manifest_path)
-    write_json_artifact(run_manifest_path, manifest_payload)
+    if pinned_adk_root is not None:
+        assert step_id is not None
+        run_manifest_path = artifact_root / "run_manifest.json"
+        manifest_payload["artifact_paths"]["run_manifest"] = "run_manifest.json"
+        pinned_adk_root.write_json_object_exclusive(
+            f"{step_id}/run_manifest.json",
+            manifest_payload,
+            namespace="manifest",
+        )
+    else:
+        manifest_payload["artifact_root"] = str(artifact_root)
+        run_manifest_path = resolve_artifact_path(artifact_root, "run_manifest.json")
+        manifest_payload["artifact_paths"]["run_manifest"] = str(run_manifest_path)
+        write_json_artifact(run_manifest_path, manifest_payload)
     return {
         "ok": ok,
         "status": status,
@@ -1538,7 +2575,7 @@ def _get_registry_entry(registry_path: str | Path, run_id: str) -> dict[str, Any
 
 
 def _run_summary(entry: dict[str, Any]) -> dict[str, Any]:
-    return Run(
+    payload = Run(
         run_id=str(entry.get("run_id")),
         case_id=entry.get("case_id"),
         status=entry.get("status"),
@@ -1552,6 +2589,10 @@ def _run_summary(entry: dict[str, Any]) -> dict[str, Any]:
         review_required=bool(entry.get("review_required")) or entry.get("status") == "needs_review",
         workflow_id=entry.get("workflow_id") or (entry.get("operator_params", {}) or {}).get("workflow_id"),
     ).model_dump(exclude_none=True)
+    for key in ("source", "provenance", "recovery_state"):
+        if entry.get(key) is not None:
+            payload[key] = entry[key]
+    return payload
 
 
 def _select_console_run(runs: list[dict[str, Any]], run_id: str | None) -> dict[str, Any] | None:
@@ -2458,11 +3499,17 @@ def _list_review_payloads(
     registry_path: str | Path,
     review_store,
     review_store_root: str | Path,
+    principal: Principal,
     operator_id: str | None,
     workspace_id: str | None,
 ) -> list[dict[str, Any]]:
+    scoped_runs = [
+        entry
+        for entry in run_registry.list_runs(registry_path)
+        if object_in_scope(principal, entry)
+    ]
     runs = _filter_run_entries(
-        run_registry.list_runs(registry_path),
+        scoped_runs,
         operator_id=operator_id,
         workspace_id=workspace_id,
     )
