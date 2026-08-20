@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from conftest import authenticated_request_kwargs, create_authenticated_app
 from reserving_workflow.api import app as api_app
 
 from reserving_workflow.api.app import (
@@ -17,7 +18,6 @@ from reserving_workflow.api.app import (
     DEFAULT_OPERATOR_ID,
     DEFAULT_WORKSPACE_ID,
     _load_batch_runner_module,
-    create_app,
 )
 from reserving_workflow.schemas import RunArtifactManifest
 from reserving_workflow.storage.local import LocalRunStore
@@ -271,7 +271,9 @@ class LocalApiClient:
 
     async def _request(self, method: str, path: str, **kwargs):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self._app), base_url="http://testserver") as client:
-            return await client.request(method, path, **kwargs)
+            return await client.request(
+                method, path, **authenticated_request_kwargs(method, kwargs)
+            )
 
     def request(self, method: str, path: str, **kwargs):
         return asyncio.run(self._request(method, path, **kwargs))
@@ -297,7 +299,7 @@ def _client(
         registry_path=tmp_path / "run-registry.json",
         artifact_root=tmp_path / "artifacts",
     )
-    app = create_app(
+    app = create_authenticated_app(
         settings=resolved_settings,
         runner_module=runner_module,
         task_contracts_module=FakeTaskContractsModule,
@@ -479,7 +481,7 @@ def test_post_run_uses_single_user_identity_defaults_and_exposes_them_in_console
     assert console_state["filters"]["workspace_id"] == DEFAULT_WORKSPACE_ID
 
 
-def test_post_run_propagates_explicit_identity_fields_through_run_contracts(tmp_path):
+def test_post_run_ignores_spoofed_identity_fields_and_uses_authenticated_principal(tmp_path):
     _reset_fake_runner_calls()
     client = _client(tmp_path)
 
@@ -496,15 +498,15 @@ def test_post_run_propagates_explicit_identity_fields_through_run_contracts(tmp_
     detail = client.get(f"/runs/{run['run_id']}").json()
     listed_run = client.get("/runs").json()["runs"][0]
 
-    assert detail["run"]["operator_id"] == "actuary-007"
-    assert detail["run"]["workspace_id"] == "workspace-casualty"
-    assert detail["run"]["created_by"] == "planner-007"
-    assert listed_run["operator_id"] == "actuary-007"
-    assert listed_run["workspace_id"] == "workspace-casualty"
-    assert listed_run["created_by"] == "planner-007"
+    assert detail["run"]["operator_id"] == DEFAULT_OPERATOR_ID
+    assert detail["run"]["workspace_id"] == DEFAULT_WORKSPACE_ID
+    assert detail["run"]["created_by"] == DEFAULT_OPERATOR_ID
+    assert listed_run["operator_id"] == DEFAULT_OPERATOR_ID
+    assert listed_run["workspace_id"] == DEFAULT_WORKSPACE_ID
+    assert listed_run["created_by"] == DEFAULT_OPERATOR_ID
 
 
-def test_run_and_console_filters_can_scope_by_operator_and_workspace(tmp_path):
+def test_run_and_console_filters_can_only_narrow_authenticated_scope(tmp_path):
     _reset_fake_runner_calls()
     client = _client(tmp_path)
     casualty_run = client.post(
@@ -537,18 +539,17 @@ def test_run_and_console_filters_can_scope_by_operator_and_workspace(tmp_path):
     default_console = client.get("/console/state").json()
     filtered_console = client.get("/console/state?operator_id=actuary-a&workspace_id=workspace-casualty").json()
 
-    assert filtered_runs["run_count"] == 1
-    assert filtered_runs["runs"][0]["run_id"] == casualty_run["run_id"]
-    assert filtered_console["selected_run_id"] == casualty_run["run_id"]
-    assert default_console["selected_run_id"] == "legacy-run"
+    assert casualty_run["run_id"]
+    assert filtered_runs["run_count"] == 0
+    assert filtered_console["selected_run_id"] == default_console["selected_run_id"]
     assert default_console["filters"]["operator_id"] == DEFAULT_OPERATOR_ID
     assert default_console["filters"]["workspace_id"] == DEFAULT_WORKSPACE_ID
-    assert [card["run_id"] for card in filtered_console["run_cards"]] == [casualty_run["run_id"]]
-    assert filtered_console["filters"]["available_operator_ids"] == ["actuary-a", "actuary-b", DEFAULT_OPERATOR_ID]
-    assert filtered_console["filters"]["available_workspace_ids"] == [DEFAULT_WORKSPACE_ID, "workspace-casualty", "workspace-pricing"]
+    assert filtered_console["run_cards"] == default_console["run_cards"]
+    assert filtered_console["filters"]["available_operator_ids"] == [DEFAULT_OPERATOR_ID]
+    assert filtered_console["filters"]["available_workspace_ids"] == [DEFAULT_WORKSPACE_ID]
 
 
-def test_review_assignment_defaults_to_created_by_and_review_filters_follow_workspace_ownership(tmp_path):
+def test_review_assignment_and_filters_follow_authenticated_scope(tmp_path):
     _reset_fake_runner_calls()
     client = _client(tmp_path, runner_module=ReviewRunnerModule)
     owned_run = client.post(
@@ -572,11 +573,9 @@ def test_review_assignment_defaults_to_created_by_and_review_filters_follow_work
     review_payload = client.get(f"/runs/{owned_run['run_id']}/review").json()["review"]
     filtered_reviews = client.get("/reviews?operator_id=actuary-owner&workspace_id=workspace-owner").json()
 
-    assert review_payload["assigned_to"] == "planner-owner"
-    assert review_payload["workspace_id"] == "workspace-owner"
-    assert filtered_reviews["review_count"] == 1
-    assert filtered_reviews["reviews"][0]["run_id"] == owned_run["run_id"]
-    assert filtered_reviews["reviews"][0]["assigned_to"] == "planner-owner"
+    assert review_payload["assigned_to"] == DEFAULT_OPERATOR_ID
+    assert review_payload["workspace_id"] == DEFAULT_WORKSPACE_ID
+    assert filtered_reviews["review_count"] == 0
 
 
 def test_post_run_normalizes_tool_backed_request_and_writes_validated_input_artifact(tmp_path):

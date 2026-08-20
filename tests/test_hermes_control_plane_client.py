@@ -7,9 +7,10 @@ from pathlib import Path
 
 import httpx
 import pytest
+from conftest import authenticated_request_kwargs, create_authenticated_app
 
 from reserving_workflow.adapters.control_plane import ControlPlaneError, ReadOnlyControlPlaneClient
-from reserving_workflow.api.app import ApiSettings, create_app
+from reserving_workflow.api.app import ApiSettings
 from reserving_workflow.contracts import AgentExecutionPlan
 
 
@@ -75,7 +76,9 @@ class LocalApiClient:
 
     async def _request(self, method: str, path: str, **kwargs):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self._app), base_url="http://testserver") as client:
-            return await client.request(method, path, **kwargs)
+            return await client.request(
+                method, path, **authenticated_request_kwargs(method, kwargs)
+            )
 
     def request(self, method: str, path: str, **kwargs):
         return asyncio.run(self._request(method, path, **kwargs))
@@ -201,7 +204,7 @@ def test_public_api_contract_supports_hermes_adapter_regression(tmp_path):
         registry_path=tmp_path / "run-registry.json",
         artifact_root=tmp_path / "artifacts",
     )
-    app = create_app(
+    app = create_authenticated_app(
         settings=settings,
         runner_module=FakeRunnerModule,
         task_contracts_module=FakeTaskContractsModule,

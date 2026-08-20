@@ -8,6 +8,13 @@ README_PATH = REPO_ROOT / "README.md"
 ARCHITECTURE_PATH = REPO_ROOT / "docs" / "architecture.md"
 PROJECT_PLAN_PATH = REPO_ROOT / "docs" / "project-plan.md"
 OPERATOR_HANDOFF_PATH = REPO_ROOT / "docs" / "operator_handoff.md"
+CREDENTIAL_TRANSPORT_ADR_PATH = (
+    REPO_ROOT
+    / "docs"
+    / "architecture"
+    / "adr-0003-local-capability-credential-transport.md"
+)
+CONTROL_PLANE_CONTRACT_PATH = REPO_ROOT / "docs" / "contracts" / "control-plane.md"
 CAS_REFERENCE_README_PATH = REPO_ROOT / "references" / "upstream" / "cas" / "README.md"
 CAS_PROPOSAL_DIR = REPO_ROOT / "references" / "upstream" / "cas" / "Proposal"
 CAS_UPSTREAM_PROJECT_PLAN = REPO_ROOT / "references" / "upstream" / "cas" / "docs" / "project-plan.md"
@@ -47,6 +54,45 @@ def test_readme_covers_operator_entrypoints_review_flow_and_role_split() -> None
         "Human Responsibilities vs Agent Responsibilities",
     ]:
         assert expected in readme
+
+
+def test_readme_quick_start_uses_the_supported_operator_session_workflow() -> None:
+    readme = _read(README_PATH)
+    quick_start = readme.split(
+        "## Quick Start: Create a Governed Operator Run", 1
+    )[1].split("\n---", 1)[0]
+    adr = _read(CREDENTIAL_TRANSPORT_ADR_PATH)
+
+    for expected in (
+        "Request launcher handoff",
+        "Create Governed Run",
+        "Create run",
+        "Run Queue",
+        "Export handoff report",
+        "CSRF",
+        "Origin",
+        "ADR 0003",
+    ):
+        assert expected in quick_start
+    assert "curl -X POST http://127.0.0.1:8000/runs" not in quick_start
+    assert "Console GET requests only return the static shell" in adr
+    assert "launcher's terminal prompt" in adr
+
+
+def test_control_plane_contract_has_no_credentialless_enforcement_mode() -> None:
+    contract = _read(CONTROL_PLANE_CONTRACT_PATH)
+    normalized = " ".join(contract.split())
+
+    assert "capability enforcement is disabled" not in normalized.lower()
+    assert (
+        "Deployable, embedded, and test callers all configure capability credentials"
+        in normalized
+    )
+    assert "Caller-supplied identity fields may only narrow" in normalized
+    assert "omit `source` use `operator-console` semantics" in normalized
+    assert "omit `workspace_id` use `default-workspace`" in normalized
+    assert "offline/mock identity inputs" not in normalized
+    assert "these headers never grant identity or authority" in normalized
 
 
 

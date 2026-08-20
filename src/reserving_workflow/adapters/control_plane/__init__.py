@@ -1,6 +1,6 @@
 """Shared installable control-plane client and safe read projections."""
 
-from .client import ReadOnlyControlPlaneClient
+from .client import AdkControlPlaneClient, ReadOnlyControlPlaneClient
 from .contracts import (
     ArtifactMetadata,
     ArtifactProjection,
@@ -20,6 +20,7 @@ from .errors import (
 __all__ = [
     "ArtifactMetadata",
     "ArtifactProjection",
+    "AdkControlPlaneClient",
     "ControlPlaneContractError",
     "ControlPlaneError",
     "ControlPlaneResponseError",

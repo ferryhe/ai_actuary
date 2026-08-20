@@ -12,6 +12,11 @@ from typing import Any
 
 import httpx
 import pytest
+from conftest import (
+    TEST_OPERATOR_CREDENTIAL,
+    authenticated_request_kwargs,
+    create_authenticated_app,
+)
 
 from developer_workflows.ai_actuary_developer import tools as adk_tools
 from reserving_workflow.adapters.control_plane import ReadOnlyControlPlaneClient
@@ -34,7 +39,7 @@ from reserving_workflow.adapters.control_plane.projections import (
     project_tool,
     project_workflow,
 )
-from reserving_workflow.api.app import ApiSettings, create_app
+from reserving_workflow.api.app import ApiSettings
 from reserving_workflow.contracts import Review, Run, RunEvent, is_terminal_run_status
 from reserving_workflow.storage.local import LocalRunStore
 
@@ -166,7 +171,7 @@ def _tool_fixture(tmp_path: Path) -> tuple[dict[str, Any], list[Path]]:
         artifact_root=tmp_path / "unused-artifacts",
         review_store_dir=tmp_path / "reviews-not-created",
     )
-    app = create_app(settings=settings)
+    app = create_authenticated_app(settings=settings)
 
     def handler(request: httpx.Request) -> httpx.Response:
         async def call() -> httpx.Response:
@@ -177,8 +182,10 @@ def _tool_fixture(tmp_path: Path) -> tuple[dict[str, Any], list[Path]]:
                 return await local.request(
                     request.method,
                     request.url.raw_path.decode("ascii"),
-                    headers=request.headers,
-                    content=request.content,
+                    **authenticated_request_kwargs(
+                        request.method,
+                        {"headers": request.headers, "content": request.content},
+                    ),
                 )
 
         response = asyncio.run(call())
@@ -676,6 +683,7 @@ def test_linked_review_root_is_rejected_by_real_asgi_and_adk_without_reading_out
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=fixture["app"]),
             base_url="http://testserver",
+            headers={"Authorization": f"Bearer {TEST_OPERATOR_CREDENTIAL}"},
         ) as client:
             return await client.get(f"/runs/{run_id}/review")
 
@@ -740,6 +748,7 @@ def test_compact_path_keys_are_removed_by_direct_http_and_adk_projections(
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=fixture["app"]),
             base_url="http://testserver",
+            headers={"Authorization": f"Bearer {TEST_OPERATOR_CREDENTIAL}"},
         ) as client:
             return await client.get(
                 f"/runs/{fixture['run_id']}/artifacts/validated_input/projection"
@@ -1327,6 +1336,7 @@ def test_isolated_asgi_console_api_and_adk_share_authoritative_read_state(
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=fixture["app"]),
             base_url="http://testserver",
+            headers={"Authorization": f"Bearer {TEST_OPERATOR_CREDENTIAL}"},
         ) as client:
             response = await client.get(path)
             assert response.status_code == 200
@@ -1418,14 +1428,18 @@ def test_real_builtin_workflow_parent_manifest_api_console_and_adk_artifacts_mat
         artifact_root=tmp_path / "artifacts",
         review_store_dir=tmp_path / "reviews-not-created",
     )
-    app = create_app(settings=settings, runner_module=ModelFreeGovernedRunner)
+    app = create_authenticated_app(
+        settings=settings, runner_module=ModelFreeGovernedRunner
+    )
 
     async def request(method: str, path: str, **kwargs: Any) -> httpx.Response:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://testserver",
         ) as local:
-            return await local.request(method, path, **kwargs)
+            return await local.request(
+                method, path, **authenticated_request_kwargs(method, kwargs)
+            )
 
     run_response = asyncio.run(
         request(

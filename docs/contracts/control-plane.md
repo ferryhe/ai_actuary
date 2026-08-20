@@ -2,6 +2,37 @@
 
 This document freezes the bounded operator-facing control-plane contract for the current local prototype.
 
+## Local Phase-3 capability boundary
+
+The local launcher configures two independent principals. `operator-console`
+uses a one-time, short-TTL browser bootstrap that becomes an HttpOnly
+server-side session with CSRF and exact Host/Origin checks.
+`adk-developer` uses only `Authorization: Bearer` from its launcher-owned
+process environment. Caller identity/workspace/source fields are filters, not
+authority. Run, event, artifact, projection, review, report, and review-ID
+objects are checked against the persisted principal workspace/source; an
+out-of-scope real ID is the same `404 object_not_found` as an absent ID.
+
+An anonymous Console GET never issues a session. The browser generates a
+memory-only private claim and shows a short-lived handoff ID; the operator
+pastes that non-secret ID into the launcher terminal. The launcher approves it
+with the bootstrap held outside the ADK environment, and only the matching
+browser claim receives the session. Bootstrap and capability secrets are never
+placed in browser JavaScript, URLs, browser storage, static HTML, or logs.
+
+All live FastAPI method/path pairs are checked at startup against the
+declarative capability matrix. Health and the static Console shell are the only
+anonymous reads. FastAPI docs, ReDoc, and OpenAPI are disabled. The frozen
+transport decision is [ADR 0003](../architecture/adr-0003-local-capability-credential-transport.md).
+
+ADK workflow starts use `POST /adk/runs`, require the `adk-developer`
+capability, a stable opaque `Idempotency-Key`, and a confirmation binding over
+the canonical request. The server forces `source=adk-developer`,
+`workspace_id=adk-development`, a server-managed artifact subtree, and
+creation-time provenance. Only the two published built-in Chainladder workflows
+are accepted; caller paths, workspace/source, draft digests, and correlation IDs
+are rejected.
+
 ## Scope
 
 These contracts apply to the local FastAPI control plane and the lightweight operator console.
@@ -24,7 +55,9 @@ These contracts apply to the local FastAPI control plane and the lightweight ope
 - `needs_review`
 - `failed`
 
-The local JSON registry records only these status values.
+The local JSON registry records only these status values. An incomplete ADK run
+found after restart is persisted as `failed` with `recovery_state=stale`; no
+success is inferred.
 
 ## Prototype Ownership
 
@@ -36,13 +69,19 @@ The control plane includes bounded prototype ownership fields for per-actuary wo
 - `workspace_id`
 - `created_by`
 
-`POST /runs` may accept the same fields. When omitted, the control plane applies the single-user fallback:
+Legacy `POST /runs` payloads may contain the same fields, but an authenticated
+principal overrides them. Deployable, embedded, and test callers all configure
+capability credentials and use an authenticated principal; there is no
+credentialless enforcement mode. Caller-supplied identity fields may only narrow
+authorized results and never grant authority.
 
-- `operator_id = "local-actuary"`
-- `workspace_id = "default-workspace"`
-- `created_by = operator_id`
+Legacy persisted records that omit `source` use `operator-console` semantics.
+Records that also omit `workspace_id` use `default-workspace`; their historical
+metadata remains readable under that trusted Operator scope.
 
-These fields are local control-plane metadata only. They do not add auth, RBAC, SSO, enterprise multitenancy, or external identity providers.
+These fields are local control-plane metadata only and never grant authority.
+The local capability boundary is not SSO, enterprise RBAC/multitenancy, or an
+external identity provider.
 
 ## Run Event Type
 
@@ -282,4 +321,6 @@ The bounded local API may filter list-style ownership views through static reque
 - `GET /reviews?operator_id=...&workspace_id=...`
 - `GET /console/state?operator_id=...&workspace_id=...`
 
-The console may also use prototype `x-operator-id` and `x-workspace-id` headers as offline/mock identity inputs.
+The console may also send `x-operator-id` and `x-workspace-id` as optional
+narrowing filters under its authenticated principal; these headers never grant
+identity or authority.

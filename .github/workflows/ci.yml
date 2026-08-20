@@ -63,8 +63,8 @@ jobs:
           adk --version
           python -c "from developer_workflows.ai_actuary_developer import root_agent; assert root_agent.name == 'ai_actuary_developer'"
 
-      - name: Run ADK foundation tests
-        run: python -m pytest tests/test_adk_developer_foundation.py tests/test_operator_console_assets.py -q
+      - name: Run ADK foundation and Phase 3 tool tests
+        run: python -m pytest tests/test_adk_developer_foundation.py tests/test_operator_console_assets.py tests/test_adk_run_tools.py -q
 
       - name: Smoke dual-interface launcher
         run: python scripts/run_local_workbench.py --smoke

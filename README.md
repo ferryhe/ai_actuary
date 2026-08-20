@@ -100,10 +100,14 @@ For API-only usage, `pip install -e '.[api]'` is enough; `dev` includes API depe
 
 ## Quick Start: Local API and Console
 
-Start the control plane:
+The deployable control-plane factory fails closed without all three local
+capability secrets. Start it through the launcher described below so those
+secrets are generated and injected into the two child environments without
+being exposed in the browser:
 
 ```bash
-python -m uvicorn 'reserving_workflow.api.app:create_app' --factory --host 127.0.0.1 --port 8000
+pip install -e '.[dev,adk-dev]'
+python scripts/run_local_workbench.py
 ```
 
 Check readiness:
@@ -135,11 +139,20 @@ adk --version  # pinned: 2.7.1
 python scripts/run_local_workbench.py
 ```
 
-The launcher binds both unauthenticated development interfaces to loopback
-only:
+The launcher binds both development interfaces to loopback only and generates
+independent in-memory `operator-console` and `adk-developer` capability
+credentials. The browser receives only a short-lived server-side session; the
+ADK client receives only its Bearer credential through the launcher-owned child
+environment:
 
 - Operator Console: `http://127.0.0.1:8000/console`
 - ADK Developer Web: `http://127.0.0.1:8001`
+
+To unlock the Console, choose **Request launcher handoff** in the browser and
+paste the displayed handoff ID into the launcher's terminal prompt. The browser
+and launcher exchange their private one-time values only in loopback JSON
+bodies; no capability secret is placed in a URL, browser storage, static HTML,
+or launcher output.
 
 The Developer Web header is labeled `AI Actuary Developer (DEV)` and displays
 the fixed Operator Console address so the return path is visible in the ADK UI.
@@ -154,11 +167,14 @@ paths: `tmp/adk-dev/sessions/sessions.db` and `tmp/adk-dev/artifacts/`. It does
 not write runtime state into `developer_workflows/` or any published workflow
 directory.
 
-The PR1 `ai_actuary_developer` agent is code-first and read-only. It can only
-describe this development environment and inspect the fixed loopback
-`/health` and `/health/preflight` endpoints. It cannot call actuarial tools,
-create runs, make review decisions, or access the tool/workflow catalogs. Its
-model is fixed to Gemini `gemini-2.5-flash`. Importing the agent and opening
+The code-first `ai_actuary_developer` agent retains Phase 2's 12 bounded,
+path-free read tools and adds exactly four execution tools:
+`start_workflow_run`, `wait_run`, `get_run_status`, and `summarize_run`.
+Confirmed starts are restricted to the published `chainladder-basic` and
+`chainladder-validated` catalog workflows and are forced into the isolated
+`adk-development` workspace. The agent cannot call a direct actuarial tool,
+make review decisions, export reports, rerun, replay, benchmark, or access
+host paths. Its model is fixed to Gemini `gemini-2.5-flash`. Importing the agent and opening
 Developer Web do not require credentials; chatting with it requires a Gemini
 Developer API credential, for example local `GOOGLE_API_KEY` with
 `GOOGLE_GENAI_USE_VERTEXAI=FALSE`. Do not commit credentials.
@@ -171,63 +187,34 @@ ADK's built-in trace/evaluation UI also does not mean this project has wired
 trace or evaluation capabilities; PR1 configures neither. Upgrade ADK only in
 a dedicated compatibility PR.
 
-This workbench is not authenticated, externally hosted, CORS-enabled, or a
-production deployment.
+This is local capability authentication, not production SSO/RBAC. The workbench
+is not externally hosted, CORS-enabled, or a production deployment. Credential
+transport and route classification are frozen in
+`docs/architecture/adr-0003-local-capability-credential-transport.md`.
 
 ---
 
-## Quick Start: Create a Run by API
+## Quick Start: Create a Governed Operator Run
 
-Synchronous run:
+Start the dual-interface workbench with `python scripts/run_local_workbench.py`,
+then open `http://127.0.0.1:8000/console`. The Console initially remains locked:
 
-```bash
-curl -X POST http://127.0.0.1:8000/runs \
-  -H 'content-type: application/json' \
-  -d '{
-    "case_id": "demo-case",
-    "tool_id": "chainladder",
-    "inputs": {
-      "sample_name": "RAA",
-      "method_variant": "chainladder"
-    }
-  }'
-```
+1. Choose **Request launcher handoff** in the browser.
+2. Paste the displayed handoff ID into the launcher's terminal prompt. The ID
+   is not a credential; the launcher keeps its private bootstrap out of the
+   browser and ADK child.
+3. Wait for the Console to reload with its short-lived Operator session.
 
-Background run:
+In **Create Governed Run**, enter a `case_id`, keep `sample_name` set to `RAA`
+for the bundled example, choose the required tool, and select **Create run**.
+Background execution is enabled by default. Select the run from **Run Queue**
+to follow its Timeline and inspect the result, artifact, and review panels.
 
-```bash
-curl -X POST http://127.0.0.1:8000/runs \
-  -H 'content-type: application/json' \
-  -d '{
-    "case_id": "demo-bg",
-    "tool_id": "chainladder",
-    "inputs": {
-      "sample_name": "RAA",
-      "method_variant": "chainladder"
-    },
-    "background": true
-  }'
-```
-
-Poll events:
-
-```bash
-curl http://127.0.0.1:8000/runs/<run_id>/events
-```
-
-Inspect artifacts and review state:
-
-```bash
-curl http://127.0.0.1:8000/runs/<run_id>/artifacts
-curl http://127.0.0.1:8000/runs/<run_id>/results
-curl http://127.0.0.1:8000/runs/<run_id>/review
-```
-
-Export operator handoff:
-
-```bash
-curl -X POST http://127.0.0.1:8000/runs/<run_id>/report-export
-```
+For a completed eligible run, select **Export handoff report** in the Action
+Panel. The Console supplies its server-side session, CSRF token, and exact
+Origin automatically. Raw unauthenticated API mutations are intentionally not
+supported; programmatic clients must implement the body-bootstrap/session,
+CSRF, Host, and Origin contract frozen in ADR 0003.
 
 ---
 
@@ -265,6 +252,10 @@ Current stable run statuses:
 ```text
 accepted, queued, running, completed, needs_review, failed
 ```
+
+An ADK run found persisted but incomplete after control-plane restart is marked
+`failed` with `recovery_state=stale`; the server never infers a terminal success
+from missing in-memory work.
 
 Review decisions are separate from run status:
 
@@ -437,28 +428,10 @@ Run the full suite:
 python -m pytest tests -q
 ```
 
-Smoke API route availability:
+Verify the fail-closed credential transport and exhaustive route policy:
 
 ```bash
-python - <<'PY'
-from fastapi.testclient import TestClient
-from reserving_workflow.api.app import create_app
-client = TestClient(create_app())
-assert client.get('/health').json()['ok'] is True
-paths = client.get('/openapi.json').json()['paths']
-required = [
-    '/console', '/console/state', '/tools', '/tools/{tool_id}',
-    '/workflows', '/workflows/{workflow_id}', '/runs', '/runs/{run_id}',
-    '/runs/{run_id}/events', '/runs/{run_id}/rerun',
-    '/runs/{run_id}/artifacts', '/runs/{run_id}/results', '/runs/{run_id}/review-packet',
-    '/runs/{run_id}/review', '/runs/{run_id}/report-export',
-    '/reviews', '/reviews/{review_id}', '/reviews/{review_id}/decision',
-    '/replay', '/repeatability', '/benchmarks/batch',
-]
-missing = [p for p in required if p not in paths]
-assert not missing, missing
-print('api_smoke_ok', len(paths))
-PY
+python -m pytest tests/test_control_plane_capabilities.py -q
 ```
 
 For console changes, also start uvicorn and click through `/console` in a browser. TestClient alone is not enough for UI/JavaScript regressions.

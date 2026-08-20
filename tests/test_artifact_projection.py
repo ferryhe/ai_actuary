@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 import pytest
+from conftest import authenticated_request_kwargs, create_authenticated_app
 
 from reserving_workflow.adapters.control_plane.projections import (
     MAX_ARTIFACT_BYTES,
@@ -25,7 +26,7 @@ from reserving_workflow.adapters.control_plane.projections import (
     project_artifact_payload,
     read_bounded_json_object,
 )
-from reserving_workflow.api.app import ApiSettings, create_app
+from reserving_workflow.api.app import ApiSettings
 from reserving_workflow.storage.local import LocalRunStore
 
 
@@ -41,7 +42,9 @@ class LocalApiClient:
             transport=httpx.ASGITransport(app=self._app),
             base_url="http://testserver",
         ) as client:
-            return await client.get(path)
+            return await client.get(
+                path, **authenticated_request_kwargs("GET", {})
+            )
 
     def get(self, path: str) -> httpx.Response:
         return asyncio.run(self._get(path))
@@ -119,7 +122,7 @@ def _projection_fixture(tmp_path: Path) -> tuple[LocalApiClient, Path, Path, str
         operator_params={"tool_id": "chainladder"},
         review_required=True,
     )
-    app = create_app(
+    app = create_authenticated_app(
         settings=ApiSettings(
             registry_path=registry_path,
             artifact_root=tmp_path / "unused-artifacts",
@@ -199,7 +202,7 @@ def test_authoritative_chainladder_fixtures_remain_projectable(tmp_path: Path) -
         review_required=True,
     )
     client = LocalApiClient(
-        create_app(
+        create_authenticated_app(
             settings=ApiSettings(
                 registry_path=registry_path,
                 artifact_root=tmp_path / "unused-artifacts",

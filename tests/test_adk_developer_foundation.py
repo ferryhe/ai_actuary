@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import tomllib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,6 +21,68 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).parents[1]
+
+
+def _start_http_capture(
+    response_payload: dict[str, object],
+) -> tuple[ThreadingHTTPServer, threading.Thread, list[dict[str, object]]]:
+    captured: list[dict[str, object]] = []
+    response_body = json.dumps(response_payload).encode("utf-8")
+
+    class Handler(BaseHTTPRequestHandler):
+        def _respond(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            captured.append(
+                {
+                    "method": self.command,
+                    "path": self.path,
+                    "headers": dict(self.headers),
+                    "body": self.rfile.read(length),
+                }
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+
+        do_GET = _respond
+        do_POST = _respond
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, captured
+
+
+def _stop_http_capture(
+    server: ThreadingHTTPServer,
+    thread: threading.Thread,
+) -> None:
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=2.0)
+
+
+def _install_hostile_http_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+    proxy_port: int,
+) -> None:
+    proxy_url = f"http://127.0.0.1:{proxy_port}"
+    for name in (
+        "NO_PROXY",
+        "no_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTP_PROXY", proxy_url)
+    monkeypatch.setenv("http_proxy", proxy_url)
 
 
 def _google_adk_available() -> bool:
@@ -56,8 +121,12 @@ import sys
 sys.path.insert(0, 'src')
 from developer_workflows.ai_actuary_developer import tools as adk_read_tools
 from reserving_workflow.adapters.control_plane import ReadOnlyControlPlaneClient
-from reserving_workflow.api.app import create_app
-create_app()
+from reserving_workflow.api.app import ApiSettings, create_app
+create_app(settings=ApiSettings(
+    operator_credential='test-operator-capability',
+    adk_credential='test-adk-capability',
+    operator_bootstrap_token='test-bootstrap-capability',
+))
 assert adk_read_tools.READ_TOOL_NAMES
 assert not hasattr(ReadOnlyControlPlaneClient, 'create_run')
 assert not any(name == 'google.adk' or name.startswith('google.adk.') for name in sys.modules)
@@ -140,6 +209,174 @@ def test_runtime_requirement_error_explains_missing_extra(monkeypatch: pytest.Mo
 
     with pytest.raises(launcher.LauncherError, match=r"\[dev,adk-dev\]"):
         launcher.validate_adk_runtime()
+
+
+def test_launcher_injects_independent_child_capabilities_for_custom_origin() -> None:
+    launcher = _load_launcher_module()
+    config = launcher.LocalWorkbenchConfig.from_repo_root(
+        REPO_ROOT, control_plane_port=8123, adk_port=8124
+    )
+
+    control_plane_env, adk_env = launcher._capability_child_environments(config)
+
+    assert control_plane_env["AI_ACTUARY_OPERATOR_ORIGIN"] == "http://127.0.0.1:8123"
+    assert control_plane_env["AI_ACTUARY_OPERATOR_CREDENTIAL"]
+    assert control_plane_env["AI_ACTUARY_ADK_CREDENTIAL"]
+    assert (
+        control_plane_env["AI_ACTUARY_OPERATOR_CREDENTIAL"]
+        != control_plane_env["AI_ACTUARY_ADK_CREDENTIAL"]
+    )
+    assert adk_env["AI_ACTUARY_ADK_CREDENTIAL"] == control_plane_env["AI_ACTUARY_ADK_CREDENTIAL"]
+    assert adk_env["AI_ACTUARY_CONTROL_PLANE_URL"] == "http://127.0.0.1:8123"
+    assert "AI_ACTUARY_OPERATOR_CREDENTIAL" not in adk_env
+    assert "AI_ACTUARY_OPERATOR_BOOTSTRAP_TOKEN" not in adk_env
+
+
+def test_launcher_approves_browser_handoff_in_body_without_exposing_bootstrap() -> None:
+    launcher = _load_launcher_module()
+    captured: list[object] = []
+
+    class _Response:
+        status = 200
+
+        def __enter__(self) -> "_Response":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def read(self) -> bytes:
+            return b'{"approved":true}'
+
+    def opener(request: object, timeout: float) -> _Response:
+        captured.extend((request, timeout))
+        return _Response()
+
+    bootstrap_token = "launcher-only-bootstrap-secret"
+    handoff_id = "browser-visible-handoff-id"
+    launcher.approve_operator_handoff(
+        control_plane_port=8123,
+        bootstrap_token=bootstrap_token,
+        handoff_id=handoff_id,
+        opener=opener,
+    )
+
+    request, timeout = captured
+    assert request.full_url == "http://127.0.0.1:8123/auth/operator/handoff/approve"
+    assert request.method == "POST"
+    assert request.headers["Origin"] == "http://127.0.0.1:8123"
+    assert request.headers["Content-type"] == "application/json"
+    assert json.loads(request.data) == {
+        "bootstrap_token": bootstrap_token,
+        "handoff_id": handoff_id,
+    }
+    assert bootstrap_token not in request.full_url
+    assert bootstrap_token not in repr(request.headers)
+    assert timeout == 2.0
+
+
+def test_adk_bearer_client_ignores_hostile_environment_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from reserving_workflow.adapters.control_plane.client import (
+        AdkControlPlaneClient,
+    )
+
+    target, target_thread, target_requests = _start_http_capture(
+        {"ok": True, "service": "control-plane"}
+    )
+    proxy, proxy_thread, proxy_requests = _start_http_capture(
+        {"ok": True, "service": "hostile-proxy"}
+    )
+    _install_hostile_http_proxy(monkeypatch, proxy.server_port)
+    credential = "adk-proxy-regression-secret"
+    client = AdkControlPlaneClient(
+        f"http://127.0.0.1:{target.server_port}",
+        credential=credential,
+    )
+    try:
+        response = client.get_health()
+    finally:
+        client.close()
+        _stop_http_capture(target, target_thread)
+        _stop_http_capture(proxy, proxy_thread)
+
+    assert response.service == "control-plane"
+    assert client.is_closed
+    assert proxy_requests == []
+    assert len(target_requests) == 1
+    assert target_requests[0]["headers"]["Authorization"] == (
+        f"Bearer {credential}"
+    )
+
+
+def test_launcher_bootstrap_approval_ignores_hostile_environment_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _load_launcher_module()
+    target, target_thread, target_requests = _start_http_capture(
+        {"approved": True}
+    )
+    proxy, proxy_thread, proxy_requests = _start_http_capture(
+        {"approved": True}
+    )
+    _install_hostile_http_proxy(monkeypatch, proxy.server_port)
+    bootstrap_token = "launcher-only-bootstrap-secret"
+    handoff_id = "browser-visible-handoff-id"
+    try:
+        launcher.approve_operator_handoff(
+            control_plane_port=target.server_port,
+            bootstrap_token=bootstrap_token,
+            handoff_id=handoff_id,
+        )
+    finally:
+        _stop_http_capture(target, target_thread)
+        _stop_http_capture(proxy, proxy_thread)
+
+    assert proxy_requests == []
+    assert len(target_requests) == 1
+    assert target_requests[0]["method"] == "POST"
+    assert target_requests[0]["headers"]["Origin"] == (
+        f"http://127.0.0.1:{target.server_port}"
+    )
+    assert json.loads(target_requests[0]["body"]) == {
+        "bootstrap_token": bootstrap_token,
+        "handoff_id": handoff_id,
+    }
+
+
+def test_interactive_launcher_prompt_approves_only_the_browser_visible_id(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    launcher = _load_launcher_module()
+    approved: list[dict[str, object]] = []
+    bootstrap_token = "launcher-only-bootstrap-secret"
+    handoff_id = "browser-visible-handoff-id"
+    monkeypatch.setattr("builtins.input", lambda prompt: handoff_id)
+    monkeypatch.setattr(
+        launcher,
+        "approve_operator_handoff",
+        lambda **kwargs: approved.append(kwargs),
+    )
+
+    thread = launcher.start_operator_handoff_prompt(
+        control_plane_port=8123,
+        bootstrap_token=bootstrap_token,
+    )
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert approved == [
+        {
+            "control_plane_port": 8123,
+            "bootstrap_token": bootstrap_token,
+            "handoff_id": handoff_id,
+        }
+    ]
+    output = capsys.readouterr()
+    assert bootstrap_token not in output.out
+    assert bootstrap_token not in output.err
 
 
 def test_runtime_requirement_error_explains_python_constraint(
@@ -480,6 +717,47 @@ def test_smoke_helper_checks_all_control_plane_and_adk_routes() -> None:
     ]
 
 
+def test_smoke_helper_ignores_hostile_environment_proxy_and_reaches_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _load_launcher_module()
+    control, control_thread, control_requests = _start_http_capture(
+        {"ok": True, "service": "control-plane"}
+    )
+    adk, adk_thread, adk_requests = _start_http_capture(
+        {"ok": True, "service": "adk-developer"}
+    )
+    proxy, proxy_thread, proxy_requests = _start_http_capture(
+        {"ok": True, "service": "hostile-proxy"}
+    )
+    _install_hostile_http_proxy(monkeypatch, proxy.server_port)
+    try:
+        launcher.wait_for_smoke_endpoints(
+            control_plane_port=control.server_port,
+            adk_port=adk.server_port,
+            children=[_FakeProcess(), _FakeProcess()],
+            timeout=2.0,
+            poll_interval=0,
+        )
+    finally:
+        _stop_http_capture(control, control_thread)
+        _stop_http_capture(adk, adk_thread)
+        _stop_http_capture(proxy, proxy_thread)
+
+    assert proxy_requests == []
+    assert [item["path"] for item in control_requests] == [
+        "/health",
+        "/health/preflight",
+        "/console",
+    ]
+    assert [item["path"] for item in adk_requests] == [
+        "/",
+        "/list-apps",
+        "/apps/ai_actuary_developer/app-info",
+        "/dev/apps/ai_actuary_developer/build_graph",
+    ]
+
+
 def test_smoke_helper_bounds_requests_by_the_remaining_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -771,7 +1049,7 @@ raise SystemExit(
     not _google_adk_available(),
     reason="google-adk is intentionally absent from the default dev extra",
 )
-def test_developer_agent_is_code_first_gemini_and_read_only() -> None:
+def test_developer_agent_is_code_first_gemini_with_bounded_phase3_tools() -> None:
     from developer_workflows.ai_actuary_developer import agent, tools
     from reserving_workflow.adapters.control_plane import ReadOnlyControlPlaneClient
 
@@ -780,14 +1058,17 @@ def test_developer_agent_is_code_first_gemini_and_read_only() -> None:
     assert agent.describe_development_environment()["model"] == agent.root_agent.model
     assert "development-only" in agent.root_agent.description.lower()
     assert "http://127.0.0.1:8000/console" in agent.root_agent.description
-    assert [tool.__name__ for tool in agent.root_agent.tools] == list(tools.READ_TOOL_NAMES)
-    assert "strictly read-only" in agent.root_agent.instruction
-    assert "Never start or invoke" in agent.root_agent.instruction
+    assert [tool.__name__ for tool in agent.root_agent.tools] == list(
+        tools.READ_TOOL_NAMES + tools.EXECUTION_TOOL_NAMES
+    )
+    assert len(agent.root_agent.tools) == 16
+    assert "explicit ADK confirmation" in agent.root_agent.instruction
+    assert "two published Chainladder workflows" in agent.root_agent.instruction
     assert "review decision" in agent.root_agent.instruction
     assert not any(
         forbidden in tool.__name__
         for tool in agent.root_agent.tools
-        for forbidden in ("create", "start", "rerun", "replay", "benchmark", "report", "decision")
+        for forbidden in ("rerun", "replay", "benchmark", "report", "decision", "start_tool")
     )
 
     requested: list[str] = []

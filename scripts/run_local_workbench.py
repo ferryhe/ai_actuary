@@ -5,18 +5,22 @@ from __future__ import annotations
 import argparse
 import ctypes
 import importlib.util
+import json
+import os
+import secrets
 import shutil
 import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import FrameType
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 from reserving_workflow.adapters.adk.local_runtime import (
     LOOPBACK_HOST,
@@ -256,15 +260,20 @@ def start_children(
     *,
     popen_factory: Callable[..., Any] = subprocess.Popen,
     cwd: Path | None = None,
+    environments: Sequence[dict[str, str]] | None = None,
 ) -> list[Any]:
+    if environments is not None and len(environments) != len(commands):
+        raise LauncherError("Each workbench child requires one isolated environment.")
     children: list[Any] = []
     try:
-        for command in commands:
+        for index, command in enumerate(commands):
+            child_env = environments[index] if environments is not None else None
             child = popen_factory(
                 command,
                 cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 close_fds=True,
+                **({"env": child_env} if child_env is not None else {}),
             )
             children.append(child)
     except Exception as exc:
@@ -287,7 +296,7 @@ def wait_for_smoke_endpoints(
     children: Sequence[Any],
     timeout: float,
     poll_interval: float = 0.1,
-    opener: Callable[..., Any] = urlopen,
+    opener: Callable[..., Any] | None = None,
     stop_requested: Callable[[], bool] = lambda: False,
     stop_exit_code: Callable[[], int] = lambda: 0,
 ) -> None:
@@ -300,6 +309,7 @@ def wait_for_smoke_endpoints(
         f"http://{LOOPBACK_HOST}:{adk_port}/apps/ai_actuary_developer/app-info",
         f"http://{LOOPBACK_HOST}:{adk_port}/dev/apps/ai_actuary_developer/build_graph",
     ]
+    resolved_opener = opener or build_opener(ProxyHandler({})).open
     deadline = time.monotonic() + timeout
     pending = list(endpoints)
     while pending:
@@ -312,7 +322,9 @@ def wait_for_smoke_endpoints(
             if remaining <= 0:
                 raise LauncherError(f"Timed out waiting for smoke endpoint: {url}")
             request = Request(url, method="GET")
-            with opener(request, timeout=min(2.0, remaining)) as response:
+            with resolved_opener(
+                request, timeout=min(2.0, remaining)
+            ) as response:
                 response.read()
                 if response.status != 200:
                     raise LauncherError(f"Smoke endpoint returned HTTP {response.status}: {url}")
@@ -347,6 +359,74 @@ def supervise_children(
         return exc.exit_code
     finally:
         terminate_children(children)
+
+
+def approve_operator_handoff(
+    *,
+    control_plane_port: int,
+    bootstrap_token: str,
+    handoff_id: str,
+    opener: Callable[..., Any] | None = None,
+) -> None:
+    origin = f"http://{LOOPBACK_HOST}:{control_plane_port}"
+    request = Request(
+        f"{origin}/auth/operator/handoff/approve",
+        data=json.dumps(
+            {"bootstrap_token": bootstrap_token, "handoff_id": handoff_id}
+        ).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Origin": origin},
+        method="POST",
+    )
+    resolved_opener = opener or build_opener(ProxyHandler({})).open
+    try:
+        with resolved_opener(request, timeout=2.0) as response:
+            response.read()
+            if response.status != 200:
+                raise LauncherError("Operator Console handoff approval failed.")
+    except LauncherError:
+        raise
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        raise LauncherError("Operator Console handoff approval failed.") from exc
+
+
+def start_operator_handoff_prompt(
+    *,
+    control_plane_port: int,
+    bootstrap_token: str,
+) -> threading.Thread:
+    def approve_from_terminal() -> None:
+        print(
+            "In the Operator Console, choose Connect and paste its handoff ID below."
+        )
+        while True:
+            try:
+                handoff_id = input("Operator Console handoff ID: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                return
+            if not handoff_id:
+                continue
+            try:
+                approve_operator_handoff(
+                    control_plane_port=control_plane_port,
+                    bootstrap_token=bootstrap_token,
+                    handoff_id=handoff_id,
+                )
+            except LauncherError:
+                print(
+                    "Operator Console handoff was not approved; request a new handoff and retry.",
+                    file=sys.stderr,
+                )
+                continue
+            print("Operator Console handoff approved.")
+            return
+
+    thread = threading.Thread(
+        target=approve_from_terminal,
+        name="operator-console-handoff",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 class _SignalState:
@@ -393,12 +473,25 @@ def run_workbench(
             build_control_plane_command(config),
             build_adk_command(config, adk_executable=adk_executable),
         ]
-        children = start_children(commands, popen_factory=popen_factory, cwd=config.repo_root)
+        child_environments = _capability_child_environments(config)
+        children = start_children(
+            commands,
+            popen_factory=popen_factory,
+            cwd=config.repo_root,
+            environments=child_environments,
+        )
         print(f"Operator Console: http://{LOOPBACK_HOST}:{config.control_plane_port}/console")
         print(f"ADK Developer Web (development-only): http://{LOOPBACK_HOST}:{config.adk_port}")
-        smoke_check = None
-        if smoke:
-            smoke_check = lambda processes: wait_for_smoke_endpoints(
+        if not smoke and sys.stdin.isatty():
+            start_operator_handoff_prompt(
+                control_plane_port=config.control_plane_port,
+                bootstrap_token=child_environments[0][
+                    "AI_ACTUARY_OPERATOR_BOOTSTRAP_TOKEN"
+                ],
+            )
+
+        def run_smoke_check(processes: Sequence[Any]) -> None:
+            wait_for_smoke_endpoints(
                 control_plane_port=config.control_plane_port,
                 adk_port=config.adk_port,
                 children=processes,
@@ -406,6 +499,7 @@ def run_workbench(
                 stop_requested=signal_state.requested,
                 stop_exit_code=signal_state.exit_code,
             )
+        smoke_check = run_smoke_check if smoke else None
         return supervise_children(
             children,
             smoke_check=smoke_check,
@@ -442,6 +536,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         adk_port=args.adk_port,
     )
     return run_workbench(config, smoke=args.smoke, smoke_timeout=args.smoke_timeout)
+
+
+def _capability_child_environments(
+    config: LocalWorkbenchConfig,
+) -> tuple[dict[str, str], dict[str, str]]:
+    operator_credential = secrets.token_urlsafe(48)
+    adk_credential = secrets.token_urlsafe(48)
+    bootstrap_token = secrets.token_urlsafe(48)
+    control_plane_environment = dict(os.environ)
+    control_plane_environment.update(
+        {
+            "AI_ACTUARY_OPERATOR_CREDENTIAL": operator_credential,
+            "AI_ACTUARY_ADK_CREDENTIAL": adk_credential,
+            "AI_ACTUARY_OPERATOR_BOOTSTRAP_TOKEN": bootstrap_token,
+            "AI_ACTUARY_OPERATOR_ORIGIN": (
+                f"http://{LOOPBACK_HOST}:{config.control_plane_port}"
+            ),
+        }
+    )
+    adk_environment = dict(os.environ)
+    adk_environment.pop("AI_ACTUARY_OPERATOR_CREDENTIAL", None)
+    adk_environment.pop("AI_ACTUARY_OPERATOR_BOOTSTRAP_TOKEN", None)
+    adk_environment["AI_ACTUARY_ADK_CREDENTIAL"] = adk_credential
+    adk_environment["AI_ACTUARY_CONTROL_PLANE_URL"] = (
+        f"http://{LOOPBACK_HOST}:{config.control_plane_port}"
+    )
+    return control_plane_environment, adk_environment
 
 
 if __name__ == "__main__":
