@@ -21,7 +21,11 @@ from reserving_workflow.contracts import (
     is_terminal_run_status,
 )
 from reserving_workflow.runtime.adk_execution import (
+    AdkBenchmarkRequest,
+    AdkDebugContext,
+    AdkRepeatabilityRequest,
     AdkStartRequest,
+    adk_debug_request_fingerprint,
     request_fingerprint,
     validate_adk_provenance,
 )
@@ -505,7 +509,7 @@ class ReadOnlyControlPlaneClient:
 
 
 class AdkControlPlaneClient(ReadOnlyControlPlaneClient):
-    """Credential-bound client for the four Phase-3 ADK execution tools."""
+    """Credential-bound client for ADK execution and bounded debug tools."""
 
     def __init__(self, base_url: str, *, credential: str, **kwargs: Any) -> None:
         if not isinstance(credential, str) or len(credential) < 8:
@@ -559,6 +563,215 @@ class AdkControlPlaneClient(ReadOnlyControlPlaneClient):
             )
         return {key: payload[key] for key in required} | {
             "idempotent_replay": bool(payload.get("idempotent_replay"))
+        }
+
+    def rerun_run(
+        self,
+        *,
+        run_id: str,
+        adk_app: str,
+        adk_session_id: str,
+        adk_invocation_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        safe_run_id = _identifier(run_id, field_name="run_id")
+        request = AdkDebugContext(
+            adk_app=adk_app,
+            adk_session_id=adk_session_id,
+            adk_invocation_id=adk_invocation_id,
+        )
+        payload = self._request_json(
+            "POST",
+            f"/adk/runs/{safe_run_id}/rerun",
+            headers=self._debug_confirmation_headers(
+                action="rerun_run",
+                object_id=safe_run_id,
+                request=request,
+                idempotency_key=idempotency_key,
+            ),
+            json=request.model_dump(mode="json"),
+        )
+        required = {"run_id", "case_id", "status", "operation_id", "correlation_id", "parent_run_id"}
+        if required - payload.keys() or payload.get("parent_run_id") != safe_run_id:
+            raise ControlPlaneContractError(
+                code="invalid_contract",
+                message="Control plane returned an invalid response contract.",
+            )
+        _require_path_free_payload(payload)
+        return payload
+
+    def replay_run(self, run_id: str) -> dict[str, Any]:
+        safe_run_id = _identifier(run_id, field_name="run_id")
+        payload = self._request_json("POST", f"/adk/runs/{safe_run_id}/replay", json={})
+        replay = payload.get("replay")
+        if not isinstance(replay, dict) or replay.get("run_id") != safe_run_id:
+            raise ControlPlaneContractError(
+                code="invalid_contract",
+                message="Control plane returned an invalid response contract.",
+            )
+        _require_path_free_payload(replay)
+        return replay
+
+    def compare_repeatability(self, run_ids: list[str]) -> dict[str, Any]:
+        request = AdkRepeatabilityRequest(run_ids=run_ids)
+        payload = self._request_json(
+            "POST",
+            "/adk/repeatability",
+            json=request.model_dump(mode="json"),
+        )
+        repeatability = payload.get("repeatability")
+        if (
+            not isinstance(repeatability, dict)
+            or repeatability.get("run_count") != len(request.run_ids)
+        ):
+            raise ControlPlaneContractError(
+                code="invalid_contract",
+                message="Control plane returned an invalid response contract.",
+            )
+        _require_path_free_payload(repeatability)
+        return repeatability
+
+    def run_bounded_benchmark(
+        self,
+        *,
+        case_pack_id: str,
+        lane: str,
+        idempotency_key: str,
+        case_limit: int | None = None,
+    ) -> dict[str, Any]:
+        request = AdkBenchmarkRequest(
+            case_pack_id=case_pack_id,
+            lane=lane,
+            case_limit=case_limit,
+        )
+        payload = self._request_json(
+            "POST",
+            "/adk/benchmarks/bounded",
+            headers=self._debug_confirmation_headers(
+                action="run_bounded_benchmark",
+                object_id=request.case_pack_id,
+                request=request,
+                idempotency_key=idempotency_key,
+            ),
+            json=request.model_dump(mode="json"),
+        )
+        benchmark = payload.get("benchmark")
+        if (
+            not isinstance(benchmark, dict)
+            or benchmark.get("case_pack_id") != request.case_pack_id
+            or not isinstance(payload.get("operation_id"), str)
+        ):
+            raise ControlPlaneContractError(
+                code="invalid_contract",
+                message="Control plane returned an invalid response contract.",
+            )
+        _require_path_free_payload(payload)
+        _require_path_free_payload(benchmark)
+        return payload
+
+    def export_run_report(
+        self,
+        *,
+        run_id: str,
+        adk_app: str,
+        adk_session_id: str,
+        adk_invocation_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        safe_run_id = _identifier(run_id, field_name="run_id")
+        request = AdkDebugContext(
+            adk_app=adk_app,
+            adk_session_id=adk_session_id,
+            adk_invocation_id=adk_invocation_id,
+        )
+        payload = self._request_json(
+            "POST",
+            f"/adk/runs/{safe_run_id}/report-export",
+            headers=self._debug_confirmation_headers(
+                action="export_run_report",
+                object_id=safe_run_id,
+                request=request,
+                idempotency_key=idempotency_key,
+            ),
+            json=request.model_dump(mode="json"),
+        )
+        report = payload.get("report")
+        if (
+            not isinstance(report, dict)
+            or not isinstance(report.get("run"), dict)
+            or report["run"].get("run_id") != safe_run_id
+            or not isinstance(payload.get("operation_id"), str)
+        ):
+            raise ControlPlaneContractError(
+                code="invalid_contract",
+                message="Control plane returned an invalid response contract.",
+            )
+        _require_path_free_payload(payload)
+        _require_path_free_payload(report)
+        return payload
+
+    def get_debug_operation_status(self, operation_id: str) -> dict[str, Any]:
+        safe_operation_id = _identifier(operation_id, field_name="operation_id")
+        payload = self._request_json("GET", f"/adk/operations/{safe_operation_id}")
+        operation = payload.get("operation")
+        if (
+            not isinstance(operation, dict)
+            or operation.get("operation_id") != safe_operation_id
+            or not isinstance(operation.get("status"), str)
+        ):
+            raise ControlPlaneContractError(
+                code="invalid_contract",
+                message="Control plane returned an invalid response contract.",
+            )
+        _require_path_free_payload(operation)
+        return operation
+
+    def wait_debug_operation(
+        self,
+        *,
+        operation_id: str,
+        timeout_seconds: float = 1.0,
+    ) -> dict[str, Any]:
+        safe_operation_id = _identifier(operation_id, field_name="operation_id")
+        payload = self._request_json(
+            "POST",
+            f"/adk/operations/{safe_operation_id}/wait",
+            json={"timeout_seconds": timeout_seconds},
+        )
+        operation = payload.get("operation")
+        if (
+            not isinstance(operation, dict)
+            or operation.get("operation_id") != safe_operation_id
+            or not isinstance(operation.get("status"), str)
+        ):
+            raise ControlPlaneContractError(
+                code="invalid_contract",
+                message="Control plane returned an invalid response contract.",
+            )
+        _require_path_free_payload(operation)
+        return operation
+
+    def _debug_confirmation_headers(
+        self,
+        *,
+        action: str,
+        object_id: str,
+        request: AdkDebugContext | AdkBenchmarkRequest,
+        idempotency_key: str,
+    ) -> dict[str, str]:
+        fingerprint = adk_debug_request_fingerprint(
+            action=action,
+            object_id=object_id,
+            request=request,
+        )
+        confirmation = hmac.new(
+            self._confirmation_key,
+            f"{idempotency_key}:{fingerprint}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return {
+            "Idempotency-Key": idempotency_key,
+            "X-ADK-Confirmation": confirmation,
         }
 
     def get_run_status(self, run_id: str) -> dict[str, Any]:
@@ -657,6 +870,50 @@ def _require_contract_identity(condition: bool) -> None:
             code="invalid_contract",
             message="Control plane returned an invalid response contract.",
         )
+
+
+def _require_path_free_payload(payload: Any) -> None:
+    stack = [payload]
+    forbidden_keys = {
+        "artifact_root",
+        "artifact_roots",
+        "manifest_path",
+        "manifest_paths",
+        "registry_path",
+        "review_dir",
+        "review_store_dir",
+        "output_dir",
+        "output_path",
+        "filename",
+        "filenames",
+        "url",
+        "urls",
+        "authorization",
+        "cookie",
+        "cookies",
+    }
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if str(key).casefold() in forbidden_keys:
+                    raise ControlPlaneContractError(
+                        code="invalid_contract",
+                        message="Control plane returned an invalid response contract.",
+                    )
+                stack.append(nested)
+        elif isinstance(value, list):
+            stack.extend(value)
+        elif isinstance(value, str):
+            if (
+                "://" in value
+                or value.startswith(("/", "\\"))
+                or (len(value) >= 3 and value[1:3] in {":\\", ":/"})
+            ):
+                raise ControlPlaneContractError(
+                    code="invalid_contract",
+                    message="Control plane returned an invalid response contract.",
+                )
 
 
 def _event_type_matches_status(event: RunEvent) -> bool:

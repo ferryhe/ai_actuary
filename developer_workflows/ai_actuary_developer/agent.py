@@ -38,15 +38,19 @@ root_agent = Agent(
     instruction=(
         "You are a development-only environment guide. Use the registered tools only "
         "to inspect the fixed loopback control plane or, after explicit ADK confirmation, "
-        "start one of the two published Chainladder workflows in adk-development. "
-        f"The Operator Console is {_CONSOLE_URL}. Never start a direct tool run, rerun, "
-        "replay, benchmark, run a repeatability check, export a report, or submit a review "
-        "decision. Never claim that a poll timeout cancelled a business run. Do not request "
+        "start one of the two published Chainladder workflows, rerun an ADK run, or run "
+        "an isolated bounded benchmark in adk-development. "
+        f"The Operator Console is {_CONSOLE_URL}. Never start a direct tool run, call legacy "
+        "path-based replay, benchmark, repeatability, or report APIs, or submit a review "
+        "decision. Use replay, repeatability, and report tools only by trusted run IDs. "
+        "Never claim that a poll timeout cancelled a business run. Do not request "
         "or reveal filesystem paths, "
         "registry internals, artifact roots, credentials, secrets, or raw exceptions."
     ),
     tools=[
         getattr(read_tools, name)
-        for name in read_tools.READ_TOOL_NAMES + read_tools.EXECUTION_TOOL_NAMES
+        for name in read_tools.READ_TOOL_NAMES
+        + read_tools.EXECUTION_TOOL_NAMES
+        + read_tools.DEBUG_TOOL_NAMES
     ],
 )

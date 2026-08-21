@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import hashlib
 import os
+import secrets
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +45,7 @@ from reserving_workflow.adapters.control_plane.projections import (
 )
 from reserving_workflow.artifacts import replay as replay_helpers
 from reserving_workflow.artifacts.storage import resolve_artifact_path, write_json_artifact
+from reserving_workflow.calculators import ChainladderAdapter
 from reserving_workflow.contracts.control_plane import (
     ArtifactRef,
     ChainladderToolInput,
@@ -54,8 +56,14 @@ from reserving_workflow.contracts.control_plane import (
     RerunSemantics,
     ToolInvocation,
     ValidatedToolInput,
+    is_terminal_run_status,
     run_event_type_for_status,
 )
+from reserving_workflow.evaluation import (
+    run_offline_evaluation_lane,
+    run_real_model_evaluation_lane,
+)
+from reserving_workflow.evaluation.case_packs import load_case_pack
 from reserving_workflow.interfaces.operator_console import load_operator_console_html
 from reserving_workflow.model_tools import (
     MINIMAX_EXPERIENCE_STUDY_TOOL_ID,
@@ -72,6 +80,7 @@ from reserving_workflow.review import (
     write_run_review_decision_artifacts,
 )
 from reserving_workflow.reports import export_run_report
+from reserving_workflow.schemas import ReservingCaseInput
 from reserving_workflow.storage.local import (
     LocalReviewStore,
     ReviewDecisionConflictError,
@@ -81,11 +90,20 @@ from reserving_workflow.runtime import build_preflight_report, run_registry
 from reserving_workflow.runtime.adk_execution import (
     ADK_SOURCE,
     ADK_WORKSPACE_ID,
+    AdkBenchmarkRequest,
+    AdkDebugContext,
+    AdkEmptyDebugRequest,
+    AdkRepeatabilityRequest,
     AdkStartRequest,
+    MAX_ADK_BENCHMARK_CASE_LIMIT,
+    adk_debug_request_fingerprint,
     build_adk_provenance,
+    canonical_json,
     prepare_isolated_run_root,
     request_fingerprint,
+    validate_adk_inputs,
     validate_adk_provenance,
+    workflow_digest,
 )
 from reserving_workflow.storage.safe_json import (
     PinnedJsonRoot,
@@ -129,6 +147,7 @@ class ApiSettings(BaseModel):
     review_delivery_dir: str | Path | None = None
     review_store_dir: str | Path = Field(default="./tmp/reviews")
     adk_artifact_root: Path | None = None
+    evaluation_state_root: Path | None = None
     operator_credential: str | None = None
     adk_credential: str | None = None
     operator_bootstrap_token: str | None = None
@@ -136,6 +155,13 @@ class ApiSettings(BaseModel):
     capability_enforcement: bool | None = None
     operator_session_ttl_seconds: float = Field(default=900.0, gt=0, le=3600.0)
     operator_bootstrap_ttl_seconds: float = Field(default=60.0, gt=0, le=300.0)
+    adk_benchmark_input_byte_limit: int = Field(default=65_536, gt=0)
+    adk_benchmark_total_byte_limit: int = Field(default=1_000_000, gt=0)
+    adk_benchmark_output_byte_limit: int = Field(default=100_000, gt=0)
+    adk_benchmark_wall_time_seconds: float = Field(default=30.0, gt=0)
+    adk_benchmark_temp_storage_bytes: int = Field(default=1_000_000, gt=0)
+    adk_benchmark_retention_days: int = Field(default=7, gt=0)
+    adk_benchmark_concurrency: int = Field(default=1, gt=0, le=1)
 
 
 class RunCreateRequest(BaseModel):
@@ -197,6 +223,12 @@ class OperatorHandoffApproveRequest(BaseModel):
 class OperatorHandoffClaimRequest(BaseModel):
     handoff_id: str = Field(min_length=16, max_length=128)
     claim_token: str = Field(min_length=32, max_length=256)
+
+
+class AdkOperationWaitRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    timeout_seconds: float = Field(default=1.0, ge=0, le=30)
 
 
 def _create_app(
@@ -262,6 +294,10 @@ def _create_app(
     app.state.adk_artifact_root = (
         resolved_settings.adk_artifact_root
         or Path(resolved_settings.artifact_root).expanduser().absolute() / ADK_WORKSPACE_ID
+    )
+    app.state.evaluation_state_root = (
+        resolved_settings.evaluation_state_root
+        or Path(resolved_settings.artifact_root).expanduser().absolute().parent / "adk-evaluations"
     )
     if enforcement_enabled:
         run_registry.mark_incomplete_adk_runs_stale(resolved_settings.registry_path)
@@ -1142,9 +1178,14 @@ def _create_app(
                 task_contracts_module=task_contracts_module,
                 tool_registry=resolved_tool_registry,
             )
-            provenance = build_adk_provenance(request, workflow_entry=workflow_entry)
+            provenance = build_adk_provenance(
+                request,
+                workflow_entry=workflow_entry,
+                run_id=run_id,
+            )
             entry, created = run_registry.accept_adk_run(
                 registry_path=resolved_settings.registry_path,
+                action="start_workflow_run",
                 idempotency_key=idempotency_key,
                 request_fingerprint=fingerprint,
                 confirmation_grant_digest=hashlib.sha256(str(confirmation).encode("utf-8")).hexdigest(),
@@ -1155,6 +1196,14 @@ def _create_app(
                 artifact_root=str(artifact_dir),
                 workflow_id=request.workflow_id,
                 provenance=provenance,
+                operator_params={
+                    "case_id": request.case_id,
+                    "workflow_id": request.workflow_id,
+                    "workflow_inputs": dict(request.inputs),
+                    "created_by": "adk-developer",
+                    "operator_id": "adk-developer",
+                    "workspace_id": ADK_WORKSPACE_ID,
+                },
             )
         except run_registry.IdempotencyConflictError as exc:
             raise HTTPException(
@@ -1197,6 +1246,526 @@ def _create_app(
                 "correlation_id": str((entry.get("provenance") or {}).get("correlation_id")),
                 "idempotent_replay": not created,
             },
+        )
+
+    def _verify_adk_debug_confirmation(
+        *,
+        action: str,
+        object_id: str,
+        request: AdkDebugContext | AdkBenchmarkRequest,
+        http_request: Request,
+    ) -> tuple[str, str, str]:
+        if authority is None:
+            raise HTTPException(status_code=503, detail="ADK execution is not configured.")
+        idempotency_key = http_request.headers.get("idempotency-key")
+        confirmation = http_request.headers.get("x-adk-confirmation")
+        if not idempotency_key:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "idempotency_key_required", "message": "Idempotency key is required."},
+            )
+        if not 16 <= len(idempotency_key) <= 256:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "idempotency_key_invalid", "message": "Idempotency key is invalid."},
+            )
+        fingerprint = adk_debug_request_fingerprint(
+            action=action,
+            object_id=object_id,
+            request=request,
+        )
+        if not authority.verify_adk_confirmation(
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+            candidate=confirmation,
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "confirmation_invalid", "message": "Confirmation binding is invalid."},
+            )
+        return idempotency_key, fingerprint, str(confirmation)
+
+    @app.post("/adk/runs/{run_id}/rerun")
+    def rerun_adk_run(
+        run_id: str,
+        request: AdkDebugContext,
+        http_request: Request,
+        background_tasks: BackgroundTasks,
+    ) -> JSONResponse:
+        idempotency_key, fingerprint, confirmation = _verify_adk_debug_confirmation(
+            action="rerun_run",
+            object_id=run_id,
+            request=request,
+            http_request=http_request,
+        )
+        try:
+            source_entry = _get_scoped_entry(http_request, run_id)
+            source_provenance = validate_adk_provenance(source_entry.get("provenance"))
+            workflow_id = str(source_provenance["workflow_id"])
+            workflow_entry = resolved_workflow_catalog.get_workflow(workflow_id)
+            if not workflow_entry.builtin:
+                raise ValueError("Workflow is not published for ADK execution")
+            source_workflow_digest = str(source_provenance["workflow_digest"])
+            if workflow_digest(workflow_entry) != source_workflow_digest:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "workflow_version_unavailable",
+                        "message": "The source run's workflow version is unavailable.",
+                    },
+                )
+            workflow_inputs_unavailable_detail = {
+                "code": "workflow_inputs_unavailable",
+                "message": "The source run's frozen workflow inputs are unavailable.",
+            }
+            source_operator_params = source_entry.get("operator_params")
+            if (
+                not isinstance(source_operator_params, dict)
+                or "workflow_inputs" not in source_operator_params
+                or not isinstance(source_operator_params["workflow_inputs"], dict)
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=workflow_inputs_unavailable_detail,
+                )
+            workflow_inputs = dict(source_operator_params["workflow_inputs"])
+            try:
+                validate_adk_inputs(workflow_inputs)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail=workflow_inputs_unavailable_detail,
+                ) from exc
+            child_request = AdkStartRequest(
+                workflow_id=workflow_id,
+                case_id=str(source_entry.get("case_id") or ""),
+                inputs=workflow_inputs,
+                adk_app=request.adk_app,
+                adk_session_id=request.adk_session_id,
+                adk_invocation_id=request.adk_invocation_id,
+                parent_run_id=run_id,
+            )
+            adk_root = Path(app.state.adk_artifact_root).expanduser().absolute()
+            child_run_id = f"adk-{uuid4_hex()}"
+            operation_id = f"op_{uuid4_hex()}"
+            artifact_dir = adk_root / child_run_id
+            lineage = source_provenance.get("lineage")
+            root_run_id = (
+                lineage.get("root_run_id")
+                if isinstance(lineage, dict) and lineage.get("root_run_id")
+                else run_id
+            )
+            provenance = build_adk_provenance(
+                child_request,
+                workflow_entry=workflow_entry,
+                run_id=child_run_id,
+                workflow_digest_override=str(source_provenance["workflow_digest"]),
+                source_run_id=run_id,
+                root_run_id=str(root_run_id),
+            )
+            run_request = RunCreateRequest(
+                case_id=child_request.case_id,
+                workflow_id=workflow_id,
+                inputs=workflow_inputs,
+                background=True,
+            )
+            operator_params = _workflow_operator_params_from_request(
+                run_request,
+                workflow_entry=workflow_entry,
+                artifact_dir=artifact_dir,
+                review_delivery_dir=None,
+                registry_path=resolved_settings.registry_path,
+                ownership={
+                    "created_by": "adk-developer",
+                    "operator_id": "adk-developer",
+                    "workspace_id": ADK_WORKSPACE_ID,
+                },
+                runner_module=runner_module,
+                task_contracts_module=task_contracts_module,
+                tool_registry=resolved_tool_registry,
+            )
+            entry, created = run_registry.accept_adk_run(
+                registry_path=resolved_settings.registry_path,
+                action="rerun_run",
+                idempotency_key=idempotency_key,
+                request_fingerprint=fingerprint,
+                confirmation_grant_digest=hashlib.sha256(confirmation.encode("utf-8")).hexdigest(),
+                run_id=child_run_id,
+                operation_id=operation_id,
+                task_id=f"adk-{child_request.case_id}",
+                case_id=child_request.case_id,
+                artifact_root=str(artifact_dir),
+                workflow_id=workflow_id,
+                provenance=provenance,
+                operator_params={
+                    "case_id": child_request.case_id,
+                    "workflow_id": workflow_id,
+                    "workflow_inputs": workflow_inputs,
+                    "parent_run_id": run_id,
+                    "source_run_id": run_id,
+                    "created_by": "adk-developer",
+                    "operator_id": "adk-developer",
+                    "workspace_id": ADK_WORKSPACE_ID,
+                },
+            )
+        except run_registry.IdempotencyConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": "Rerun request conflicts with a persisted binding."},
+            ) from exc
+        except run_registry.RegistryIntegrityError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": "ADK registry integrity is invalid."},
+            ) from exc
+        except (ValidationError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "adk_rerun_invalid", "message": "ADK rerun request is invalid."},
+            ) from exc
+
+        if created:
+            operator_params["run_id"] = str(entry["run_id"])
+            operator_params["provenance"] = provenance
+            try:
+                isolated_root = prepare_isolated_run_root(adk_root, str(entry["run_id"]))
+                _write_initial_adk_manifest(
+                    isolated_root,
+                    entry=entry,
+                    provenance=provenance,
+                )
+                scheduler = background_task_runner or background_tasks.add_task
+                scheduler(_run_workflow_background, operator_params)
+            except Exception as exc:
+                _record_run_failure(operator_params, exc, execution_mode="background")
+
+        entry_provenance = entry.get("provenance") or {}
+        return JSONResponse(
+            status_code=202,
+            content={
+                "ok": True,
+                "status": str(entry.get("status")),
+                "run_id": str(entry.get("run_id")),
+                "operation_id": str(entry.get("operation_id")),
+                "case_id": str(entry.get("case_id")),
+                "correlation_id": str(entry_provenance.get("correlation_id")),
+                "parent_run_id": str(entry_provenance.get("parent_run_id")),
+                "source_run_id": str(entry_provenance.get("source_run_id")),
+                "idempotent_replay": not created,
+            },
+        )
+
+    @app.post("/adk/runs/{run_id}/replay")
+    async def replay_adk_run(
+        run_id: str,
+        request: AdkEmptyDebugRequest,
+        http_request: Request,
+    ) -> dict[str, Any]:
+        del request
+        entry = _get_scoped_entry(http_request, run_id)
+        return {"replay": _adk_replay_payload(entry)}
+
+    @app.post("/adk/repeatability")
+    async def compare_adk_repeatability(
+        request: AdkRepeatabilityRequest,
+        http_request: Request,
+    ) -> dict[str, Any]:
+        entries = [_get_scoped_entry(http_request, run_id) for run_id in request.run_ids]
+        return {"repeatability": _adk_repeatability_payload(entries)}
+
+    @app.post("/adk/runs/{run_id}/report-export")
+    async def export_adk_run_report(
+        run_id: str,
+        request: AdkDebugContext,
+        http_request: Request,
+    ) -> JSONResponse:
+        idempotency_key, fingerprint, confirmation = _verify_adk_debug_confirmation(
+            action="export_run_report",
+            object_id=run_id,
+            request=request,
+            http_request=http_request,
+        )
+        try:
+            entry = _get_scoped_entry(http_request, run_id)
+            operation_id = f"op_{uuid4_hex()}"
+            pending_result = {
+                "ok": True,
+                "operation_id": operation_id,
+                "status": "running",
+                "report": {
+                    "run": {"run_id": run_id, "status": str(entry.get("status"))},
+                    "artifacts": [],
+                },
+            }
+            operation, created = run_registry.record_adk_debug_operation(
+                operation_store_path=resolved_settings.registry_path,
+                action="export_run_report",
+                object_id=run_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=fingerprint,
+                confirmation_grant_digest=hashlib.sha256(confirmation.encode("utf-8")).hexdigest(),
+                operation_id=operation_id,
+                result=pending_result,
+            )
+            if not created:
+                result = dict(operation.get("result") or {})
+                return JSONResponse(
+                    status_code=202,
+                    content={**result, "idempotent_replay": True},
+                )
+            operation_id = str(operation["operation_id"])
+            try:
+                report = _export_adk_report_artifacts(
+                    settings=resolved_settings,
+                    entry=entry,
+                )
+            except Exception:
+                result = {
+                    "ok": False,
+                    "operation_id": operation_id,
+                    "status": "failed",
+                    "report": {
+                        "run": {"run_id": run_id, "status": str(entry.get("status"))},
+                        "failure_class": "report_export_failed",
+                        "artifacts": [],
+                    },
+                }
+                operation = run_registry.complete_adk_debug_operation(
+                    operation_store_path=resolved_settings.registry_path,
+                    operation_id=operation_id,
+                    result=result,
+                )
+                stored_result = dict(operation.get("result") or result)
+                return JSONResponse(
+                    status_code=202,
+                    content={**stored_result, "idempotent_replay": False},
+                )
+            result = {
+                "ok": True,
+                "operation_id": operation_id,
+                "status": "completed",
+                "report": report,
+            }
+            operation = run_registry.complete_adk_debug_operation(
+                operation_store_path=resolved_settings.registry_path,
+                operation_id=operation_id,
+                result=result,
+            )
+        except run_registry.IdempotencyConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": "Report request conflicts with a persisted binding."},
+            ) from exc
+        except run_registry.RegistryIntegrityError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": "ADK registry integrity is invalid."},
+            ) from exc
+        except ArtifactProjectionReadError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": "Report artifact could not be written safely."},
+            ) from exc
+        except SafeJsonReadError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": "Report artifact could not be written safely."},
+            ) from exc
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "report_export_unavailable", "message": "Report artifacts could not be exported."},
+            ) from exc
+        stored_result = dict(operation.get("result") or result)
+        return JSONResponse(
+            status_code=202,
+            content={**stored_result, "idempotent_replay": False},
+        )
+
+    @app.get("/adk/operations/{operation_id}")
+    async def get_adk_debug_operation_status(
+        operation_id: str,
+        http_request: Request,
+    ) -> dict[str, Any]:
+        del http_request
+        operation = _get_adk_debug_operation_by_id(operation_id)
+        return {"operation": _path_free_adk_operation(operation)}
+
+    @app.post("/adk/operations/{operation_id}/wait")
+    async def wait_adk_debug_operation(
+        operation_id: str,
+        request: AdkOperationWaitRequest,
+        http_request: Request,
+    ) -> dict[str, Any]:
+        del request, http_request
+        operation = _get_adk_debug_operation_by_id(operation_id)
+        return {"operation": _path_free_adk_operation(operation)}
+
+    def _get_adk_debug_operation_by_id(operation_id: str) -> dict[str, Any]:
+        for store_path in (
+            Path(app.state.evaluation_state_root) / "operations.json",
+            Path(resolved_settings.registry_path),
+        ):
+            try:
+                operation = run_registry.get_adk_debug_operation_by_id(
+                    operation_store_path=store_path,
+                    operation_id=operation_id,
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "operation_id_invalid", "message": "Operation ID is invalid."},
+                ) from exc
+            except run_registry.RegistryIntegrityError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": exc.code, "message": "ADK operation integrity is invalid."},
+                ) from exc
+            if operation is not None:
+                return operation
+        try:
+            operation = run_registry.get_adk_run_operation_by_id(
+                registry_path=resolved_settings.registry_path,
+                operation_id=operation_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "operation_id_invalid", "message": "Operation ID is invalid."},
+            ) from exc
+        except run_registry.RegistryIntegrityError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": "ADK operation integrity is invalid."},
+            ) from exc
+        if operation is not None:
+            return operation
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "object_not_found", "message": "Object was not found."},
+        )
+
+    @app.post("/adk/benchmarks/bounded")
+    async def run_adk_bounded_benchmark(
+        request: AdkBenchmarkRequest,
+        http_request: Request,
+    ) -> JSONResponse:
+        budget = _validate_adk_benchmark_budget(request, resolved_settings)
+        case_pack = _load_adk_case_pack(request.case_pack_id)
+        idempotency_key, fingerprint, confirmation = _verify_adk_debug_confirmation(
+            action="run_bounded_benchmark",
+            object_id=request.case_pack_id,
+            request=request,
+            http_request=http_request,
+        )
+        operation_store_path = Path(app.state.evaluation_state_root) / "operations.json"
+        operation_id = f"op_{uuid4_hex()}"
+        pending_result = {
+            "ok": True,
+            "operation_id": operation_id,
+            "status": "running",
+            "benchmark": {
+                "case_pack_id": request.case_pack_id,
+                "lane": request.lane,
+                "status": "running",
+            },
+        }
+        try:
+            operation, created = run_registry.record_adk_debug_operation(
+                operation_store_path=operation_store_path,
+                action="run_bounded_benchmark",
+                object_id=request.case_pack_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=fingerprint,
+                confirmation_grant_digest=hashlib.sha256(confirmation.encode("utf-8")).hexdigest(),
+                operation_id=operation_id,
+                result=pending_result,
+            )
+            if not created:
+                result = dict(operation.get("result") or {})
+                return JSONResponse(
+                    status_code=202,
+                    content={**result, "idempotent_replay": True},
+                )
+            operation_id = str(operation["operation_id"])
+        except run_registry.IdempotencyConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": "Benchmark request conflicts with a persisted binding."},
+            ) from exc
+        except run_registry.RegistryIntegrityError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": "ADK benchmark operation integrity is invalid."},
+            ) from exc
+        business_roots = [
+            Path(resolved_settings.registry_path).expanduser().resolve().parent,
+            Path(resolved_settings.artifact_root).expanduser().resolve(),
+            Path(resolved_settings.review_store_dir).expanduser().resolve(),
+        ]
+        try:
+            if request.lane == "offline":
+                benchmark = run_offline_evaluation_lane(
+                    case_pack_id=request.case_pack_id,
+                    case_pack=case_pack,
+                    state_root=app.state.evaluation_state_root,
+                    business_roots=business_roots,
+                    case_limit=budget.get("case_limit"),
+                    evidence_id=operation_id,
+                    budget=budget,
+                )
+            else:
+                benchmark = run_real_model_evaluation_lane(
+                    case_pack_id=request.case_pack_id,
+                    case_pack=case_pack,
+                    state_root=app.state.evaluation_state_root,
+                    business_roots=business_roots,
+                    case_limit=budget.get("case_limit"),
+                    evidence_id=operation_id,
+                    budget=budget,
+                )
+        except Exception:
+            benchmark = {
+                "ok": False,
+                "lane": request.lane,
+                "status": "failed",
+                "case_pack_id": request.case_pack_id,
+                "case_count": 0,
+                "failure_class": "benchmark_execution_failed",
+                "checks": [
+                    {
+                        "check_id": "benchmark_execution",
+                        "status": "failed",
+                        "summary": "Benchmark execution failed after operation acceptance.",
+                    }
+                ],
+            }
+        result = {
+            "ok": bool(benchmark.get("ok", False)),
+            "operation_id": operation_id,
+            "status": str(benchmark.get("status")),
+            "benchmark": benchmark,
+        }
+        try:
+            operation = run_registry.complete_adk_debug_operation(
+                operation_store_path=operation_store_path,
+                operation_id=operation_id,
+                result=result,
+            )
+        except run_registry.IdempotencyConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": "Benchmark request conflicts with a persisted binding."},
+            ) from exc
+        except run_registry.RegistryIntegrityError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": "ADK benchmark operation integrity is invalid."},
+            ) from exc
+        stored_result = dict(operation.get("result") or result)
+        return JSONResponse(
+            status_code=202,
+            content={**stored_result, "idempotent_replay": False},
         )
 
     @app.exception_handler(run_registry.RegistryIntegrityError)
@@ -1376,6 +1945,128 @@ def _write_initial_adk_manifest(
     return artifact_root / "run_manifest.json"
 
 
+def _export_adk_report_artifacts(
+    *,
+    settings: ApiSettings,
+    entry: dict[str, Any],
+) -> dict[str, Any]:
+    artifact_root = entry.get("artifact_root")
+    if not artifact_root:
+        raise ValueError("artifact_root_missing")
+    raw_report = export_run_report(
+        registry_path=settings.registry_path,
+        run_id=str(entry.get("run_id")),
+        review_store_root=settings.review_store_dir,
+        output_dir=artifact_root,
+    )
+    manifest_path = Path(str(artifact_root)).expanduser().resolve() / "run_manifest.json"
+    manifest = read_bounded_json_object(
+        artifact_root,
+        "run_manifest.json",
+        namespace="manifest",
+    )
+    artifact_paths = dict(manifest.get("artifact_paths", {}) or {})
+    logical_exports = {
+        "operator_handoff": "operator_handoff.md",
+        "reserve_summary_json": "reserve_summary.json",
+        "reserve_summary_markdown": "reserve_summary.md",
+    }
+    artifact_paths.update(logical_exports)
+    manifest["artifact_paths"] = artifact_paths
+    write_json_artifact(manifest_path, manifest)
+    status = str(entry.get("status"))
+    return {
+        "run": _path_free_run_payload(_run_summary(entry)),
+        "truthful_status": status,
+        "terminal": is_terminal_run_status(status),
+        "event_count": len(entry.get("status_history", []) or []),
+        "reserve_summary": dict(raw_report.get("reserve_summary") or {}),
+        "review": {
+            "review_id": (raw_report.get("review") or {}).get("review_id"),
+            "status": (raw_report.get("review") or {}).get("status"),
+            "review_required": bool((raw_report.get("review") or {}).get("review_required")),
+        },
+        "artifacts": [
+            {
+                "artifact_id": artifact_id,
+                "category": "report",
+                "present": (Path(str(artifact_root)).expanduser().resolve() / filename).is_file(),
+            }
+            for artifact_id, filename in logical_exports.items()
+        ],
+    }
+
+
+def _path_free_adk_operation(operation: dict[str, Any]) -> dict[str, Any]:
+    result = dict(operation.get("result") or {})
+    payload = {
+        "operation_id": str(operation.get("operation_id")),
+        "action": str(operation.get("action")),
+        "status": str(result.get("status") or "unknown"),
+    }
+    for key in ("benchmark", "report", "run"):
+        if isinstance(result.get(key), dict):
+            payload[key] = result[key]
+    return payload
+
+
+def _validate_adk_benchmark_budget(
+    request: AdkBenchmarkRequest,
+    settings: ApiSettings,
+) -> dict[str, Any]:
+    policy = {
+        "case_limit": MAX_ADK_BENCHMARK_CASE_LIMIT,
+        "input_byte_limit": settings.adk_benchmark_input_byte_limit,
+        "total_byte_limit": settings.adk_benchmark_total_byte_limit,
+        "output_byte_limit": settings.adk_benchmark_output_byte_limit,
+        "wall_time_seconds": settings.adk_benchmark_wall_time_seconds,
+        "temp_storage_bytes": settings.adk_benchmark_temp_storage_bytes,
+        "retention_days": settings.adk_benchmark_retention_days,
+        "concurrency": 1,
+    }
+    requested = request.model_dump(mode="json", exclude_none=True)
+    for field in (
+        "input_byte_limit",
+        "total_byte_limit",
+        "output_byte_limit",
+        "wall_time_seconds",
+        "temp_storage_bytes",
+        "retention_days",
+        "concurrency",
+    ):
+        if field in requested and requested[field] > policy[field]:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "benchmark_quota_exceeded",
+                    "message": "Benchmark request exceeds server quota.",
+                    "field": field,
+                    "ceiling": policy[field],
+                },
+            )
+    return {
+        field: min(requested.get(field, ceiling), ceiling)
+        for field, ceiling in policy.items()
+    }
+
+
+def _load_adk_case_pack(case_pack_id: str) -> dict[str, Any]:
+    try:
+        return load_case_pack(case_pack_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "case_pack_invalid",
+                "message": "Benchmark case pack is unavailable.",
+            },
+        ) from exc
+
+
+def _canonical_digest(payload: Any) -> str:
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
 def _path_free_run_payload(payload: dict[str, Any]) -> dict[str, Any]:
     safe = dict(payload)
     safe.pop("artifact_root", None)
@@ -1397,6 +2088,329 @@ def _path_free_artifact_payload(payload: dict[str, Any]) -> dict[str, Any]:
         )
     safe["artifacts"] = artifacts
     return safe
+
+
+def _adk_replay_payload(entry: dict[str, Any]) -> dict[str, Any]:
+    status = str(entry.get("status"))
+    if not is_terminal_run_status(status) or status != "completed":
+        _raise_adk_not_replayable()
+    try:
+        replay = _adk_replay_evidence(entry)
+    except (ArtifactProjectionReadError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "not_replayable", "message": "Run is not replayable."},
+        ) from exc
+    return {
+        "run_id": str(entry.get("run_id")),
+        "case_id": entry.get("case_id"),
+        "workflow_id": entry.get("workflow_id"),
+        "workflow_digest": replay["provenance"]["workflow_digest"],
+        "input_digest": replay["provenance"]["input_digest"],
+        "manifest_digest": replay["root_manifest_digest"],
+        "step_manifest_digest": replay["step_manifest_digest"],
+        "run_status": status,
+        "terminal": True,
+        "replay_status": "available",
+        "replay_match": replay["saved_result_digest"] == replay["replayed_result_digest"],
+        "deterministic_result": replay["saved_result"],
+        "saved_result_digest": replay["saved_result_digest"],
+        "replayed_result_digest": replay["replayed_result_digest"],
+        "deterministic_result_digest": replay["saved_result_digest"],
+        "evidence": {
+            "manifest": True,
+            "validated_input": True,
+            "case_input": True,
+            "deterministic_result": True,
+        },
+    }
+
+
+def _adk_replay_evidence(entry: dict[str, Any]) -> dict[str, Any]:
+    artifact_root = entry.get("artifact_root")
+    if not artifact_root:
+        raise ValueError("artifact_root_missing")
+    root = Path(str(artifact_root)).expanduser().absolute()
+    provenance = validate_adk_provenance(entry.get("provenance"))
+    selected_case_id = str(entry.get("case_id") or "")
+    selected_workflow_id = str(entry.get("workflow_id") or provenance.get("workflow_id") or "")
+    with TrustedArtifactRoot(root, namespace="manifest", allow_nested=True) as trusted_root:
+        root_manifest = trusted_root.read_bounded_json_object(
+            "run_manifest.json",
+            namespace="manifest",
+        )
+        validate_artifact_projection_schema("run_manifest", root_manifest)
+        for key in ("workflow_id", "workflow_digest", "input_digest"):
+            if root_manifest.get(key) != provenance.get(key):
+                raise ValueError("manifest_provenance_mismatch")
+        if str(root_manifest.get("run_id") or "") != str(entry.get("run_id") or ""):
+            raise ValueError("manifest_run_mismatch")
+        if str(root_manifest.get("case_id") or "") != selected_case_id:
+            raise ValueError("manifest_case_mismatch")
+        root_digests = _artifact_digest_ledger(root_manifest)
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        root_paths = root_manifest.get("artifact_paths")
+        if isinstance(root_paths, dict) and "deterministic_result" in root_paths:
+            candidates.append(("", root_manifest))
+        for artifact_id, raw_ref in sorted(
+            (root_paths if isinstance(root_paths, dict) else {}).items()
+        ):
+            if not (
+                isinstance(artifact_id, str)
+                and artifact_id.startswith("step_")
+                and artifact_id.endswith("_run_manifest")
+                and isinstance(raw_ref, str)
+            ):
+                continue
+            step_manifest = trusted_root.read_bounded_json_object(
+                raw_ref,
+                namespace="manifest",
+            )
+            validate_artifact_projection_schema("run_manifest", step_manifest)
+            _require_digest_match(
+                root_digests,
+                artifact_id=artifact_id,
+                payload=step_manifest,
+            )
+            base = str(Path(raw_ref.replace("\\", "/")).parent).replace("\\", "/")
+            if base == ".":
+                base = ""
+            candidates.append((base, step_manifest))
+        for base, manifest in candidates:
+            if str(manifest.get("case_id") or selected_case_id) != selected_case_id:
+                raise ValueError("step_manifest_case_mismatch")
+            if str(manifest.get("workflow_id") or selected_workflow_id) != selected_workflow_id:
+                raise ValueError("step_manifest_workflow_mismatch")
+            artifact_paths = manifest.get("artifact_paths")
+            if not isinstance(artifact_paths, dict):
+                continue
+            if not {"validated_input", "case_input", "deterministic_result"} <= set(artifact_paths):
+                continue
+            artifact_digests = _artifact_digest_ledger(manifest)
+            validated_input = _read_verified_replay_artifact(
+                trusted_root,
+                artifact_digests,
+                artifact_id="validated_input",
+                relative_path=_join_adk_manifest_ref(
+                    base,
+                    artifact_paths["validated_input"],
+                ),
+            )
+            case_input_payload = _read_verified_replay_artifact(
+                trusted_root,
+                artifact_digests,
+                artifact_id="case_input",
+                relative_path=_join_adk_manifest_ref(
+                    base,
+                    artifact_paths["case_input"],
+                ),
+            )
+            saved_result = _read_verified_replay_artifact(
+                trusted_root,
+                artifact_digests,
+                artifact_id="deterministic_result",
+                relative_path=_join_adk_manifest_ref(
+                    base,
+                    artifact_paths["deterministic_result"],
+                ),
+            )
+            validate_artifact_projection_schema("validated_input", validated_input)
+            validate_artifact_projection_schema("deterministic_result", saved_result)
+            _require_replay_payload_identity(
+                validated_input,
+                case_input_payload,
+                saved_result,
+                case_id=selected_case_id,
+                workflow_id=selected_workflow_id,
+            )
+            case_input = ReservingCaseInput.model_validate(case_input_payload)
+            replayed_result = ChainladderAdapter().calculate(case_input).model_dump(
+                mode="json"
+            )
+            saved_result_digest = _canonical_digest(saved_result)
+            replayed_result_digest = _canonical_digest(replayed_result)
+            if saved_result_digest != replayed_result_digest:
+                raise ValueError("deterministic_replay_mismatch")
+            return {
+                "provenance": provenance,
+                "root_manifest_digest": _canonical_digest(root_manifest),
+                "step_manifest_digest": _canonical_digest(manifest),
+                "validated_input": validated_input,
+                "case_input": case_input_payload,
+                "saved_result": saved_result,
+                "saved_result_digest": saved_result_digest,
+                "replayed_result_digest": replayed_result_digest,
+            }
+    raise ValueError("complete_replay_evidence_missing")
+
+
+def _artifact_digest_ledger(manifest: dict[str, Any]) -> dict[str, str]:
+    digests = manifest.get("artifact_digests")
+    if not isinstance(digests, dict):
+        raise ValueError("artifact_digests_missing")
+    return {str(key): str(value) for key, value in digests.items()}
+
+
+def _require_digest_match(
+    digests: dict[str, str],
+    *,
+    artifact_id: str,
+    payload: dict[str, Any],
+) -> None:
+    expected = digests.get(artifact_id)
+    if not isinstance(expected, str) or len(expected) != 64:
+        raise ValueError("artifact_digest_missing")
+    if not secrets.compare_digest(expected, _canonical_digest(payload)):
+        raise ValueError("artifact_digest_mismatch")
+
+
+def _read_verified_replay_artifact(
+    trusted_root: TrustedArtifactRoot,
+    digests: dict[str, str],
+    *,
+    artifact_id: str,
+    relative_path: str,
+) -> dict[str, Any]:
+    payload = trusted_root.read_bounded_json_object(
+        relative_path,
+        namespace="artifact",
+    )
+    _require_digest_match(digests, artifact_id=artifact_id, payload=payload)
+    return payload
+
+
+def _require_replay_payload_identity(
+    validated_input: dict[str, Any],
+    case_input_payload: dict[str, Any],
+    saved_result: dict[str, Any],
+    *,
+    case_id: str,
+    workflow_id: str,
+) -> None:
+    for payload in (validated_input, case_input_payload, saved_result):
+        if str(payload.get("case_id") or "") != case_id:
+            raise ValueError("replay_case_mismatch")
+        if payload.get("workflow_id") is not None and str(payload.get("workflow_id")) != workflow_id:
+            raise ValueError("replay_workflow_mismatch")
+    if validated_input.get("tool_id") != "chainladder":
+        raise ValueError("replay_tool_mismatch")
+    inputs = validated_input.get("inputs")
+    if not isinstance(inputs, dict):
+        raise ValueError("replay_validated_input_invalid")
+    expected_case_input = build_chainladder_case_payload(
+        case_id=case_id,
+        tool_inputs=inputs,
+    )
+    if canonical_json(expected_case_input) != canonical_json(case_input_payload):
+        raise ValueError("replay_case_input_mismatch")
+
+
+def _join_adk_manifest_ref(base: str, raw_ref: Any) -> str:
+    if not isinstance(raw_ref, str) or not raw_ref:
+        raise ValueError("artifact_ref_invalid")
+    normalized = raw_ref.replace("\\", "/")
+    if normalized.startswith("/") or any(part == ".." for part in normalized.split("/")):
+        raise ValueError("artifact_ref_invalid")
+    if "/" in normalized or not base:
+        return normalized
+    return f"{base}/{normalized}"
+
+
+def _adk_repeatability_payload(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    runs: list[dict[str, Any]] = []
+    compatibility: list[dict[str, Any]] = []
+    for entry in entries:
+        try:
+            provenance = validate_adk_provenance(entry.get("provenance"))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "repeatability_incompatible",
+                    "message": "Runs are not compatible for repeatability comparison.",
+                },
+            ) from exc
+        status = str(entry.get("status"))
+        runs.append(
+            {
+                "run_id": str(entry.get("run_id")),
+                "case_id": entry.get("case_id"),
+                "workflow_id": entry.get("workflow_id"),
+                "status": status,
+                "terminal": is_terminal_run_status(status),
+            }
+        )
+        compatibility.append(
+            {
+                "workspace_id": entry.get("workspace_id"),
+                "case_id": entry.get("case_id"),
+                "workflow_id": entry.get("workflow_id"),
+                "workflow_digest": provenance.get("workflow_digest"),
+                "input_digest": provenance.get("input_digest"),
+            }
+        )
+    for field in (
+        "workspace_id",
+        "case_id",
+        "workflow_id",
+        "workflow_digest",
+        "input_digest",
+    ):
+        if len({item.get(field) for item in compatibility}) != 1:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "repeatability_incompatible",
+                    "message": "Runs are not compatible for repeatability comparison.",
+                },
+            )
+
+    replays: list[dict[str, Any]] = []
+    for entry in entries:
+        try:
+            replays.append(_adk_replay_payload(entry))
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "repeatability_incompatible",
+                    "message": "Runs are not compatible for repeatability comparison.",
+                },
+            ) from exc
+    methods = {
+        (item.get("deterministic_result") or {}).get("method")
+        for item in replays
+    }
+    if None in methods or len(methods) != 1:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "repeatability_incompatible",
+                "message": "Runs are not compatible for repeatability comparison.",
+            },
+        )
+    result_digests = {item["deterministic_result_digest"] for item in replays}
+    return {
+        "run_count": len(runs),
+        "runs": runs,
+        "same_case": True,
+        "same_workflow": True,
+        "all_terminal": True,
+        "all_completed": True,
+        "stable_terminal_status": True,
+        "deterministic_method": next(iter(methods)),
+        "result_digest_match": len(result_digests) == 1,
+        "repeatability_status": (
+            "repeatable" if len(result_digests) == 1 else "different_results"
+        ),
+    }
+
+
+def _raise_adk_not_replayable() -> None:
+    raise HTTPException(
+        status_code=409,
+        detail={"code": "not_replayable", "message": "Run is not replayable."},
+    )
 
 
 def _default_artifact_dir(settings: ApiSettings, case_id: str) -> Path:
@@ -2164,6 +3178,19 @@ def _run_sequential_workflow_impl(
             resolve_artifact_path(artifact_root, "workflow_summary.json"),
             workflow_summary_payload,
         )
+    artifact_digests: dict[str, str] = {
+        "workflow_summary": _canonical_digest(workflow_summary_payload)
+    }
+    if is_adk_run:
+        assert _pinned_adk_root is not None
+        for artifact_id, artifact_ref in step_artifact_paths.items():
+            if not artifact_id.endswith("_run_manifest"):
+                continue
+            step_manifest = _pinned_adk_root.read_bounded_json_object(
+                artifact_ref,
+                namespace="manifest",
+            )
+            artifact_digests[artifact_id] = _canonical_digest(step_manifest)
     manifest_payload = {
         "workflow_id": workflow_id,
         "case_id": case_id,
@@ -2177,6 +3204,7 @@ def _run_sequential_workflow_impl(
             ),
             **step_artifact_paths,
         },
+        "artifact_digests": artifact_digests,
     }
     if not is_adk_run:
         manifest_payload["artifact_root"] = str(artifact_root)
@@ -2321,6 +3349,7 @@ def _run_adk_operator_step_staged(
             runner_module=runner_module,
             task_contracts_module=task_contracts_module,
         )
+        published_artifacts: set[str] = set()
         with PinnedJsonRoot(
             staging_root,
             namespace="staged_artifact",
@@ -2340,6 +3369,32 @@ def _run_adk_operator_step_staged(
                     _sanitize_adk_step_payload(filename, payload),
                     namespace="artifact",
                 )
+                published_artifacts.add(filename)
+        if "run_manifest.json" in published_artifacts:
+            manifest = pinned_root.read_bounded_json_object(
+                f"{step_id}/run_manifest.json",
+                namespace="manifest",
+            )
+            artifact_paths = dict(manifest.get("artifact_paths", {}) or {})
+            artifact_digests = dict(manifest.get("artifact_digests", {}) or {})
+            for filename in sorted(published_artifacts):
+                artifact_id = Path(filename).stem
+                artifact_paths.setdefault(artifact_id, filename)
+                if filename == "run_manifest.json":
+                    continue
+                payload = pinned_root.read_bounded_json_object(
+                    f"{step_id}/{filename}",
+                    namespace="artifact",
+                )
+                artifact_digests[artifact_id] = _canonical_digest(payload)
+            artifact_paths["run_manifest"] = "run_manifest.json"
+            manifest["artifact_paths"] = artifact_paths
+            manifest["artifact_digests"] = artifact_digests
+            pinned_root.write_json_object_atomic(
+                f"{step_id}/run_manifest.json",
+                manifest,
+                namespace="manifest",
+            )
 
     review_packet = step_result.get("review_packet")
     if isinstance(review_packet, dict):
@@ -2470,6 +3525,11 @@ def _run_validation_step(
                 if pinned_adk_root is not None
                 else str(validation_result_path)
             ),
+        },
+        "artifact_digests": {
+            "validated_input": _canonical_digest(validated_input_payload),
+            "case_input": _canonical_digest(case_payload),
+            "validation_result": _canonical_digest(validation_result),
         },
     }
     if pinned_adk_root is not None:

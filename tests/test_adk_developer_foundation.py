@@ -1088,26 +1088,29 @@ raise SystemExit(
     not _google_adk_available(),
     reason="google-adk is intentionally absent from the default dev extra",
 )
-def test_developer_agent_is_code_first_gemini_with_bounded_phase3_tools() -> None:
+def test_developer_agent_is_code_first_gemini_with_bounded_phase5_tools() -> None:
     from developer_workflows.ai_actuary_developer import agent, tools
     from reserving_workflow.adapters.control_plane import ReadOnlyControlPlaneClient
+
+    tool_names = [tool.__name__ for tool in agent.root_agent.tools]
+    expected_tool_names = tools.READ_TOOL_NAMES + tools.EXECUTION_TOOL_NAMES + tools.DEBUG_TOOL_NAMES
 
     assert agent.root_agent.name == "ai_actuary_developer"
     assert agent.root_agent.model == "gemini-2.5-flash"
     assert agent.describe_development_environment()["model"] == agent.root_agent.model
     assert "development-only" in agent.root_agent.description.lower()
     assert "http://127.0.0.1:8000/console" in agent.root_agent.description
-    assert [tool.__name__ for tool in agent.root_agent.tools] == list(
-        tools.READ_TOOL_NAMES + tools.EXECUTION_TOOL_NAMES
-    )
-    assert len(agent.root_agent.tools) == 16
+    assert tool_names == list(expected_tool_names)
+    assert len(agent.root_agent.tools) == len(expected_tool_names) == 23
     assert "explicit ADK confirmation" in agent.root_agent.instruction
     assert "two published Chainladder workflows" in agent.root_agent.instruction
+    assert "trusted run IDs" in agent.root_agent.instruction
+    assert "legacy path-based" in agent.root_agent.instruction
     assert "review decision" in agent.root_agent.instruction
     assert not any(
-        forbidden in tool.__name__
-        for tool in agent.root_agent.tools
-        for forbidden in ("rerun", "replay", "benchmark", "report", "decision", "start_tool")
+        forbidden in tool_name
+        for tool_name in tool_names
+        for forbidden in ("path", "manifest", "decision", "start_tool")
     )
 
     requested: list[str] = []

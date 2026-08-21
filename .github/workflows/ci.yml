@@ -64,10 +64,73 @@ jobs:
           python -c "from developer_workflows.ai_actuary_developer import root_agent; assert root_agent.name == 'ai_actuary_developer'"
 
       - name: Run ADK foundation and Phase 3 tool tests
-        run: python -m pytest tests/test_adk_developer_foundation.py tests/test_operator_console_assets.py tests/test_adk_run_tools.py tests/test_adk_workflow_drafts.py tests/test_adk_workflow_policy.py -q
+        run: python -m pytest tests/test_adk_developer_foundation.py tests/test_operator_console_assets.py tests/test_adk_run_tools.py tests/test_adk_workflow_drafts.py tests/test_adk_workflow_policy.py tests/test_adk_trace_correlation.py tests/test_adk_evaluations.py -q
 
       - name: Smoke dual-interface launcher
         run: python scripts/run_local_workbench.py --smoke
+
+  adk-model-free-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run Phase 5 contract and offline evaluation tests
+        run: python -m pytest tests/test_adk_trace_correlation.py tests/test_adk_evaluations.py -q
+
+      - name: Record offline evaluation evidence
+        run: python -m reserving_workflow.evaluation.adk_lanes --lane offline --state-root tmp/adk-offline-eval
+
+  adk-real-model-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Record real-model evaluation evidence
+        run: python -m reserving_workflow.evaluation.adk_lanes --lane real-model --state-root tmp/adk-real-model-eval
+
+      - name: Verify real-model evidence
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          evidence_files = list(Path("tmp/adk-real-model-eval").glob("*/evidence.json"))
+          assert len(evidence_files) == 1
+          evidence = json.loads(evidence_files[0].read_text(encoding="utf-8"))
+          assert evidence["lane"] == "real_model"
+          assert evidence["status"] in {"skipped", "completed"}
+          assert evidence.get("ok") is not False
+          if evidence["status"] == "skipped":
+              assert "not_run_reason" in evidence
+          assert "config_summary" in evidence
+          assert "code_sha" in evidence
+          PY
 
   adk-workflow-lab:
     strategy:

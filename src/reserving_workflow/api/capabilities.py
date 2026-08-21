@@ -85,6 +85,13 @@ ROUTE_CAPABILITY_MATRIX: dict[tuple[str, str], RoutePolicy] = {
     ("POST", "/repeatability"): RoutePolicy(_OPERATOR),
     ("POST", "/benchmarks/batch"): RoutePolicy(_OPERATOR),
     ("POST", "/adk/runs"): RoutePolicy(_ADK),
+    ("POST", "/adk/runs/{run_id}/rerun"): RoutePolicy(_ADK),
+    ("POST", "/adk/runs/{run_id}/replay"): RoutePolicy(_ADK),
+    ("POST", "/adk/repeatability"): RoutePolicy(_ADK),
+    ("POST", "/adk/runs/{run_id}/report-export"): RoutePolicy(_ADK),
+    ("POST", "/adk/benchmarks/bounded"): RoutePolicy(_ADK),
+    ("GET", "/adk/operations/{operation_id}"): RoutePolicy(_ADK),
+    ("POST", "/adk/operations/{operation_id}/wait"): RoutePolicy(_ADK),
 }
 
 

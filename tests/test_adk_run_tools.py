@@ -37,13 +37,72 @@ class FakeExecutionClient:
         self.calls.append(kwargs)
         return {"run_id": "adk-run-1", "case_id": kwargs["case_id"], "status": "accepted", "operation_id": "op-1"}
 
+    def rerun_run(self, **kwargs):
+        self.calls.append(kwargs)
+        return {
+            "run_id": "adk-run-child",
+            "case_id": "case-1",
+            "status": "accepted",
+            "operation_id": "op-child",
+            "correlation_id": "corr-child",
+            "parent_run_id": kwargs["run_id"],
+        }
 
-def test_exact_tool_surface_retains_twelve_reads_and_adds_four_execution_tools():
+    def replay_run(self, run_id):
+        self.calls.append({"replay_run": run_id})
+        return {"run_id": run_id, "run_status": "completed", "replay_status": "available"}
+
+    def compare_repeatability(self, run_ids):
+        self.calls.append({"compare_repeatability": run_ids})
+        return {"run_count": len(run_ids), "repeatability_status": "comparable"}
+
+    def run_bounded_benchmark(self, **kwargs):
+        self.calls.append(kwargs)
+        return {
+            "operation_id": "op-benchmark",
+            "case_pack_id": kwargs["case_pack_id"],
+            "lane": kwargs["lane"],
+            "status": "completed",
+            "business_storage_changed": False,
+        }
+
+    def export_run_report(self, **kwargs):
+        self.calls.append(kwargs)
+        run_id = kwargs["run_id"]
+        return {
+            "operation_id": "op-report",
+            "report": {
+                "run": {"run_id": run_id, "status": "completed"},
+                "artifacts": [
+                    {"artifact_id": "run_report", "category": "report", "present": True}
+                ],
+            },
+        }
+
+    def get_debug_operation_status(self, operation_id):
+        self.calls.append({"get_debug_operation_status": operation_id})
+        return {"operation_id": operation_id, "status": "completed"}
+
+    def wait_debug_operation(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"operation_id": kwargs["operation_id"], "status": "completed"}
+
+
+def test_exact_tool_surface_retains_twelve_reads_four_execution_and_five_debug_tools():
     assert len(tools.READ_TOOL_NAMES) == 12
     assert tools.EXECUTION_TOOL_NAMES == (
         "start_workflow_run", "wait_run", "get_run_status", "summarize_run"
     )
-    assert len(set(tools.READ_TOOL_NAMES + tools.EXECUTION_TOOL_NAMES)) == 16
+    assert tools.DEBUG_TOOL_NAMES == (
+        "rerun_run",
+        "replay_run",
+        "compare_repeatability",
+        "run_bounded_benchmark",
+        "export_run_report",
+        "get_debug_operation_status",
+        "wait_debug_operation",
+    )
+    assert len(set(tools.READ_TOOL_NAMES + tools.EXECUTION_TOOL_NAMES + tools.DEBUG_TOOL_NAMES)) == 23
 
 
 def test_start_confirmation_has_zero_control_plane_side_effect_before_approval():
@@ -229,3 +288,85 @@ def test_status_and_summary_preserve_server_persisted_provenance_and_recovery_st
     assert status["data"]["recovery_state"] == "stale"
     assert summary["data"]["provenance"] == provenance
     assert summary["data"]["recovery_state"] == "stale"
+
+
+def test_rerun_benchmark_and_report_require_confirmation_before_network_call():
+    FakeExecutionClient.calls.clear()
+    context = FakeConfirmationContext()
+    with tools.use_execution_client_factory(FakeExecutionClient):
+        pending = tools.rerun_run("adk-run-1", context)
+        assert pending["status"] == "confirmation_required"
+        assert FakeExecutionClient.calls == []
+        assert context.requests[0]["payload"] == {
+            "action": "rerun_run",
+            "run_id": "adk-run-1",
+            "workspace_id": "adk-development",
+            "creates_child_run": True,
+        }
+
+        context.tool_confirmation = SimpleNamespace(
+            confirmed=True,
+            payload=context.requests[0]["payload"],
+        )
+        accepted = tools.rerun_run("adk-run-1", context)
+        assert accepted["ok"] is True
+        assert FakeExecutionClient.calls[-1]["run_id"] == "adk-run-1"
+
+    FakeExecutionClient.calls.clear()
+    context = FakeConfirmationContext()
+    with tools.use_execution_client_factory(FakeExecutionClient):
+        pending = tools.run_bounded_benchmark("deterministic-v1", "offline", context)
+        assert pending["status"] == "confirmation_required"
+        assert FakeExecutionClient.calls == []
+        context.tool_confirmation = SimpleNamespace(
+            confirmed=True,
+            payload=context.requests[0]["payload"],
+        )
+        accepted = tools.run_bounded_benchmark("deterministic-v1", "offline", context)
+        assert accepted["ok"] is True
+        assert FakeExecutionClient.calls[-1]["case_pack_id"] == "deterministic-v1"
+
+    FakeExecutionClient.calls.clear()
+    context = FakeConfirmationContext()
+    with tools.use_execution_client_factory(FakeExecutionClient):
+        pending = tools.export_run_report("adk-run-1", context)
+        assert pending["status"] == "confirmation_required"
+        assert FakeExecutionClient.calls == []
+        assert context.requests[0]["payload"] == {
+            "action": "export_run_report",
+            "run_id": "adk-run-1",
+            "workspace_id": "adk-development",
+            "creates_report_artifact": True,
+        }
+        context.tool_confirmation = SimpleNamespace(
+            confirmed=True,
+            payload=context.requests[0]["payload"],
+        )
+        accepted = tools.export_run_report("adk-run-1", context)
+        assert accepted["ok"] is True
+        assert FakeExecutionClient.calls[-1]["run_id"] == "adk-run-1"
+        assert FakeExecutionClient.calls[-1]["idempotency_key"]
+
+
+def test_debug_tools_accept_only_bounded_ids_not_paths_or_urls():
+    assert tools.rerun_run("../run", FakeConfirmationContext())["error"]["code"] == "invalid_argument"
+    assert tools.replay_run("https://example.invalid/run")["error"]["code"] == "invalid_argument"
+    assert tools.compare_repeatability(["adk-run-1"])["error"]["code"] == "invalid_argument"
+    assert tools.compare_repeatability(["adk-run-1", "adk-run-1"])["error"]["code"] == "invalid_argument"
+    assert tools.export_run_report("C:/secret/run")["error"]["code"] == "invalid_argument"
+    assert tools.get_debug_operation_status("https://example.invalid/op")["error"]["code"] == "invalid_argument"
+    assert tools.wait_debug_operation("../op")["error"]["code"] == "invalid_argument"
+
+
+def test_debug_operation_status_and_wait_are_id_only():
+    FakeExecutionClient.calls.clear()
+    with tools.use_execution_client_factory(FakeExecutionClient):
+        status = tools.get_debug_operation_status("op_benchmark")
+        waited = tools.wait_debug_operation("op_benchmark", timeout_seconds=0.1)
+
+    assert status["ok"] is True
+    assert waited["ok"] is True
+    assert FakeExecutionClient.calls == [
+        {"get_debug_operation_status": "op_benchmark"},
+        {"operation_id": "op_benchmark", "timeout_seconds": 0.1},
+    ]

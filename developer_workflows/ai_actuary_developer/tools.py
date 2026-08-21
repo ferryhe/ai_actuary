@@ -16,8 +16,11 @@ from reserving_workflow.adapters.control_plane import (
 )
 from reserving_workflow.runtime.adk_execution import (
     ALLOWED_ADK_WORKFLOWS,
+    AdkBenchmarkRequest,
+    AdkDebugContext,
     AdkStartRequest,
     EXPECTED_ARTIFACT_TYPES,
+    adk_debug_request_fingerprint,
     request_fingerprint,
     summarize_adk_inputs,
 )
@@ -68,6 +71,15 @@ EXECUTION_TOOL_NAMES = (
     "wait_run",
     "get_run_status",
     "summarize_run",
+)
+DEBUG_TOOL_NAMES = (
+    "rerun_run",
+    "replay_run",
+    "compare_repeatability",
+    "run_bounded_benchmark",
+    "export_run_report",
+    "get_debug_operation_status",
+    "wait_debug_operation",
 )
 _RUN_STATUSES = {"accepted", "queued", "running", "completed", "needs_review", "failed"}
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -346,6 +358,171 @@ def start_workflow_run(
     )
 
 
+def rerun_run(run_id: str, tool_context: Any) -> dict[str, Any]:
+    """Confirm and create one child run from a trusted ADK run ID."""
+
+    if not _valid_identifier(run_id) or tool_context is None:
+        return _invalid_arguments()
+    context = _adk_debug_context(tool_context)
+    if context is None:
+        return _invalid_arguments()
+    pending = _pending_debug_confirmation(
+        action="rerun_run",
+        object_id=run_id,
+        request=context,
+        tool_context=tool_context,
+        confirmation_payload={
+            "action": "rerun_run",
+            "run_id": run_id,
+            "workspace_id": "adk-development",
+            "creates_child_run": True,
+        },
+    )
+    if pending.get("ok") is not True:
+        return pending
+    return _invoke_execution(
+        lambda client: client.rerun_run(
+            run_id=run_id,
+            adk_app=context.adk_app,
+            adk_session_id=context.adk_session_id,
+            adk_invocation_id=context.adk_invocation_id,
+            idempotency_key=str(pending["idempotency_key"]),
+        )
+    )
+
+
+def replay_run(run_id: str) -> dict[str, Any]:
+    """Read a bounded replay projection for one trusted run ID."""
+
+    if not _valid_identifier(run_id):
+        return _invalid_arguments()
+    return _invoke_execution(lambda client: client.replay_run(run_id))
+
+
+def compare_repeatability(run_ids: list[str]) -> dict[str, Any]:
+    """Compare a small set of trusted run IDs without path inputs."""
+
+    if (
+        not isinstance(run_ids, list)
+        or not 2 <= len(run_ids) <= 5
+        or len(set(run_ids)) != len(run_ids)
+        or any(not _valid_identifier(run_id) for run_id in run_ids)
+    ):
+        return _invalid_arguments()
+    return _invoke_execution(lambda client: client.compare_repeatability(run_ids))
+
+
+def run_bounded_benchmark(
+    case_pack_id: str = "deterministic-v1",
+    lane: str = "offline",
+    tool_context: Any = None,
+    *,
+    case_limit: int | None = None,
+) -> dict[str, Any]:
+    """Confirm and run an isolated evaluation lane by trusted case-pack ID."""
+
+    if not _valid_identifier(case_pack_id) or lane not in {"offline", "real_model"} or tool_context is None:
+        return _invalid_arguments()
+    try:
+        request = AdkBenchmarkRequest(
+            case_pack_id=case_pack_id,
+            lane=lane,
+            case_limit=case_limit,
+        )
+    except ValueError:
+        return _invalid_arguments()
+    confirmation_payload = {
+        "action": "run_bounded_benchmark",
+        "case_pack_id": case_pack_id,
+        "lane": lane,
+        "workspace_id": "adk-development",
+        "isolated_evaluation_state": True,
+    }
+    if request.case_limit is not None:
+        confirmation_payload["case_limit"] = request.case_limit
+    pending = _pending_debug_confirmation(
+        action="run_bounded_benchmark",
+        object_id=case_pack_id,
+        request=request,
+        tool_context=tool_context,
+        confirmation_payload=confirmation_payload,
+    )
+    if pending.get("ok") is not True:
+        return pending
+    return _invoke_execution(
+        lambda client: client.run_bounded_benchmark(
+            case_pack_id=case_pack_id,
+            lane=lane,
+            idempotency_key=str(pending["idempotency_key"]),
+            case_limit=request.case_limit,
+        )
+    )
+
+
+def export_run_report(run_id: str, tool_context: Any = None) -> dict[str, Any]:
+    """Confirm and create a bounded path-free report artifact for one trusted run ID."""
+
+    if not _valid_identifier(run_id) or tool_context is None:
+        return _invalid_arguments()
+    context = _adk_debug_context(tool_context)
+    if context is None:
+        return _invalid_arguments()
+    pending = _pending_debug_confirmation(
+        action="export_run_report",
+        object_id=run_id,
+        request=context,
+        tool_context=tool_context,
+        confirmation_payload={
+            "action": "export_run_report",
+            "run_id": run_id,
+            "workspace_id": "adk-development",
+            "creates_report_artifact": True,
+        },
+    )
+    if pending.get("ok") is not True:
+        return pending
+    return _invoke_execution(
+        lambda client: client.export_run_report(
+            run_id=run_id,
+            adk_app=context.adk_app,
+            adk_session_id=context.adk_session_id,
+            adk_invocation_id=context.adk_invocation_id,
+            idempotency_key=str(pending["idempotency_key"]),
+        )
+    )
+
+
+def get_debug_operation_status(operation_id: str) -> dict[str, Any]:
+    """Read one bounded ADK debug operation by logical operation ID."""
+
+    if not _valid_identifier(operation_id):
+        return _invalid_arguments()
+    return _invoke_execution(
+        lambda client: client.get_debug_operation_status(operation_id)
+    )
+
+
+def wait_debug_operation(
+    operation_id: str,
+    timeout_seconds: float = 1.0,
+) -> dict[str, Any]:
+    """Wait briefly for one bounded ADK debug operation by logical operation ID."""
+
+    if (
+        not _valid_identifier(operation_id)
+        or isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not 0 <= timeout_seconds <= 30
+    ):
+        return _invalid_arguments()
+    return _invoke_execution(
+        lambda client: client.wait_debug_operation(
+            operation_id=operation_id,
+            timeout_seconds=float(timeout_seconds),
+        )
+    )
+
+
 def wait_run(
     run_id: str,
     timeout_seconds: float = 5.0,
@@ -403,6 +580,80 @@ def _summary_projection(client: AdkControlPlaneClient, run_id: str) -> dict[str,
     return summary
 
 
+def _adk_debug_context(tool_context: Any) -> AdkDebugContext | None:
+    invocation_id = getattr(tool_context, "invocation_id", None)
+    session = getattr(tool_context, "session", None)
+    session_id = getattr(session, "id", None)
+    try:
+        return AdkDebugContext(
+            adk_app="ai_actuary_developer",
+            adk_session_id=session_id,
+            adk_invocation_id=invocation_id,
+        )
+    except ValueError:
+        return None
+
+
+def _pending_debug_confirmation(
+    *,
+    action: str,
+    object_id: str,
+    request: AdkDebugContext | AdkBenchmarkRequest,
+    tool_context: Any,
+    confirmation_payload: dict[str, Any],
+) -> dict[str, Any]:
+    state = getattr(tool_context, "state", None)
+    if state is None:
+        return _invalid_arguments()
+    fingerprint = adk_debug_request_fingerprint(
+        action=action,
+        object_id=object_id,
+        request=request,
+    )
+    state_key = f"ai_actuary.pending_debug.{action}.{object_id}.{getattr(tool_context, 'invocation_id', '')}"
+    pending = state.get(state_key)
+    confirmation = getattr(tool_context, "tool_confirmation", None)
+    if confirmation is None:
+        if not isinstance(pending, dict) or pending.get("request_fingerprint") != fingerprint:
+            pending = {
+                "request_fingerprint": fingerprint,
+                "idempotency_key": secrets.token_urlsafe(32),
+                "confirmation_payload": confirmation_payload,
+            }
+            state[state_key] = pending
+        tool_context.request_confirmation(
+            hint=f"Run ADK debug action {action} for {object_id}?",
+            payload=pending["confirmation_payload"],
+        )
+        return {"ok": False, "status": "confirmation_required"}
+    if (
+        not isinstance(pending, dict)
+        or pending.get("request_fingerprint") != fingerprint
+        or pending.get("confirmation_payload") != confirmation_payload
+        or getattr(confirmation, "payload", None) != confirmation_payload
+    ):
+        return {
+            "ok": False,
+            "error": {
+                "code": "confirmation_context_mismatch",
+                "message": "Confirmed debug context does not match this request.",
+            },
+        }
+    if not bool(getattr(confirmation, "confirmed", False)):
+        state.pop(state_key, None)
+        return {"ok": False, "status": "rejected"}
+    idempotency_key = pending.get("idempotency_key")
+    if not isinstance(idempotency_key, str):
+        return {
+            "ok": False,
+            "error": {
+                "code": "confirmation_context_missing",
+                "message": "Confirmed debug context is unavailable.",
+            },
+        }
+    return {"ok": True, "idempotency_key": idempotency_key}
+
+
 def _invoke(operation: Callable[[ReadOnlyControlPlaneClient], Any]) -> dict[str, Any]:
     try:
         with _read_client_factory() as client:
@@ -456,6 +707,8 @@ def _invalid_arguments() -> dict[str, Any]:
 __all__ = [
     *READ_TOOL_NAMES,
     *EXECUTION_TOOL_NAMES,
+    *DEBUG_TOOL_NAMES,
+    "DEBUG_TOOL_NAMES",
     "EXECUTION_TOOL_NAMES",
     "READ_TOOL_NAMES",
     "use_execution_client_factory",
