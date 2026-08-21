@@ -725,7 +725,14 @@ class _PinnedOutputFile:
             )
 
     def verify(self, *, check_content: bool = True, check_ads: bool = True) -> None:
-        before = os.lstat(self.path)
+        try:
+            before = os.lstat(self.path)
+        except OSError as exc:
+            raise WorkflowLabError(
+                "output_tree_changed",
+                f"Committed output object is unavailable: {self.name}",
+                stage="export",
+            ) from exc
         _reject_link_or_reparse(before, self.path, "export")
         opened_before = os.fstat(self.descriptor)
         actual = (int(before.st_dev), int(before.st_ino))
@@ -770,7 +777,14 @@ class _PinnedOutputFile:
                 break
             size += len(chunk)
             digest.update(chunk)
-        after = os.lstat(self.path)
+        try:
+            after = os.lstat(self.path)
+        except OSError as exc:
+            raise WorkflowLabError(
+                "output_tree_changed",
+                f"Committed output object is unavailable: {self.name}",
+                stage="export",
+            ) from exc
         _reject_link_or_reparse(after, self.path, "export")
         opened_after = os.fstat(self.descriptor)
         if (
@@ -4935,15 +4949,6 @@ def _remove_posix_directory_contents(descriptor: int) -> None:
                 os.close(child)
             os.rmdir(name, dir_fd=descriptor)
         else:
-            try:
-                os.chmod(
-                    name,
-                    stat.S_IWRITE | stat.S_IREAD,
-                    dir_fd=descriptor,
-                    follow_symlinks=False,
-                )
-            except (NotImplementedError, OSError):
-                pass
             os.unlink(name, dir_fd=descriptor)
 
 

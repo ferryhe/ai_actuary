@@ -49,17 +49,18 @@ def main() -> int:
 
 def _lab_from_draft(draft: Path) -> tuple[WorkflowLab, str, Path | None]:
     absolute = draft.absolute()
-    if absolute.parent.name != "adk-workflow-drafts" or absolute.parent.parent.name != "tmp":
+    if absolute.parent.name != "adk-workflow-drafts":
         raise WorkflowLabError(
             "draft_root_required",
-            "Draft must be tmp/adk-workflow-drafts/<app>.",
+            "Draft must be <state_root>/adk-workflow-drafts/<app>.",
             stage="preflight",
         )
     app_name = absolute.name
-    repo_root = absolute.parent.parent.parent
-    if (repo_root / ".git").exists():
+    state_root = absolute.parent.parent
+    repo_root = state_root.parent
+    if state_root.name == "tmp" and (repo_root / ".git").exists():
         return WorkflowLab.for_source_checkout(repo_root), app_name, repo_root
-    return WorkflowLab.for_installed_runtime(absolute.parent.parent), app_name, None
+    return WorkflowLab.for_installed_runtime(state_root), app_name, None
 
 
 if __name__ == "__main__":

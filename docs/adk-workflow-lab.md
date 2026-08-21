@@ -89,6 +89,9 @@ python scripts/validate_adk_workflow.py tmp/adk-workflow-drafts/<app>
 python scripts/export_adk_workflow_diff.py tmp/adk-workflow-drafts/<app> --check
 ```
 
+`--check` additionally requires the generated patch to pass
+`git apply --check`; validation and source-integrity proof always run.
+
 The export command creates a new immutable directory. The caller cannot choose
 its ID, output path, or filenames. `manifest.json` is written last as the
 exclusive-create commit marker. Each object is written, flushed, and read back

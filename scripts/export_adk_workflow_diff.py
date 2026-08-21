@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 from pathlib import Path
 
 from validate_adk_workflow import _lab_from_draft
@@ -21,7 +23,7 @@ def main() -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="require the complete validation and source-integrity proof",
+        help="also require the candidate patch to pass git apply --check",
     )
     arguments = parser.parse_args()
     try:
@@ -36,6 +38,10 @@ def main() -> int:
         receipt = lab.export(app_name)
         try:
             with receipt:
+                if arguments.check:
+                    _check_patch_applies(
+                        repo_root, receipt.export_dir / "candidate.patch"
+                    )
                 after = capture_source_integrity(repo_root)
                 assert_source_integrity_unchanged(before, after)
                 print(
@@ -82,6 +88,35 @@ def main() -> int:
             )
         )
         return 2
+
+
+def _check_patch_applies(repo_root: Path, patch: Path) -> None:
+    environment = os.environ.copy()
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    try:
+        result = subprocess.run(
+            ["git", "apply", "--check", "--whitespace=nowarn", str(patch)],
+            cwd=repo_root,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise WorkflowLabError(
+            "patch_check_failed",
+            f"Candidate patch applicability check failed: {type(exc).__name__}.",
+            stage="export",
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[-1000:]
+        raise WorkflowLabError(
+            "patch_check_failed",
+            f"Candidate patch does not apply cleanly: {detail}",
+            stage="export",
+        )
 
 
 if __name__ == "__main__":

@@ -371,18 +371,20 @@ def test_fifo_is_rejected_without_opening_or_blocking(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX Unix socket semantics")
-def test_unix_socket_is_rejected_as_non_regular(tmp_path: Path) -> None:
-    repo, draft, _ = _repo(tmp_path)
-    endpoint = draft / "sub_agents" / "blocked.yaml"
-    endpoint.parent.mkdir()
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(str(endpoint))
-    try:
-        with pytest.raises(WorkflowLabError) as caught:
-            WorkflowLab.for_source_checkout(repo).validate("example")
-        assert caught.value.code == "non_regular_file"
-    finally:
-        server.close()
+def test_unix_socket_is_rejected_as_non_regular() -> None:
+    temporary_root = "/tmp" if Path("/tmp").is_dir() else None
+    with tempfile.TemporaryDirectory(prefix="wf-", dir=temporary_root) as temporary:
+        repo, draft, _ = _repo(Path(temporary))
+        endpoint = draft / "sub_agents" / "blocked.yaml"
+        endpoint.parent.mkdir()
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(endpoint))
+        try:
+            with pytest.raises(WorkflowLabError) as caught:
+                WorkflowLab.for_source_checkout(repo).validate("example")
+            assert caught.value.code == "non_regular_file"
+        finally:
+            server.close()
 
 
 def test_required_file_cannot_be_a_directory(tmp_path: Path) -> None:
@@ -1094,6 +1096,73 @@ def test_export_cli_does_not_leave_commit_marker_after_published_race(
 
     assert '"ok": false' in capsys.readouterr().out
     assert not list(lab.paths.exports_root.rglob("manifest.json"))
+
+
+def test_validate_cli_recognizes_installed_runtime_state_root(tmp_path: Path) -> None:
+    state_root = tmp_path / "runtime-state"
+    draft = state_root / "adk-workflow-drafts" / "example"
+    draft.mkdir(parents=True)
+    scripts = Path(__file__).parents[1] / "scripts"
+    spec = importlib.util.spec_from_file_location(
+        "installed_validate_adk_workflow",
+        scripts / "validate_adk_workflow.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    lab, app_name, repo_root = module._lab_from_draft(draft)
+
+    assert lab.paths.mode == "installed"
+    assert lab.paths.state_root == state_root.absolute()
+    assert app_name == "example"
+    assert repo_root is None
+
+
+@pytest.mark.parametrize("check", [False, True])
+def test_export_cli_check_flag_controls_patch_applicability_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    check: bool,
+) -> None:
+    repo, draft, _ = _repo(tmp_path)
+    lab = WorkflowLab.for_source_checkout(repo)
+    scripts = Path(__file__).parents[1] / "scripts"
+    monkeypatch.syspath_prepend(str(scripts))
+    spec = importlib.util.spec_from_file_location(
+        f"check_export_adk_workflow_diff_{check}",
+        scripts / "export_adk_workflow_diff.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(
+        module, "_lab_from_draft", lambda selected: (lab, "example", repo)
+    )
+    monkeypatch.setattr(module, "capture_source_integrity", lambda selected: object())
+    monkeypatch.setattr(
+        module, "assert_source_integrity_unchanged", lambda before, after: None
+    )
+    calls: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(
+        module,
+        "_check_patch_applies",
+        lambda root, patch: calls.append((root, patch)),
+        raising=False,
+    )
+    argv = ["export_adk_workflow_diff.py", str(draft)]
+    if check:
+        argv.append("--check")
+    monkeypatch.setattr(sys, "argv", argv)
+
+    assert module.main() == 0
+
+    assert len(calls) == int(check)
+    if calls:
+        assert calls[0][0] == repo
+        assert calls[0][1].name == "candidate.patch"
+    assert f'"check": {str(check).lower()}' in capsys.readouterr().out
 
 
 def test_export_cli_revokes_commit_marker_if_post_export_integrity_fails(
