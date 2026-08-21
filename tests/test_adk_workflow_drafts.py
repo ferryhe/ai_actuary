@@ -1860,6 +1860,42 @@ def test_windows_materialized_security_accepts_semantic_sddl_renderings(
     )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows SDDL alias resolution")
+def test_windows_materialized_security_accepts_only_win32_equivalent_aliases() -> None:
+    administrator_sid = _resolve_windows_sddl_owner_alias("LA")
+    builtin_users_sid = _resolve_windows_sddl_owner_alias("BU")
+    assert administrator_sid.endswith("-500")
+    assert builtin_users_sid == "S-1-5-32-545"
+    assert workflow_lab_module._canonical_windows_dacl_sid("LA") == administrator_sid
+    assert workflow_lab_module._canonical_windows_dacl_sid("BU") == builtin_users_sid
+    assert workflow_lab_module._canonical_windows_dacl_sid("BA") == "S-1-5-32-544"
+    assert workflow_lab_module._canonical_windows_dacl_sid("ZZ") is None
+    sddl = "O:LAD:P(A;OICI;FA;;;LA)(A;OICI;FR;;;BU)S:AI(ML;OICI;NW;;;ME)"
+
+    assert (
+        workflow_lab_module._windows_materialized_sddl_validation_reason(
+            actual_owner=administrator_sid,
+            owner_sid=administrator_sid,
+            sddl=sddl,
+            is_root=True,
+            is_directory=True,
+        )
+        is None
+    )
+
+    wrong_principal = sddl.replace(";;;LA)", ";;;BA)", 1)
+    assert (
+        workflow_lab_module._windows_materialized_sddl_validation_reason(
+            actual_owner=administrator_sid,
+            owner_sid=administrator_sid,
+            sddl=wrong_principal,
+            is_root=True,
+            is_directory=True,
+        )
+        == "dacl_principal"
+    )
+
+
 @pytest.mark.parametrize(
     ("sddl", "actual_owner", "expected_reason"),
     [
@@ -3235,3 +3271,34 @@ def _make_owner_directory_writable(directory: Path) -> None:
     assert stat.S_ISDIR(metadata.st_mode)
     assert not stat.S_ISLNK(metadata.st_mode)
     directory.chmod(stat.S_IRWXU)
+
+
+def _resolve_windows_sddl_owner_alias(alias: str) -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    sid = ctypes.c_void_p()
+    sid_text = wintypes.LPWSTR()
+    advapi32.ConvertStringSidToSidW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.LPWSTR),
+    ]
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+    kernel32.LocalFree.restype = wintypes.HLOCAL
+    try:
+        assert advapi32.ConvertStringSidToSidW(alias, ctypes.byref(sid))
+        assert advapi32.ConvertSidToStringSidW(sid, ctypes.byref(sid_text))
+        return sid_text.value
+    finally:
+        if sid_text:
+            kernel32.LocalFree(sid_text)
+        if sid:
+            kernel32.LocalFree(sid)

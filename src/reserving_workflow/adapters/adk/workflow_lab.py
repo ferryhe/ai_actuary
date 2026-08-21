@@ -4622,13 +4622,14 @@ def _windows_materialized_sddl_validation_reason(
         if is_directory and not {"OI", "CI"} <= ace_flags:
             return "dacl_inheritance"
         rights = _parse_sddl_file_rights(raw_rights)
-        if sid == owner_sid:
+        canonical_sid = _canonical_windows_dacl_sid(sid)
+        if canonical_sid == owner_sid:
             if rights != 0x1F01FF:
                 return "owner_rights"
             if owner_found:
                 return "dacl_principal_count"
             owner_found = True
-        elif sid in {"BU", "S-1-5-32-545"}:
+        elif canonical_sid == "S-1-5-32-545":
             if rights not in {0x120089, 0x1200A9}:
                 return "consumer_rights"
             if consumer_found:
@@ -4722,6 +4723,47 @@ def _parse_sddl_file_rights(rights: str) -> int | None:
             return None
         result |= value
     return result
+
+
+def _canonical_windows_dacl_sid(value: str) -> str | None:
+    if re.fullmatch(r"S-\d+(?:-\d+)+", value):
+        return value
+    fixed_aliases = {"BU": "S-1-5-32-545"}
+    if value in fixed_aliases:
+        return fixed_aliases[value]
+    if os.name != "nt" or not re.fullmatch(r"[A-Z]{2}", value):
+        return None
+
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    sid = ctypes.c_void_p()
+    sid_text = wintypes.LPWSTR()
+    advapi32.ConvertStringSidToSidW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.LPWSTR),
+    ]
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+    kernel32.LocalFree.restype = wintypes.HLOCAL
+    try:
+        if not advapi32.ConvertStringSidToSidW(value, ctypes.byref(sid)):
+            return None
+        if not advapi32.ConvertSidToStringSidW(sid, ctypes.byref(sid_text)):
+            return None
+        return sid_text.value
+    finally:
+        if sid_text:
+            kernel32.LocalFree(sid_text)
+        if sid:
+            kernel32.LocalFree(sid)
 
 
 def _windows_security_sddl(path: Path) -> tuple[str, str]:
