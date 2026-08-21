@@ -289,6 +289,9 @@ A bounded operator handoff export sits on top of that same evidence model:
 
 ## What Is Implemented Now
 
+- Phase 4 ADK Workflow Lab with package-owned published resources, isolated
+  declarative drafts, frozen-schema/policy/offline validation, deterministic
+  immutable candidate exports, and source-integrity proof
 - governed single-case orchestration through the OpenAI planner path
 - local Hermes-style worker execution
 - review flow escalation and packet generation

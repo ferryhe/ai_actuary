@@ -1,0 +1,11 @@
+capability: adk-developer
+confirmation_required: true
+publishing: git-review-only
+python_fqns: []
+schema_version: ai-actuary.workflow-policy.v1
+tool_ids:
+  - chainladder
+workflow_ids:
+  - chainladder-basic
+workspace_id: adk-development
+write_tool_ids: []

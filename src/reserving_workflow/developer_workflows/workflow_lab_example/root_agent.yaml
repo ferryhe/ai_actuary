@@ -1,0 +1,3 @@
+agent_class: SequentialAgent
+description: A packaged model-free declarative Workflow Lab example.
+name: workflow_lab_example

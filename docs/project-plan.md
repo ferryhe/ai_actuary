@@ -39,6 +39,11 @@ It is no longer only a CLI proof of concept. It now has:
 
 It is still intentionally local-first and prototype-grade. It does **not** yet claim to be a production queue, storage service, auth system, enterprise console, or full actuarial platform.
 
+Phase 4 additionally provides a controlled ADK 2.7.1 Workflow Lab: package-owned
+published resources, isolated YAML drafts, fail-closed validation, immutable
+deterministic candidate/diff exports, and Git-review-only publication. Native
+Visual Builder remains disabled under the accepted fallback decision.
+
 ---
 
 ## Completed

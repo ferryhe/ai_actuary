@@ -34,6 +34,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "reserving_workflow.interfaces.operator_console" = ["console.html"]
+"reserving_workflow.adapters.adk" = ["data/*.json"]
+"reserving_workflow.developer_workflows" = ["**/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

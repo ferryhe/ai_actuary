@@ -64,7 +64,57 @@ jobs:
           python -c "from developer_workflows.ai_actuary_developer import root_agent; assert root_agent.name == 'ai_actuary_developer'"
 
       - name: Run ADK foundation and Phase 3 tool tests
-        run: python -m pytest tests/test_adk_developer_foundation.py tests/test_operator_console_assets.py tests/test_adk_run_tools.py -q
+        run: python -m pytest tests/test_adk_developer_foundation.py tests/test_operator_console_assets.py tests/test_adk_run_tools.py tests/test_adk_workflow_drafts.py tests/test_adk_workflow_policy.py -q
 
       - name: Smoke dual-interface launcher
         run: python scripts/run_local_workbench.py --smoke
+
+  adk-workflow-lab:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install Workflow Lab dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,adk-dev]"
+
+      - name: Run cross-platform Workflow Lab security suite
+        run: python -m pytest tests/test_adk_workflow_drafts.py tests/test_adk_workflow_policy.py -q
+
+      - name: Build wheel and verify installed package resources
+        shell: bash
+        run: |
+          python -m pip install build
+          python -m build --wheel
+          python -m venv wheel-check
+          wheel_path="$(find dist -name '*.whl' -print -quit)"
+          wheel-check/bin/python -m pip install "${wheel_path}[adk-dev]"
+          wheel-check/bin/python - <<'PY'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+          from reserving_workflow.adapters.adk.workflow_lab import WorkflowLab
+
+          with TemporaryDirectory() as state:
+              root = WorkflowLab.for_installed_runtime(Path(state)).materialize_published_workflows()
+              assert (root / "workflow_lab_example" / "root_agent.yaml").is_file()
+              try:
+                  WorkflowLab.for_installed_runtime(Path(state)).export("workflow_lab_example")
+              except Exception as exc:
+                  assert getattr(exc, "code", None) == "source_checkout_required"
+              else:
+                  raise AssertionError("installed mode must not expose Git export")
+          PY
+        if: runner.os == 'Linux'
