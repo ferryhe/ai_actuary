@@ -1540,6 +1540,8 @@ def test_revoke_export_commit_rejects_equal_bytes_aba_replacement(
         original_marker = moved_export / "manifest.json"
     else:
         marker = receipt.export_dir / "manifest.json"
+        if os.name != "nt":
+            _make_owner_directory_writable(receipt.export_dir)
         marker.chmod(stat.S_IRUSR | stat.S_IWUSR)
         marker.rename(moved_manifest)
         marker.write_bytes(receipt.manifest)
@@ -1763,6 +1765,8 @@ def test_materialized_resources_reject_same_content_hardlink_replacement(
     target = materialized / "workflow_lab_example" / "root_agent.yaml"
     external = tmp_path / "same-content.yaml"
     external.write_bytes(target.read_bytes())
+    if os.name != "nt":
+        _make_owner_directory_writable(target.parent)
     target.chmod(stat.S_IWRITE | stat.S_IREAD)
     target.unlink()
     os.link(external, target)
@@ -1807,6 +1811,124 @@ def test_materialized_resources_reject_windows_acl_drift(tmp_path: Path) -> None
 
     assert caught.value.code == "materialized_security_changed"
     assert caught.value.stage == "materialize"
+
+
+@pytest.mark.parametrize(
+    ("sddl", "is_root", "is_directory"),
+    [
+        (
+            (
+                "O:S-1-5-21-1D:P"
+                "(A;OICI;FA;;;S-1-5-21-1)(A;OICI;FR;;;BU)"
+                "S:AI(ML;OICI;NW;;;ME)"
+            ),
+            True,
+            True,
+        ),
+        (
+            (
+                "O:S-1-5-21-1D:AI"
+                "(A;OICI;0x1f01ff;;;S-1-5-21-1)"
+                "(A;OICI;0x1200a9;;;S-1-5-32-545)"
+                "S:AI(ML;OICI;NW;;;S-1-16-8192)"
+            ),
+            False,
+            True,
+        ),
+        (
+            (
+                "O:S-1-5-21-1D:AI"
+                "(A;ID;FA;;;S-1-5-21-1)(A;ID;FRFX;;;BU)"
+                "S:AI(ML;ID;NW;;;ME)"
+            ),
+            False,
+            False,
+        ),
+    ],
+)
+def test_windows_materialized_security_accepts_semantic_sddl_renderings(
+    sddl: str,
+    is_root: bool,
+    is_directory: bool,
+) -> None:
+    assert workflow_lab_module._windows_materialized_sddl_is_valid(
+        actual_owner="S-1-5-21-1",
+        owner_sid="S-1-5-21-1",
+        sddl=sddl,
+        is_root=is_root,
+        is_directory=is_directory,
+    )
+
+
+@pytest.mark.parametrize(
+    ("sddl", "actual_owner"),
+    [
+        (
+            (
+                "O:S-1-5-21-1D:AI"
+                "(A;OICI;FA;;;S-1-5-21-1)(A;OICI;FR;;;BU)"
+                "S:AI(ML;OICI;NW;;;ME)"
+            ),
+            "S-1-5-21-1",
+        ),
+        (
+            (
+                "O:S-1-5-21-1D:P"
+                "(A;OICI;FA;;;S-1-5-21-1)(D;OICI;FR;;;BU)"
+                "S:AI(ML;OICI;NW;;;ME)"
+            ),
+            "S-1-5-21-1",
+        ),
+        (
+            (
+                "O:S-1-5-21-1D:P"
+                "(A;OICI;FA;;;S-1-5-21-1)(A;OICI;FW;;;BU)"
+                "S:AI(ML;OICI;NW;;;ME)"
+            ),
+            "S-1-5-21-1",
+        ),
+        (
+            (
+                "O:S-1-5-21-1D:P"
+                "(A;OICI;FA;;;S-1-5-21-1)(A;OICI;FR;;;BU)"
+                "S:AI(ML;OICI;NW;;;HI)"
+            ),
+            "S-1-5-21-1",
+        ),
+        (
+            (
+                "O:S-1-5-21-1D:P"
+                "(A;OICI;FA;;;S-1-5-21-1)(A;OICI;FR;;;BU)"
+                "S:AI(ML;OICI;NW;;;ME)"
+            ),
+            "S-1-5-21-2",
+        ),
+    ],
+)
+def test_windows_materialized_security_rejects_boundary_changes(
+    sddl: str,
+    actual_owner: str,
+) -> None:
+    assert not workflow_lab_module._windows_materialized_sddl_is_valid(
+        actual_owner=actual_owner,
+        owner_sid="S-1-5-21-1",
+        sddl=sddl,
+        is_root=True,
+        is_directory=True,
+    )
+
+
+def test_byte_governed_packaged_workflows_disable_checkout_conversion() -> None:
+    repo = Path(__file__).parents[1]
+    relative_paths = [
+        "src/reserving_workflow/developer_workflows/workflow_lab_example/__init__.py",
+        "src/reserving_workflow/developer_workflows/workflow_lab_example/root_agent.yaml",
+        "src/reserving_workflow/developer_workflows/workflow_lab_example/workflow_policy.yaml",
+    ]
+
+    attributes = (repo / ".gitattributes").read_text(encoding="utf-8").splitlines()
+
+    assert all(f"{relative} -text" in attributes for relative in relative_paths)
 
 
 def test_shipped_packaged_workflow_exports_only_declarative_git_surface(
@@ -2943,5 +3065,21 @@ def test_patch_is_git_apply_parseable_for_no_newline_add_and_delete(
 
 def _make_writable(function, path, exc_info) -> None:  # type: ignore[no-untyped-def]
     del exc_info
-    os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    selected = Path(path)
+    if os.name != "nt":
+        _make_owner_directory_writable(selected.parent)
+        metadata = os.lstat(selected)
+        if stat.S_ISDIR(metadata.st_mode):
+            _make_owner_directory_writable(selected)
+        elif not stat.S_ISLNK(metadata.st_mode):
+            selected.chmod(stat.S_IWRITE | stat.S_IREAD)
+    else:
+        selected.chmod(stat.S_IWRITE | stat.S_IREAD)
     function(path)
+
+
+def _make_owner_directory_writable(directory: Path) -> None:
+    metadata = os.lstat(directory)
+    assert stat.S_ISDIR(metadata.st_mode)
+    assert not stat.S_ISLNK(metadata.st_mode)
+    directory.chmod(stat.S_IRWXU)

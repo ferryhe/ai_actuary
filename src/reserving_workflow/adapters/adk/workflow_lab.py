@@ -4527,28 +4527,149 @@ def _validate_windows_materialized_security(paths: list[Path]) -> None:
     owner_sid = _windows_current_user_sid()
     for index, path in enumerate(paths):
         actual_owner, sddl = _windows_security_sddl(path)
-        owner_ace = f";FA;;;{owner_sid})"
-        consumer_ace = ";0x1200a9;;;BU)"
-        protected = "D:P" in sddl
-        inherited_aces = len(re.findall(r"\(A;[^;]*ID[^;]*;", sddl))
-        valid = (
-            actual_owner == owner_sid
-            and sddl.count("(A;") == 2
-            and "(D;" not in sddl
-            and owner_ace in sddl
-            and consumer_ace in sddl
-            and "NW;;;ME)" in sddl
-        )
-        if index == 0:
-            valid = valid and protected and inherited_aces == 0 and "OICI" in sddl
-        else:
-            valid = valid and not protected and inherited_aces == 2
-        if not valid:
+        metadata = os.lstat(path)
+        _reject_link_or_reparse(metadata, path, "materialize")
+        if not _windows_materialized_sddl_is_valid(
+            actual_owner=actual_owner,
+            owner_sid=owner_sid,
+            sddl=sddl,
+            is_root=index == 0,
+            is_directory=stat.S_ISDIR(metadata.st_mode),
+        ):
             raise WorkflowLabError(
                 "materialized_security_changed",
                 f"Windows materialized owner/ACL/integrity label changed: {path.name}",
                 stage="materialize",
             )
+
+
+def _windows_materialized_sddl_is_valid(
+    *,
+    actual_owner: str,
+    owner_sid: str,
+    sddl: str,
+    is_root: bool,
+    is_directory: bool,
+) -> bool:
+    if actual_owner != owner_sid:
+        return False
+    dacl = _parse_sddl_section(sddl, "D")
+    label = _parse_sddl_section(sddl, "S")
+    if dacl is None or label is None:
+        return False
+    dacl_flags, dacl_aces = dacl
+    label_flags, label_aces = label
+    del label_flags
+    if not _valid_dacl_control_flags(dacl_flags, is_root=is_root):
+        return False
+    if len(dacl_aces) != 2 or any(ace[0] != "A" for ace in dacl_aces):
+        return False
+
+    owner_found = False
+    consumer_found = False
+    for _, raw_flags, raw_rights, object_guid, inherited_guid, sid in dacl_aces:
+        if object_guid or inherited_guid:
+            return False
+        ace_flags = _parse_sddl_ace_flags(raw_flags)
+        if ace_flags is None or not ace_flags <= {"OI", "CI", "ID"}:
+            return False
+        if is_root and ("ID" in ace_flags or not {"OI", "CI"} <= ace_flags):
+            return False
+        if is_directory and not {"OI", "CI"} <= ace_flags:
+            return False
+        rights = _parse_sddl_file_rights(raw_rights)
+        if sid == owner_sid and rights == 0x1F01FF:
+            if owner_found:
+                return False
+            owner_found = True
+        elif sid in {"BU", "S-1-5-32-545"} and rights in {0x120089, 0x1200A9}:
+            if consumer_found:
+                return False
+            consumer_found = True
+        else:
+            return False
+
+    if not owner_found or not consumer_found or len(label_aces) != 1:
+        return False
+    ace_type, raw_flags, rights, object_guid, inherited_guid, sid = label_aces[0]
+    if (
+        ace_type != "ML"
+        or rights != "NW"
+        or object_guid
+        or inherited_guid
+        or sid not in {"ME", "S-1-16-8192"}
+    ):
+        return False
+    label_ace_flags = _parse_sddl_ace_flags(raw_flags)
+    if label_ace_flags is None or not label_ace_flags <= {"OI", "CI", "ID"}:
+        return False
+    if is_root and ("ID" in label_ace_flags or not {"OI", "CI"} <= label_ace_flags):
+        return False
+    return not is_directory or {"OI", "CI"} <= label_ace_flags
+
+
+def _parse_sddl_section(
+    sddl: str, section: str
+) -> tuple[str, list[tuple[str, str, str, str, str, str]]] | None:
+    marker = f"{section}:"
+    start = sddl.find(marker)
+    if start < 0:
+        return None
+    start += len(marker)
+    endings = [
+        position
+        for candidate in "OGDS"
+        if (position := sddl.find(f"{candidate}:", start)) >= 0
+    ]
+    end = min(endings, default=len(sddl))
+    payload = sddl[start:end]
+    ace_start = payload.find("(")
+    if ace_start < 0:
+        return payload, []
+    flags = payload[:ace_start]
+    raw_aces = re.findall(r"\(([^()]*)\)", payload[ace_start:])
+    if "".join(f"({ace})" for ace in raw_aces) != payload[ace_start:]:
+        return None
+    aces: list[tuple[str, str, str, str, str, str]] = []
+    for raw_ace in raw_aces:
+        fields = raw_ace.split(";")
+        if len(fields) != 6:
+            return None
+        aces.append((fields[0], fields[1], fields[2], fields[3], fields[4], fields[5]))
+    return flags, aces
+
+
+def _valid_dacl_control_flags(flags: str, *, is_root: bool) -> bool:
+    remainder = flags.replace("AI", "").replace("AR", "")
+    if remainder not in {"", "P"}:
+        return False
+    if is_root:
+        return remainder == "P"
+    return remainder == "" and "AI" in flags
+
+
+def _parse_sddl_ace_flags(flags: str) -> set[str] | None:
+    if len(flags) % 2:
+        return None
+    return {flags[index : index + 2] for index in range(0, len(flags), 2)}
+
+
+def _parse_sddl_file_rights(rights: str) -> int | None:
+    if rights.casefold().startswith("0x"):
+        try:
+            return int(rights, 16)
+        except ValueError:
+            return None
+    aliases = {"FA": 0x1F01FF, "FR": 0x120089, "FX": 0x1200A0}
+    if len(rights) % 2:
+        return None
+    result = 0
+    for index in range(0, len(rights), 2):
+        value = aliases.get(rights[index : index + 2])
+        if value is None:
+            return None
+        result |= value
+    return result
 
 
 def _windows_security_sddl(path: Path) -> tuple[str, str]:
