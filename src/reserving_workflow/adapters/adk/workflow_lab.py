@@ -4500,6 +4500,7 @@ def _harden_windows_materialized_tree(root: Path) -> None:
             "set_owner",
             (str(root), "/setowner", f"*{owner_sid}", "/T", "/C"),
         ),
+        ("root_dacl_reset", (str(root), "/reset", "/C")),
         (
             "root_dacl",
             (

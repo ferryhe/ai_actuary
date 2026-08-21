@@ -1992,7 +1992,8 @@ def test_windows_hardening_sets_exact_owner_before_acl_validation(
         "/T",
         "/C",
     ]
-    assert calls[1][2:] == [
+    assert calls[1] == ["icacls", str(root), "/reset", "/C"]
+    assert calls[2][2:] == [
         "/inheritance:r",
         "/grant:r",
         f"*{owner_sid}:(OI)(CI)(F)",
@@ -2023,6 +2024,50 @@ def test_windows_hardening_wraps_owner_command_failure(
     assert caught.value.code == "materialized_security_failed"
     assert caught.value.stage == "materialize"
     assert "step=set_owner" in str(caught.value)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows explicit DACL normalization")
+def test_windows_hardening_removes_preexisting_explicit_ace_boundary(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "materialized"
+    root.mkdir()
+    target = root / "workflow.yaml"
+    target.write_text("workflow: safe\n", encoding="utf-8")
+    workflow_lab_module._harden_windows_materialized_tree(root)
+    changed = subprocess.run(
+        [
+            "icacls",
+            str(root),
+            "/grant",
+            "*S-1-1-0:(OI)(CI)(F)",
+            "/C",
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert changed.returncode == 0, changed.stderr
+
+    owner_sid = workflow_lab_module._windows_current_user_sid()
+    actual_owner, runner_like_sddl = workflow_lab_module._windows_security_sddl(root)
+    dacl = workflow_lab_module._parse_sddl_section(runner_like_sddl, "D")
+    assert dacl is not None
+    assert len(dacl[1]) == 3
+    assert (
+        workflow_lab_module._windows_materialized_sddl_validation_reason(
+            actual_owner=actual_owner,
+            owner_sid=owner_sid,
+            sddl=runner_like_sddl,
+            is_root=True,
+            is_directory=True,
+        )
+        == "dacl_ace_boundary"
+    )
+
+    workflow_lab_module._harden_windows_materialized_tree(root)
+    workflow_lab_module._validate_windows_materialized_security([root, target])
 
 
 def test_byte_governed_packaged_workflows_disable_checkout_conversion() -> None:
