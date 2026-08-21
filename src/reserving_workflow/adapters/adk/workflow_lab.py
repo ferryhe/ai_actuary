@@ -4494,31 +4494,49 @@ def _validate_materialized_read_only(root: Path) -> None:
 
 def _harden_windows_materialized_tree(root: Path) -> None:
     owner_sid = _windows_current_user_sid()
+    _scan_plain_entries(root, stage="materialize")
     commands = (
         (
-            str(root),
-            "/inheritance:r",
-            "/grant:r",
-            f"*{owner_sid}:(OI)(CI)(F)",
-            "*S-1-5-32-545:(OI)(CI)(RX)",
-            "/C",
+            "set_owner",
+            (str(root), "/setowner", f"*{owner_sid}", "/T", "/C"),
         ),
-        (str(root / "*"), "/reset", "/T", "/C"),
-        (str(root), "/setintegritylevel", "(OI)(CI)M", "/T", "/C"),
+        (
+            "root_dacl",
+            (
+                str(root),
+                "/inheritance:r",
+                "/grant:r",
+                f"*{owner_sid}:(OI)(CI)(F)",
+                "*S-1-5-32-545:(OI)(CI)(RX)",
+                "/C",
+            ),
+        ),
+        ("child_dacl", (str(root / "*"), "/reset", "/T", "/C")),
+        (
+            "integrity_label",
+            (str(root), "/setintegritylevel", "(OI)(CI)M", "/T", "/C"),
+        ),
     )
-    for arguments in commands:
-        result = subprocess.run(
-            ["icacls", *arguments],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
-        )
+    for step, arguments in commands:
+        try:
+            result = subprocess.run(
+                ["icacls", *arguments],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise WorkflowLabError(
+                "materialized_security_failed",
+                f"Unable to establish the Windows consumer boundary; step={step}.",
+                stage="materialize",
+            ) from exc
         if result.returncode != 0:
             raise WorkflowLabError(
                 "materialized_security_failed",
-                "Unable to establish the Windows materialized consumer boundary.",
+                f"Unable to establish the Windows consumer boundary; step={step}.",
                 stage="materialize",
             )
 
@@ -4529,16 +4547,20 @@ def _validate_windows_materialized_security(paths: list[Path]) -> None:
         actual_owner, sddl = _windows_security_sddl(path)
         metadata = os.lstat(path)
         _reject_link_or_reparse(metadata, path, "materialize")
-        if not _windows_materialized_sddl_is_valid(
+        reason = _windows_materialized_sddl_validation_reason(
             actual_owner=actual_owner,
             owner_sid=owner_sid,
             sddl=sddl,
             is_root=index == 0,
             is_directory=stat.S_ISDIR(metadata.st_mode),
-        ):
+        )
+        if reason is not None:
             raise WorkflowLabError(
                 "materialized_security_changed",
-                f"Windows materialized owner/ACL/integrity label changed: {path.name}",
+                (
+                    "Windows materialized owner/ACL/integrity label changed; "
+                    f"reason={reason}; object={path.name}."
+                ),
                 stage="materialize",
             )
 
@@ -4551,61 +4573,90 @@ def _windows_materialized_sddl_is_valid(
     is_root: bool,
     is_directory: bool,
 ) -> bool:
+    return (
+        _windows_materialized_sddl_validation_reason(
+            actual_owner=actual_owner,
+            owner_sid=owner_sid,
+            sddl=sddl,
+            is_root=is_root,
+            is_directory=is_directory,
+        )
+        is None
+    )
+
+
+def _windows_materialized_sddl_validation_reason(
+    *,
+    actual_owner: str,
+    owner_sid: str,
+    sddl: str,
+    is_root: bool,
+    is_directory: bool,
+) -> str | None:
     if actual_owner != owner_sid:
-        return False
+        return "owner_mismatch"
     dacl = _parse_sddl_section(sddl, "D")
     label = _parse_sddl_section(sddl, "S")
-    if dacl is None or label is None:
-        return False
+    if dacl is None:
+        return "dacl_missing_or_malformed"
+    if label is None:
+        return "label_missing_or_malformed"
     dacl_flags, dacl_aces = dacl
-    label_flags, label_aces = label
-    del label_flags
+    _, label_aces = label
     if not _valid_dacl_control_flags(dacl_flags, is_root=is_root):
-        return False
+        return "dacl_control_flags"
     if len(dacl_aces) != 2 or any(ace[0] != "A" for ace in dacl_aces):
-        return False
+        return "dacl_ace_boundary"
 
     owner_found = False
     consumer_found = False
     for _, raw_flags, raw_rights, object_guid, inherited_guid, sid in dacl_aces:
         if object_guid or inherited_guid:
-            return False
+            return "dacl_object_guid"
         ace_flags = _parse_sddl_ace_flags(raw_flags)
         if ace_flags is None or not ace_flags <= {"OI", "CI", "ID"}:
-            return False
+            return "dacl_ace_flags"
         if is_root and ("ID" in ace_flags or not {"OI", "CI"} <= ace_flags):
-            return False
+            return "dacl_inheritance"
         if is_directory and not {"OI", "CI"} <= ace_flags:
-            return False
+            return "dacl_inheritance"
         rights = _parse_sddl_file_rights(raw_rights)
-        if sid == owner_sid and rights == 0x1F01FF:
+        if sid == owner_sid:
+            if rights != 0x1F01FF:
+                return "owner_rights"
             if owner_found:
-                return False
+                return "dacl_principal_count"
             owner_found = True
-        elif sid in {"BU", "S-1-5-32-545"} and rights in {0x120089, 0x1200A9}:
+        elif sid in {"BU", "S-1-5-32-545"}:
+            if rights not in {0x120089, 0x1200A9}:
+                return "consumer_rights"
             if consumer_found:
-                return False
+                return "dacl_principal_count"
             consumer_found = True
         else:
-            return False
+            return "dacl_principal"
 
     if not owner_found or not consumer_found or len(label_aces) != 1:
-        return False
+        if not owner_found or not consumer_found:
+            return "dacl_principal_count"
+        return "label_ace_count"
     ace_type, raw_flags, rights, object_guid, inherited_guid, sid = label_aces[0]
-    if (
-        ace_type != "ML"
-        or rights != "NW"
-        or object_guid
-        or inherited_guid
-        or sid not in {"ME", "S-1-16-8192"}
-    ):
-        return False
+    if ace_type != "ML":
+        return "label_type"
+    if rights != "NW":
+        return "label_rights"
+    if object_guid or inherited_guid:
+        return "label_object_guid"
+    if sid not in {"ME", "S-1-16-8192"}:
+        return "label_sid"
     label_ace_flags = _parse_sddl_ace_flags(raw_flags)
     if label_ace_flags is None or not label_ace_flags <= {"OI", "CI", "ID"}:
-        return False
+        return "label_flags"
     if is_root and ("ID" in label_ace_flags or not {"OI", "CI"} <= label_ace_flags):
-        return False
-    return not is_directory or {"OI", "CI"} <= label_ace_flags
+        return "label_inheritance"
+    if is_directory and not {"OI", "CI"} <= label_ace_flags:
+        return "label_inheritance"
+    return None
 
 
 def _parse_sddl_section(

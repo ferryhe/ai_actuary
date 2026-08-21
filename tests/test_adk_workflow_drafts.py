@@ -1861,7 +1861,7 @@ def test_windows_materialized_security_accepts_semantic_sddl_renderings(
 
 
 @pytest.mark.parametrize(
-    ("sddl", "actual_owner"),
+    ("sddl", "actual_owner", "expected_reason"),
     [
         (
             (
@@ -1870,6 +1870,7 @@ def test_windows_materialized_security_accepts_semantic_sddl_renderings(
                 "S:AI(ML;OICI;NW;;;ME)"
             ),
             "S-1-5-21-1",
+            "dacl_control_flags",
         ),
         (
             (
@@ -1878,6 +1879,7 @@ def test_windows_materialized_security_accepts_semantic_sddl_renderings(
                 "S:AI(ML;OICI;NW;;;ME)"
             ),
             "S-1-5-21-1",
+            "dacl_ace_boundary",
         ),
         (
             (
@@ -1886,6 +1888,7 @@ def test_windows_materialized_security_accepts_semantic_sddl_renderings(
                 "S:AI(ML;OICI;NW;;;ME)"
             ),
             "S-1-5-21-1",
+            "consumer_rights",
         ),
         (
             (
@@ -1894,6 +1897,7 @@ def test_windows_materialized_security_accepts_semantic_sddl_renderings(
                 "S:AI(ML;OICI;NW;;;HI)"
             ),
             "S-1-5-21-1",
+            "label_sid",
         ),
         (
             (
@@ -1902,12 +1906,14 @@ def test_windows_materialized_security_accepts_semantic_sddl_renderings(
                 "S:AI(ML;OICI;NW;;;ME)"
             ),
             "S-1-5-21-2",
+            "owner_mismatch",
         ),
     ],
 )
 def test_windows_materialized_security_rejects_boundary_changes(
     sddl: str,
     actual_owner: str,
+    expected_reason: str,
 ) -> None:
     assert not workflow_lab_module._windows_materialized_sddl_is_valid(
         actual_owner=actual_owner,
@@ -1916,6 +1922,107 @@ def test_windows_materialized_security_rejects_boundary_changes(
         is_root=True,
         is_directory=True,
     )
+    assert (
+        workflow_lab_module._windows_materialized_sddl_validation_reason(
+            actual_owner=actual_owner,
+            owner_sid="S-1-5-21-1",
+            sddl=sddl,
+            is_root=True,
+            is_directory=True,
+        )
+        == expected_reason
+    )
+
+
+def test_windows_hardening_sets_exact_owner_before_acl_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "materialized"
+    root.mkdir()
+    target = root / "workflow.yaml"
+    target.write_text("workflow: safe\n", encoding="utf-8")
+    owner_sid = "S-1-5-21-1"
+    owners = {root: "S-1-5-32-544", target: "S-1-5-32-544"}
+    calls: list[list[str]] = []
+
+    def run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(arguments)
+        if "/setowner" in arguments:
+            owners.update({root: owner_sid, target: owner_sid})
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    def security(path: Path) -> tuple[str, str]:
+        if path == root:
+            sddl = (
+                f"O:{owner_sid}D:P"
+                f"(A;OICI;FA;;;{owner_sid})(A;OICI;FR;;;BU)"
+                "S:AI(ML;OICI;NW;;;ME)"
+            )
+        else:
+            sddl = (
+                f"O:{owner_sid}D:AI"
+                f"(A;ID;FA;;;{owner_sid})(A;ID;FR;;;BU)"
+                "S:AI(ML;ID;NW;;;ME)"
+            )
+        return owners[path], sddl
+
+    monkeypatch.setattr(
+        workflow_lab_module, "_windows_current_user_sid", lambda: owner_sid
+    )
+    monkeypatch.setattr(workflow_lab_module.subprocess, "run", run)
+    monkeypatch.setattr(workflow_lab_module, "_windows_security_sddl", security)
+
+    with pytest.raises(WorkflowLabError) as caught:
+        workflow_lab_module._validate_windows_materialized_security([root, target])
+    assert "reason=owner_mismatch" in str(caught.value)
+    assert "S-1-5-32-544" not in str(caught.value)
+    assert "O:S-1-5-21-1D:P" not in str(caught.value)
+    assert "(A;OICI" not in str(caught.value)
+
+    workflow_lab_module._harden_windows_materialized_tree(root)
+    workflow_lab_module._validate_windows_materialized_security([root, target])
+
+    assert calls[0] == [
+        "icacls",
+        str(root),
+        "/setowner",
+        f"*{owner_sid}",
+        "/T",
+        "/C",
+    ]
+    assert calls[1][2:] == [
+        "/inheritance:r",
+        "/grant:r",
+        f"*{owner_sid}:(OI)(CI)(F)",
+        "*S-1-5-32-545:(OI)(CI)(RX)",
+        "/C",
+    ]
+
+
+def test_windows_hardening_wraps_owner_command_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "materialized"
+    root.mkdir()
+
+    def fail(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        raise subprocess.TimeoutExpired(["icacls"], 20)
+
+    monkeypatch.setattr(
+        workflow_lab_module, "_windows_current_user_sid", lambda: "S-1-5-21-1"
+    )
+    monkeypatch.setattr(workflow_lab_module.subprocess, "run", fail)
+
+    with pytest.raises(WorkflowLabError) as caught:
+        workflow_lab_module._harden_windows_materialized_tree(root)
+
+    assert caught.value.code == "materialized_security_failed"
+    assert caught.value.stage == "materialize"
+    assert "step=set_owner" in str(caught.value)
 
 
 def test_byte_governed_packaged_workflows_disable_checkout_conversion() -> None:
