@@ -10,6 +10,8 @@ This directory contains the current project documentation for the local Agentic 
 - `architecture/overview.md` — short architecture summary.
 - `project-plan.md` — current scope, completed capabilities, gaps, and next steps.
 - `operator_handoff.md` — report-export and handoff artifact contract.
+- `adk-workflow-lab.md` — Phase 4 declarative draft validation, export, and installed-layout contract.
+- `architecture/adr-0004-adk-workflow-lab-builder-fallback.md` — ADK 2.7.1 native Builder fallback decision.
 - `contracts/control-plane.md` — run/event/tool/workflow/review/report API contract.
 - `contracts/actuarial-tool-manifest-v1.md` — CLI/file-artifact tool contract v1.
 - `contracts/actuarial-artifact-layout-v1.md` — artifact layout v1.

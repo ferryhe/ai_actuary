@@ -194,6 +194,32 @@ transport and route classification are frozen in
 
 ---
 
+## ADK Workflow Lab (Phase 4)
+
+The Workflow Lab validates isolated declarative ADK 2.7.1 drafts and exports a
+deterministic candidate snapshot plus reviewable no-index patch:
+
+```bash
+python scripts/validate_adk_workflow.py tmp/adk-workflow-drafts/<app>
+python scripts/export_adk_workflow_diff.py tmp/adk-workflow-drafts/<app> --check
+```
+
+Native ADK Visual Builder is intentionally not exposed: its 2.7.1 save path can
+write the app root and its built-in assistant can write/delete arbitrary
+project files. The project-owned fallback accepts only YAML under the ignored
+draft root, runs handle-pinned preflight, safe YAML, executable-reference,
+frozen schema, project policy, and offline model-free contract checks in that
+order, then writes a new immutable server-owned export. It cannot edit
+published workflows, choose an output path, mutate Git/index/catalog state, or
+publish automatically.
+
+Published declarative resources are package data and work from an installed
+wheel through `importlib.resources`; Git diff export is explicitly unavailable
+outside source-checkout mode. See [ADK Workflow Lab](docs/adk-workflow-lab.md)
+and [ADR 0004](docs/architecture/adr-0004-adk-workflow-lab-builder-fallback.md).
+
+---
+
 ## Quick Start: Create a Governed Operator Run
 
 Start the dual-interface workbench with `python scripts/run_local_workbench.py`,
