@@ -101,6 +101,7 @@ from reserving_workflow.runtime.adk_execution import (
     canonical_json,
     prepare_isolated_run_root,
     request_fingerprint,
+    validate_adk_inputs,
     validate_adk_provenance,
     workflow_digest,
 )
@@ -1313,8 +1314,28 @@ def _create_app(
                         "message": "The source run's workflow version is unavailable.",
                     },
                 )
-            source_operator_params = dict(source_entry.get("operator_params") or {})
-            workflow_inputs = dict(source_operator_params.get("workflow_inputs") or {})
+            workflow_inputs_unavailable_detail = {
+                "code": "workflow_inputs_unavailable",
+                "message": "The source run's frozen workflow inputs are unavailable.",
+            }
+            source_operator_params = source_entry.get("operator_params")
+            if (
+                not isinstance(source_operator_params, dict)
+                or "workflow_inputs" not in source_operator_params
+                or not isinstance(source_operator_params["workflow_inputs"], dict)
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=workflow_inputs_unavailable_detail,
+                )
+            workflow_inputs = dict(source_operator_params["workflow_inputs"])
+            try:
+                validate_adk_inputs(workflow_inputs)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail=workflow_inputs_unavailable_detail,
+                ) from exc
             child_request = AdkStartRequest(
                 workflow_id=workflow_id,
                 case_id=str(source_entry.get("case_id") or ""),

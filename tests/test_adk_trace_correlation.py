@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
 import reserving_workflow.api.app as app_module
 from reserving_workflow.api.app import ApiSettings, create_app
@@ -474,6 +475,45 @@ def test_rerun_rejects_workflow_digest_mismatch_with_zero_side_effects(tmp_path)
 
     assert rejected.status_code == 409
     assert rejected.json()["detail"]["code"] == "workflow_version_unavailable"
+    assert settings.registry_path.read_text(encoding="utf-8") == before_registry
+    assert sorted(path.name for path in settings.adk_artifact_root.iterdir()) == before_dirs
+
+
+@pytest.mark.parametrize("mutation", ("missing", "invalid"))
+def test_rerun_rejects_unavailable_frozen_inputs_with_zero_side_effects(tmp_path, mutation):
+    app, settings = _app(tmp_path)
+    source = _start_adk_run(app)
+    registry = json.loads(settings.registry_path.read_text(encoding="utf-8"))
+    source_entry = next(run for run in registry["runs"] if run["run_id"] == source["run_id"])
+    source_operator_params = source_entry["operator_params"]
+    if mutation == "missing":
+        source_operator_params.pop("workflow_inputs", None)
+    else:
+        source_operator_params["workflow_inputs"] = ["not", "a", "frozen-input-object"]
+    settings.registry_path.write_text(json.dumps(registry), encoding="utf-8")
+    before_registry = settings.registry_path.read_text(encoding="utf-8")
+    before_dirs = sorted(path.name for path in settings.adk_artifact_root.iterdir())
+    payload = {
+        "adk_app": "ai_actuary_developer",
+        "adk_session_id": "session-1",
+        "adk_invocation_id": f"rerun-frozen-inputs-{mutation}",
+    }
+
+    rejected = _request(
+        app,
+        "POST",
+        f"/adk/runs/{source['run_id']}/rerun",
+        headers=_debug_headers(
+            action="rerun_run",
+            object_id=source["run_id"],
+            payload=payload,
+            key=f"frozen-inputs-{mutation}-key",
+        ),
+        json=payload,
+    )
+
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "workflow_inputs_unavailable"
     assert settings.registry_path.read_text(encoding="utf-8") == before_registry
     assert sorted(path.name for path in settings.adk_artifact_root.iterdir()) == before_dirs
 
