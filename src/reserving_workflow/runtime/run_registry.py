@@ -42,6 +42,10 @@ class RegistryIntegrityError(ValueError):
         super().__init__(code)
 
 
+RUN_BOUND_ADK_ACTIONS = frozenset({"start_workflow_run", "rerun_run"})
+DEBUG_ADK_ACTIONS = frozenset({"run_bounded_benchmark", "export_run_report"})
+
+
 def _unique_value(
     seen: dict[str, str], value: Any, *, owner: str, code: str
 ) -> None:
@@ -54,7 +58,12 @@ def _unique_value(
 def _audit_adk_payload(payload: dict[str, Any]) -> set[str]:
     runs = payload.get("runs", [])
     operations = payload.get("adk_operations", [])
-    if not isinstance(runs, list) or not isinstance(operations, list):
+    debug_operations = payload.get("adk_debug_operations", [])
+    if (
+        not isinstance(runs, list)
+        or not isinstance(operations, list)
+        or not isinstance(debug_operations, list)
+    ):
         raise RegistryIntegrityError("adk_registry_binding_invalid")
     runs_by_id: dict[str, dict[str, Any]] = {}
     for run in runs:
@@ -69,10 +78,8 @@ def _audit_adk_payload(payload: dict[str, Any]) -> set[str]:
         str(operation.get("run_id"))
         for operation in operations
         if isinstance(operation, dict)
-        and (
-            operation.get("principal") == "adk-developer"
-            or operation.get("action") == "start_workflow_run"
-        )
+        and operation.get("principal") == "adk-developer"
+        and operation.get("action") in RUN_BOUND_ADK_ACTIONS
     }
     authoritative_run_ids = set(operation_run_ids)
     for run_id, run in runs_by_id.items():
@@ -94,9 +101,10 @@ def _audit_adk_payload(payload: dict[str, Any]) -> set[str]:
             continue
         if (
             operation.get("principal") != "adk-developer"
-            or operation.get("action") != "start_workflow_run"
+            or operation.get("action") not in RUN_BOUND_ADK_ACTIONS
         ):
             raise RegistryIntegrityError("adk_registry_binding_invalid")
+        action = str(operation.get("action"))
         _unique_value(
             operation_ids,
             operation.get("operation_id"),
@@ -105,7 +113,7 @@ def _audit_adk_payload(payload: dict[str, Any]) -> set[str]:
         )
         _unique_value(
             idempotency_digests,
-            operation.get("idempotency_key_digest"),
+            f"{action}:{operation.get('idempotency_key_digest')}",
             owner=run_id,
             code="adk_registry_cardinality_conflict",
         )
@@ -124,6 +132,40 @@ def _audit_adk_payload(payload: dict[str, Any]) -> set[str]:
             if not isinstance(digest, str) or len(digest) != 64:
                 raise RegistryIntegrityError("adk_registry_binding_invalid")
         operations_by_run.setdefault(run_id, []).append(operation)
+
+    debug_operation_ids: dict[str, str] = {}
+    debug_idempotency_digests: dict[str, str] = {}
+    for operation in debug_operations:
+        if not isinstance(operation, dict):
+            raise RegistryIntegrityError("adk_registry_binding_invalid")
+        if (
+            operation.get("principal") != "adk-developer"
+            or operation.get("action") not in DEBUG_ADK_ACTIONS
+            or not isinstance(operation.get("result"), dict)
+        ):
+            raise RegistryIntegrityError("adk_registry_binding_invalid")
+        action = str(operation.get("action"))
+        owner = f"{action}:{operation.get('object_id')}"
+        _unique_value(
+            debug_operation_ids,
+            operation.get("operation_id"),
+            owner=owner,
+            code="adk_registry_cardinality_conflict",
+        )
+        _unique_value(
+            debug_idempotency_digests,
+            f"{action}:{operation.get('idempotency_key_digest')}",
+            owner=owner,
+            code="adk_registry_cardinality_conflict",
+        )
+        for digest_field in (
+            "idempotency_key_digest",
+            "request_fingerprint",
+            "confirmation_grant_digest",
+        ):
+            digest = operation.get(digest_field)
+            if not isinstance(digest, str) or len(digest) != 64:
+                raise RegistryIntegrityError("adk_registry_binding_invalid")
 
     correlations: dict[str, str] = {}
     invocations: dict[str, str] = {}
@@ -152,8 +194,11 @@ def _audit_adk_payload(payload: dict[str, Any]) -> set[str]:
             owner=run_id,
             code="adk_registry_cardinality_conflict",
         )
+        if validated.get("run_id") is not None and validated.get("run_id") != run_id:
+            raise RegistryIntegrityError("adk_registry_binding_invalid")
         invocation_key = (
-            f"{validated.get('adk_app')}:{validated.get('adk_invocation_id')}"
+            f"{validated.get('adk_app')}:{validated.get('adk_session_id')}:"
+            f"{validated.get('adk_invocation_id')}"
         )
         _unique_value(
             invocations,
@@ -169,6 +214,20 @@ def _audit_adk_payload(payload: dict[str, Any]) -> set[str]:
                     owner=run_id,
                     code="adk_registry_cardinality_conflict",
                 )
+        parent_run_id = validated.get("parent_run_id")
+        source_run_id = validated.get("source_run_id")
+        if parent_run_id is not None and parent_run_id not in runs_by_id:
+            raise RegistryIntegrityError("adk_registry_binding_invalid")
+        if source_run_id is not None and source_run_id not in runs_by_id:
+            raise RegistryIntegrityError("adk_registry_binding_invalid")
+        lineage = validated.get("lineage")
+        if lineage is not None:
+            if (
+                not isinstance(lineage, dict)
+                or lineage.get("parent_run_id") != parent_run_id
+                or lineage.get("source_run_id") != (source_run_id or parent_run_id)
+            ):
+                raise RegistryIntegrityError("adk_registry_binding_invalid")
         bound_operations = operations_by_run.get(run_id, [])
         if len(bound_operations) != 1:
             raise RegistryIntegrityError("adk_registry_binding_invalid")
@@ -305,10 +364,8 @@ def get_run_scope_record(
         operation_bound = isinstance(operations, list) and any(
             isinstance(operation, dict)
             and operation.get("run_id") == run_id
-            and (
-                operation.get("principal") == "adk-developer"
-                or operation.get("action") == "start_workflow_run"
-            )
+            and operation.get("principal") == "adk-developer"
+            and operation.get("action") in RUN_BOUND_ADK_ACTIONS
             for operation in operations
         )
         source_marked = any(
@@ -325,6 +382,7 @@ def get_run_scope_record(
 def accept_adk_run(
     *,
     registry_path: str | Path,
+    action: str = "start_workflow_run",
     idempotency_key: str,
     request_fingerprint: str,
     confirmation_grant_digest: str,
@@ -335,9 +393,12 @@ def accept_adk_run(
     artifact_root: str,
     workflow_id: str,
     provenance: dict[str, Any],
+    operator_params: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Atomically bind one confirmed ADK invocation to one accepted run."""
 
+    if action not in RUN_BOUND_ADK_ACTIONS:
+        raise ValueError("adk_action_invalid")
     if not isinstance(idempotency_key, str) or not 16 <= len(idempotency_key) <= 256:
         raise ValueError("idempotency_key_invalid")
     key_digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
@@ -353,7 +414,7 @@ def accept_adk_run(
                 for item in operations
                 if item.get("idempotency_key_digest") == key_digest
                 and item.get("principal") == "adk-developer"
-                and item.get("action") == "start_workflow_run"
+                and item.get("action") == action
             ),
             None,
         )
@@ -368,11 +429,19 @@ def accept_adk_run(
                 raise IdempotencyConflictError("idempotency_binding_invalid")
             return existing_run, False
 
-        invocation_id = str(provenance.get("adk_invocation_id", ""))
+        invocation_key = (
+            f"{provenance.get('adk_app')}:{provenance.get('adk_session_id')}:"
+            f"{provenance.get('adk_invocation_id')}"
+        )
         correlation_id = str(provenance.get("correlation_id", ""))
         if any(
             isinstance(item.get("provenance"), dict)
-            and item["provenance"].get("adk_invocation_id") == invocation_id
+            and (
+                f"{item['provenance'].get('adk_app')}:"
+                f"{item['provenance'].get('adk_session_id')}:"
+                f"{item['provenance'].get('adk_invocation_id')}"
+            )
+            == invocation_key
             for item in runs
         ):
             raise IdempotencyConflictError("invocation_conflict")
@@ -385,6 +454,15 @@ def accept_adk_run(
         if any(item.get("run_id") == run_id for item in runs):
             raise IdempotencyConflictError("run_id_conflict")
 
+        resolved_operator_params = {
+            "case_id": case_id,
+            "workflow_id": workflow_id,
+            "created_by": "adk-developer",
+            "operator_id": "adk-developer",
+            "workspace_id": "adk-development",
+        }
+        if operator_params is not None:
+            resolved_operator_params.update(operator_params)
         now = _utc_now()
         history = {
             "status": "accepted",
@@ -411,13 +489,7 @@ def accept_adk_run(
             "error_category": None,
             "errors": [],
             "review_delivery": None,
-            "operator_params": {
-                "case_id": case_id,
-                "workflow_id": workflow_id,
-                "created_by": "adk-developer",
-                "operator_id": "adk-developer",
-                "workspace_id": "adk-development",
-            },
+            "operator_params": resolved_operator_params,
             "workflow_id": workflow_id,
             "provenance": provenance,
             "operation_id": operation_id,
@@ -425,7 +497,7 @@ def accept_adk_run(
         }
         operation = {
             "principal": "adk-developer",
-            "action": "start_workflow_run",
+            "action": action,
             "idempotency_key_digest": key_digest,
             "request_fingerprint": request_fingerprint,
             "confirmation_grant_digest": confirmation_grant_digest,
@@ -439,6 +511,221 @@ def accept_adk_run(
         _audit_adk_payload(payload)
         _write_registry_payload(path, payload)
         return entry, True
+
+
+def get_adk_debug_operation(
+    *,
+    operation_store_path: str | Path,
+    action: str,
+    idempotency_key: str,
+    request_fingerprint: str,
+) -> dict[str, Any] | None:
+    """Return an existing action-scoped ADK debug operation, if bound."""
+
+    if action not in DEBUG_ADK_ACTIONS:
+        raise ValueError("adk_action_invalid")
+    if not isinstance(idempotency_key, str) or not 16 <= len(idempotency_key) <= 256:
+        raise ValueError("idempotency_key_invalid")
+    key_digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+    path = resolve_registry_path(operation_store_path)
+    if not path.exists():
+        return None
+    with locked_registry_transaction(path):
+        payload = _read_registry_payload(path)
+        _audit_adk_payload(payload)
+        operations = payload.get("adk_debug_operations", [])
+        existing_operation = next(
+            (
+                item
+                for item in operations
+                if item.get("idempotency_key_digest") == key_digest
+                and item.get("principal") == "adk-developer"
+                and item.get("action") == action
+            ),
+            None,
+        )
+        if existing_operation is None:
+            return None
+        if not secrets.compare_digest(
+            str(existing_operation.get("request_fingerprint", "")),
+            request_fingerprint,
+        ):
+            raise IdempotencyConflictError("idempotency_conflict")
+        return dict(existing_operation)
+
+
+def get_adk_debug_operation_by_id(
+    *,
+    operation_store_path: str | Path,
+    operation_id: str,
+) -> dict[str, Any] | None:
+    """Return one ADK debug operation by logical operation ID."""
+
+    if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128:
+        raise ValueError("operation_id_invalid")
+    path = resolve_registry_path(operation_store_path)
+    if not path.exists():
+        return None
+    with locked_registry_transaction(path):
+        payload = _read_registry_payload(path)
+        _audit_adk_payload(payload)
+        operation = next(
+            (
+                item
+                for item in payload.get("adk_debug_operations", [])
+                if item.get("principal") == "adk-developer"
+                and item.get("operation_id") == operation_id
+            ),
+            None,
+        )
+        return dict(operation) if isinstance(operation, dict) else None
+
+
+def get_adk_run_operation_by_id(
+    *,
+    registry_path: str | Path,
+    operation_id: str,
+) -> dict[str, Any] | None:
+    """Return one run-bound ADK operation by logical operation ID."""
+
+    if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128:
+        raise ValueError("operation_id_invalid")
+    path = resolve_registry_path(registry_path)
+    if not path.exists():
+        return None
+    with locked_registry_transaction(path):
+        payload = _read_registry_payload(path)
+        _audit_adk_payload(payload)
+        operation = next(
+            (
+                item
+                for item in payload.get("adk_operations", [])
+                if item.get("principal") == "adk-developer"
+                and item.get("operation_id") == operation_id
+                and item.get("action") in RUN_BOUND_ADK_ACTIONS
+            ),
+            None,
+        )
+        if not isinstance(operation, dict):
+            return None
+        run_id = str(operation.get("run_id") or "")
+        run = next(
+            (
+                item
+                for item in payload.get("runs", [])
+                if isinstance(item, dict) and item.get("run_id") == run_id
+            ),
+            None,
+        )
+        if not isinstance(run, dict):
+            raise RegistryIntegrityError("adk_operation_run_missing")
+        provenance = run.get("provenance") if isinstance(run.get("provenance"), dict) else {}
+        result = {
+            "ok": run.get("status") not in {"failed", "stale"},
+            "operation_id": str(operation.get("operation_id")),
+            "status": str(run.get("status") or "unknown"),
+            "run": {
+                "run_id": run_id,
+                "case_id": run.get("case_id"),
+                "workflow_id": run.get("workflow_id"),
+                "status": str(run.get("status") or "unknown"),
+                "correlation_id": provenance.get("correlation_id"),
+                "parent_run_id": provenance.get("parent_run_id"),
+                "source_run_id": provenance.get("source_run_id"),
+            },
+        }
+        return {**dict(operation), "result": result}
+
+
+def record_adk_debug_operation(
+    *,
+    operation_store_path: str | Path,
+    action: str,
+    object_id: str,
+    idempotency_key: str,
+    request_fingerprint: str,
+    confirmation_grant_digest: str,
+    operation_id: str,
+    result: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Atomically persist one action-scoped ADK debug operation result."""
+
+    if action not in DEBUG_ADK_ACTIONS:
+        raise ValueError("adk_action_invalid")
+    if not isinstance(idempotency_key, str) or not 16 <= len(idempotency_key) <= 256:
+        raise ValueError("idempotency_key_invalid")
+    key_digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+    path = resolve_registry_path(operation_store_path)
+    with locked_registry_transaction(path):
+        payload = _read_registry_payload(path)
+        _audit_adk_payload(payload)
+        operations = payload.setdefault("adk_debug_operations", [])
+        existing_operation = next(
+            (
+                item
+                for item in operations
+                if item.get("idempotency_key_digest") == key_digest
+                and item.get("principal") == "adk-developer"
+                and item.get("action") == action
+            ),
+            None,
+        )
+        if existing_operation is not None:
+            if not secrets.compare_digest(
+                str(existing_operation.get("request_fingerprint", "")),
+                request_fingerprint,
+            ):
+                raise IdempotencyConflictError("idempotency_conflict")
+            return dict(existing_operation), False
+
+        operation = {
+            "principal": "adk-developer",
+            "action": action,
+            "object_id": str(object_id),
+            "idempotency_key_digest": key_digest,
+            "request_fingerprint": request_fingerprint,
+            "confirmation_grant_digest": confirmation_grant_digest,
+            "operation_id": operation_id,
+            "result": dict(result),
+            "created_at": _utc_now(),
+        }
+        operations.append(operation)
+        _audit_adk_payload(payload)
+        _write_registry_payload(path, payload)
+        return operation, True
+
+
+def complete_adk_debug_operation(
+    *,
+    operation_store_path: str | Path,
+    operation_id: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Update a previously accepted ADK debug operation with its final result."""
+
+    if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128:
+        raise ValueError("operation_id_invalid")
+    path = resolve_registry_path(operation_store_path)
+    with locked_registry_transaction(path):
+        payload = _read_registry_payload(path)
+        _audit_adk_payload(payload)
+        operations = payload.get("adk_debug_operations", [])
+        operation = next(
+            (
+                item
+                for item in operations
+                if item.get("principal") == "adk-developer"
+                and item.get("operation_id") == operation_id
+            ),
+            None,
+        )
+        if not isinstance(operation, dict):
+            raise IdempotencyConflictError("operation_binding_invalid")
+        operation["result"] = dict(result)
+        operation["updated_at"] = _utc_now()
+        _audit_adk_payload(payload)
+        _write_registry_payload(path, payload)
+        return dict(operation)
 
 
 def mark_incomplete_adk_runs_stale(registry_path: str | Path) -> list[str]:

@@ -28,6 +28,7 @@ MAX_ADK_KEY_LENGTH = 128
 MAX_ADK_TRIANGLE_ROWS = 256
 MAX_ADK_SUMMARY_BYTES = 2_048
 MAX_ADK_SUMMARY_KEYS = 8
+MAX_ADK_BENCHMARK_CASE_LIMIT = 3
 ALLOWED_ADK_WORKFLOWS = frozenset({"chainladder-basic", "chainladder-validated"})
 EXPECTED_ARTIFACT_TYPES: dict[str, tuple[str, ...]] = {
     "chainladder-basic": (
@@ -63,14 +64,7 @@ class AdkStartRequest(BaseModel):
     )
     @classmethod
     def _bounded_identifier(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        candidate = str(value)
-        if not candidate or len(candidate) > 128 or not candidate[0].isalnum():
-            raise ValueError("Identifiers must be bounded safe logical values")
-        if any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for character in candidate):
-            raise ValueError("Identifiers must be bounded safe logical values")
-        return candidate
+        return _bounded_identifier(value)
 
     @model_validator(mode="after")
     def _validate_scope_and_inputs(self) -> "AdkStartRequest":
@@ -81,6 +75,100 @@ class AdkStartRequest(BaseModel):
         return self
 
 
+class AdkDebugContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    adk_app: str
+    adk_session_id: str
+    adk_invocation_id: str
+
+    @field_validator("adk_app", "adk_session_id", "adk_invocation_id")
+    @classmethod
+    def _bounded_identifier(cls, value: str) -> str:
+        return _bounded_identifier(value) or ""
+
+
+class AdkEmptyDebugRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class AdkRepeatabilityRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_ids: list[str] = Field(min_length=2, max_length=5)
+
+    @field_validator("run_ids")
+    @classmethod
+    def _bounded_run_ids(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("Run IDs must be unique")
+        return [_bounded_identifier(item) or "" for item in value]
+
+
+class AdkBenchmarkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    case_pack_id: str = "deterministic-v1"
+    lane: str = "offline"
+    case_limit: int | None = None
+    input_byte_limit: int | None = None
+    total_byte_limit: int | None = None
+    output_byte_limit: int | None = None
+    wall_time_seconds: float | None = None
+    temp_storage_bytes: int | None = None
+    retention_days: int | None = None
+    concurrency: int | None = None
+
+    @field_validator("case_pack_id")
+    @classmethod
+    def _bounded_case_pack_id(cls, value: str) -> str:
+        return _bounded_identifier(value) or ""
+
+    @field_validator("lane")
+    @classmethod
+    def _known_lane(cls, value: str) -> str:
+        if value not in {"offline", "real_model"}:
+            raise ValueError("Unsupported evaluation lane")
+        return value
+
+    @field_validator("case_limit", mode="before")
+    @classmethod
+    def _bounded_case_limit(cls, value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("Case limit must be an integer")
+        if not 1 <= value <= MAX_ADK_BENCHMARK_CASE_LIMIT:
+            raise ValueError("Case limit exceeds ADK benchmark ceiling")
+        return value
+
+    @field_validator(
+        "input_byte_limit",
+        "total_byte_limit",
+        "output_byte_limit",
+        "temp_storage_bytes",
+        "retention_days",
+        "concurrency",
+        mode="before",
+    )
+    @classmethod
+    def _positive_integer_limit(cls, value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("Benchmark limit must be a positive integer")
+        return value
+
+    @field_validator("wall_time_seconds", mode="before")
+    @classmethod
+    def _positive_wall_time(cls, value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError("Benchmark wall-time limit must be positive")
+        return float(value)
+
+
 def canonical_json(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
@@ -88,6 +176,24 @@ def canonical_json(payload: Any) -> str:
 def request_fingerprint(request: AdkStartRequest) -> str:
     return hashlib.sha256(
         canonical_json(request.model_dump(mode="json", exclude_none=True)).encode("utf-8")
+    ).hexdigest()
+
+
+def adk_debug_request_fingerprint(
+    *,
+    action: str,
+    object_id: str,
+    request: BaseModel | dict[str, Any],
+) -> str:
+    payload = request.model_dump(mode="json", exclude_none=True) if isinstance(request, BaseModel) else dict(request)
+    return hashlib.sha256(
+        canonical_json(
+            {
+                "action": _bounded_identifier(action),
+                "object_id": _bounded_identifier(object_id),
+                "request": payload,
+            }
+        ).encode("utf-8")
     ).hexdigest()
 
 
@@ -180,22 +286,44 @@ def workflow_digest(workflow_entry: Any) -> str:
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
-def build_adk_provenance(request: AdkStartRequest, *, workflow_entry: Any) -> dict[str, Any]:
+def build_adk_provenance(
+    request: AdkStartRequest,
+    *,
+    workflow_entry: Any,
+    run_id: str | None = None,
+    workflow_digest_override: str | None = None,
+    source_run_id: str | None = None,
+    root_run_id: str | None = None,
+) -> dict[str, Any]:
+    resolved_workflow_digest = workflow_digest_override or workflow_digest(workflow_entry)
+    parent_run_id = request.parent_run_id
     provenance: dict[str, Any] = {
         "provenance_schema_version": PROVENANCE_SCHEMA_VERSION,
         "source": ADK_SOURCE,
         "workflow_origin": "published",
         "workflow_id": request.workflow_id,
-        "workflow_digest": workflow_digest(workflow_entry),
+        "workflow_digest": resolved_workflow_digest,
         "input_digest": hashlib.sha256(canonical_json(request.inputs).encode("utf-8")).hexdigest(),
         "adk_app": request.adk_app,
         "adk_session_id": request.adk_session_id,
         "adk_invocation_id": request.adk_invocation_id,
+        "trace_id": f"{request.adk_app}:{request.adk_session_id}:{request.adk_invocation_id}",
         "correlation_id": f"corr_{uuid.uuid4().hex}",
         "capability_class": ADK_CAPABILITY,
     }
-    if request.parent_run_id is not None:
-        provenance["parent_run_id"] = request.parent_run_id
+    if run_id is not None:
+        provenance["run_id"] = _bounded_identifier(run_id)
+    if parent_run_id is not None:
+        provenance["parent_run_id"] = parent_run_id
+    if source_run_id is not None:
+        provenance["source_run_id"] = _bounded_identifier(source_run_id)
+    if parent_run_id is not None or source_run_id is not None:
+        root = root_run_id or source_run_id or parent_run_id
+        provenance["lineage"] = {
+            "parent_run_id": parent_run_id,
+            "source_run_id": source_run_id or parent_run_id,
+            "root_run_id": _bounded_identifier(root) if root is not None else None,
+        }
     validate_adk_provenance(provenance)
     return provenance
 
@@ -232,6 +360,23 @@ def validate_adk_provenance(provenance: Any) -> dict[str, Any]:
         digest = provenance.get(digest_name)
         if not isinstance(digest, str) or len(digest) != 64:
             raise ValueError("adk_provenance_invalid")
+    for identifier_name in ("run_id", "parent_run_id", "source_run_id"):
+        if provenance.get(identifier_name) is not None:
+            _bounded_identifier(provenance.get(identifier_name))
+    trace_id = provenance.get("trace_id")
+    if trace_id is not None and (
+        not isinstance(trace_id, str)
+        or len(trace_id) > 384
+        or any(character in trace_id for character in "/\\?*[]{}")
+    ):
+        raise ValueError("adk_provenance_invalid")
+    lineage = provenance.get("lineage")
+    if lineage is not None:
+        if not isinstance(lineage, dict):
+            raise ValueError("adk_provenance_invalid")
+        for key in ("parent_run_id", "source_run_id", "root_run_id"):
+            if lineage.get(key) is not None:
+                _bounded_identifier(lineage.get(key))
     return dict(provenance)
 
 
@@ -278,8 +423,13 @@ def _ensure_safe_directory(path: Path) -> None:
 def _reject_storage_like_values(payload: Any) -> None:
     stack: list[Any] = [payload]
     forbidden_keys = {
-        "artifact_dir", "artifact_root", "output_dir", "review_dir", "review_store_dir",
-        "registry_path", "workspace_id", "source", "created_by", "operator_id", "correlation_id",
+        "artifact_dir", "artifact_dirs", "artifact_root", "artifact_roots",
+        "manifest_path", "manifest_paths", "output_dir", "output_path",
+        "output_paths", "output_file", "output_files", "filename", "filenames",
+        "review_dir", "review_dirs", "review_store_dir", "review_store_dirs",
+        "registry_path", "source", "source_root", "source_roots",
+        "workspace_id", "created_by", "operator_id", "correlation_id",
+        "url", "urls", "glob", "globs",
     }
     while stack:
         value = stack.pop()
@@ -301,16 +451,33 @@ def _reject_storage_like_values(payload: Any) -> None:
                 raise ValueError("unsafe_source_forbidden")
 
 
+def _bounded_identifier(value: str | None) -> str | None:
+    if value is None:
+        return None
+    candidate = str(value)
+    if not candidate or len(candidate) > 128 or not candidate[0].isalnum():
+        raise ValueError("Identifiers must be bounded safe logical values")
+    if any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for character in candidate):
+        raise ValueError("Identifiers must be bounded safe logical values")
+    return candidate
+
+
 __all__ = [
     "ADK_CAPABILITY",
     "ADK_SOURCE",
     "ADK_WORKSPACE_ID",
+    "AdkBenchmarkRequest",
+    "AdkDebugContext",
+    "AdkEmptyDebugRequest",
+    "AdkRepeatabilityRequest",
     "ALLOWED_ADK_WORKFLOWS",
     "AdkStartRequest",
     "EXPECTED_ARTIFACT_TYPES",
     "PROVENANCE_SCHEMA_VERSION",
     "MAX_ADK_INPUT_BYTES",
+    "MAX_ADK_BENCHMARK_CASE_LIMIT",
     "build_adk_provenance",
+    "adk_debug_request_fingerprint",
     "canonical_json",
     "prepare_isolated_run_root",
     "request_fingerprint",
