@@ -90,4 +90,4 @@ Agent/system:
 - writes artifacts and manifests;
 - summarizes evidence without inventing facts.
 
-For full detail, see `docs/architecture.md`, `docs/project-plan.md`, and `docs/contracts/control-plane.md`.
+For full detail, see `docs/architecture.md`, `docs/adk-local-workbench.md`, `docs/contracts/control-plane.md`, and the historical `docs/archive/project-plan.md`.

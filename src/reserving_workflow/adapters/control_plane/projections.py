@@ -8,6 +8,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from reserving_workflow.runtime.redaction import (
+    is_sensitive_key,
+    looks_like_absolute_path,
+    looks_sensitive,
+    sanitize_for_runtime,
+)
 from reserving_workflow.contracts import Review, Run, RunEvent
 from reserving_workflow.storage.safe_json import (
     MAX_ARTIFACT_BYTES,
@@ -475,28 +481,14 @@ def _category_for_artifact(artifact_id: str) -> str:
 
 
 def _safe_json_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            str(key): _safe_json_value(item)
-            for key, item in value.items()
-            if not _forbidden_key(str(key))
-        }
-    if isinstance(value, list):
-        return [_safe_json_value(item) for item in value]
-    if isinstance(value, tuple):
-        return [_safe_json_value(item) for item in value]
-    if isinstance(value, str):
-        if _looks_like_absolute_path(value) or _looks_sensitive(value):
-            return "[redacted]"
-        return value
-    if isinstance(value, float) and not math.isfinite(value):
-        return "[unsupported]"
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    return "[unsupported]"
+    return sanitize_for_runtime(value)
 
 
 def _forbidden_key(key: str) -> bool:
+    return is_sensitive_key(key)
+
+
+def _legacy_forbidden_key(key: str) -> bool:
     candidate = key.strip()
     if (
         _looks_like_absolute_path(candidate)
@@ -705,69 +697,11 @@ def _has_sensitive_semantics(
 
 
 def _looks_like_absolute_path(value: str) -> bool:
-    candidate = value.strip()
-    return (
-        bool(re.search(r"(?i)file:(?://|\\\\)", candidate))
-        or bool(re.search(r"[A-Za-z]:[\\/]", candidate))
-        or bool(re.search(r"(?:\\\\|(?<!:)//)[^\\/\s]+[\\/][^\\/\s]+", candidate))
-        or bool(
-            re.search(
-                r"(?:^|[^A-Za-z0-9._~\\/])\\(?![\\\s])[^\\/\s]+(?:[\\/][^\\/\s]+)*",
-                candidate,
-            )
-        )
-        or bool(re.search(r"(?:^|[^A-Za-z0-9._~/])/(?![/\s])", candidate))
-    )
+    return looks_like_absolute_path(value)
 
 
 def _looks_sensitive(value: str) -> bool:
-    lowered = value.lower()
-    if (
-        _contains_sensitive_assignment(value)
-        or _PEM_PRIVATE_KEY_MARKER.search(value)
-        or _URL_USERINFO.search(value)
-    ):
-        return True
-    tokens = _semantic_tokens(value)
-    if _has_sensitive_semantics(tokens):
-        return True
-    if any(
-        (token in {"api", "access"} and next_token == "key")
-        or (token in {"auth", "authorization"} and next_token == "header")
-        for token, next_token in zip(tokens, tokens[1:])
-    ):
-        return True
-    if any(
-        token == "token"
-        and (index + 1 >= len(tokens) or tokens[index + 1] != "count")
-        for index, token in enumerate(tokens)
-    ):
-        return True
-    if re.search(
-        r"\b(?:secret|password|passphrase|credentials?|cookies?|sessionid|"
-        r"shared[-_ ]?secret|registry[-_ ]?path|"
-        r"file[-_ ]?name|basic[-_ ]?value)\b",
-        lowered,
-    ):
-        return True
-    return bool(
-        re.search(
-            r"(?i)(?:"
-            r"\bauthorization\s*:?\s*basic\s+\S+|"
-            r"\bbasic\s+[A-Za-z0-9+/=_-]+|"
-            r"\bbearer\s+\S+|"
-            r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])|"
-            r"\bsessionid\s*[:=]\s*\S+|"
-            r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{8,}|"
-            r"(?<![A-Za-z0-9])gh[po]_[A-Za-z0-9]{8,}|"
-            r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{8,}|"
-            r"(?<![A-Za-z0-9])xox[a-z]-[A-Za-z0-9-]{8,}|"
-            r"(?<![A-Za-z0-9])AKIA[A-Z0-9]{16}|"
-            r"(?<![A-Za-z0-9])AIza[A-Za-z0-9_-]{20,}"
-            r")",
-            value,
-        )
-    )
+    return looks_sensitive(value)
 
 
 __all__ = [

@@ -1496,7 +1496,7 @@ def test_console_state_exposes_symphony_style_panels(tmp_path):
         "summary": "needs review",
         "created_at": state["selected_run"]["created_at"],
         "updated_at": state["selected_run"]["updated_at"],
-        "artifact_root": state["selected_run"]["artifact_root"],
+        "artifact_root_ref": f"run:{run['run_id']}:artifacts",
         "review_required": True,
     }
     assert "operator_params" not in state["selected_run"]
@@ -1508,7 +1508,7 @@ def test_console_state_exposes_symphony_style_panels(tmp_path):
         "run.running",
         "run.needs_review",
     ]
-    assert state["artifact_panel"]["artifact_root"]
+    assert state["artifact_panel"]["artifact_root_ref"] == f"run:{run['run_id']}:artifacts"
     assert state["review_inbox"][0]["review_id"].startswith("review-")
     assert state["review_inbox"][0]["status"] == "review_required"
     assert state["review_panel"]["present"] is True

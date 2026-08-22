@@ -98,6 +98,27 @@ def test_missing_invalid_and_forbidden_credentials_are_distinct(tmp_path):
     assert "secret" not in response.text.lower()
 
 
+def test_operator_can_review_adk_runs_but_adk_cannot_read_operator_runs():
+    authority = capabilities.CapabilityAuthority(
+        operator_credential="operator-secret-that-is-independent",
+        adk_credential="adk-secret-that-is-independent",
+        operator_bootstrap_token="single-use-bootstrap",
+    )
+    operator = authority.authenticate_bearer("Bearer operator-secret-that-is-independent")
+    adk = authority.authenticate_bearer("Bearer adk-secret-that-is-independent")
+
+    assert operator is not None
+    assert adk is not None
+    assert capabilities.object_in_scope(
+        operator,
+        {"workspace_id": "adk-development", "source": "adk-developer"},
+    )
+    assert not capabilities.object_in_scope(
+        adk,
+        {"workspace_id": "default-workspace", "source": "operator-console"},
+    )
+
+
 def test_operator_bootstrap_is_single_use_and_mutations_require_csrf_origin_and_host(tmp_path):
     app = create_app(settings=settings(tmp_path))
     client = Client(app)
@@ -205,6 +226,42 @@ def test_rotation_revokes_bearer_and_sessions_without_removing_runs(tmp_path):
         "GET", "/tools", headers={"Authorization": "Bearer rotated-adk-secret"}
     ).status_code == 200
     assert LocalRunStore(configured.registry_path).get_run("operator-existing")["status"] == "running"
+
+
+def test_browser_smoke_rotation_route_is_gated_and_revokes_former_adk_credential(
+    tmp_path, monkeypatch
+):
+    configured = settings(tmp_path)
+    app = create_app(settings=configured)
+    client = Client(app)
+    disabled = client.request(
+        "POST",
+        "/adk/browser-smoke/rotate-credential",
+        headers={"Authorization": "Bearer adk-secret-that-is-independent"},
+        json={"new_credential": "rotated-adk-secret"},
+    )
+    assert disabled.status_code == 404
+    assert client.request(
+        "GET", "/tools", headers={"Authorization": "Bearer adk-secret-that-is-independent"}
+    ).status_code == 200
+
+    monkeypatch.setenv("AI_ACTUARY_BROWSER_SMOKE_RUNNER", "1")
+    smoke_app = create_app(settings=settings(tmp_path / "smoke"))
+    smoke_client = Client(smoke_app)
+    rotated = smoke_client.request(
+        "POST",
+        "/adk/browser-smoke/rotate-credential",
+        headers={"Authorization": "Bearer adk-secret-that-is-independent"},
+        json={"new_credential": "rotated-adk-secret"},
+    )
+
+    assert rotated.status_code == 200
+    assert smoke_client.request(
+        "GET", "/tools", headers={"Authorization": "Bearer adk-secret-that-is-independent"}
+    ).status_code == 401
+    assert smoke_client.request(
+        "GET", "/tools", headers={"Authorization": "Bearer rotated-adk-secret"}
+    ).status_code == 200
 
 
 def test_console_get_and_adk_process_cannot_acquire_operator_session(tmp_path):

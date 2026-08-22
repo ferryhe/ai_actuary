@@ -64,7 +64,10 @@ from reserving_workflow.evaluation import (
     run_real_model_evaluation_lane,
 )
 from reserving_workflow.evaluation.case_packs import load_case_pack
-from reserving_workflow.interfaces.operator_console import load_operator_console_html
+from reserving_workflow.interfaces.operator_console import (
+    DEFAULT_ADK_DEVELOPER_WEB_URL,
+    render_operator_console_html,
+)
 from reserving_workflow.model_tools import (
     MINIMAX_EXPERIENCE_STUDY_TOOL_ID,
     ExperienceStudyToolInput,
@@ -86,7 +89,7 @@ from reserving_workflow.storage.local import (
     ReviewDecisionConflictError,
     ReviewRecordReadError,
 )
-from reserving_workflow.runtime import build_preflight_report, run_registry
+from reserving_workflow.runtime import browser_smoke_runner, build_preflight_report, run_registry
 from reserving_workflow.runtime.adk_execution import (
     ADK_SOURCE,
     ADK_WORKSPACE_ID,
@@ -152,6 +155,7 @@ class ApiSettings(BaseModel):
     adk_credential: str | None = None
     operator_bootstrap_token: str | None = None
     operator_origin: str = "http://127.0.0.1:8000"
+    adk_url: str = DEFAULT_ADK_DEVELOPER_WEB_URL
     capability_enforcement: bool | None = None
     operator_session_ttl_seconds: float = Field(default=900.0, gt=0, le=3600.0)
     operator_bootstrap_ttl_seconds: float = Field(default=60.0, gt=0, le=300.0)
@@ -225,6 +229,10 @@ class OperatorHandoffClaimRequest(BaseModel):
     claim_token: str = Field(min_length=32, max_length=256)
 
 
+class BrowserSmokeCredentialRotationRequest(BaseModel):
+    new_credential: str = Field(min_length=8, max_length=256)
+
+
 class AdkOperationWaitRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -253,6 +261,12 @@ def _create_app(
     resolved_batch_runner_module = batch_runner_module
     resolved_tool_registry = tool_registry or build_builtin_tool_registry()
     resolved_workflow_catalog = workflow_catalog or build_builtin_workflow_catalog()
+    resolved_runner_module = runner_module
+    if (
+        resolved_runner_module is None
+        and os.environ.get("AI_ACTUARY_BROWSER_SMOKE_RUNNER") == "1"
+    ):
+        resolved_runner_module = browser_smoke_runner
     operator_credential = resolved_settings.operator_credential or os.environ.get(
         "AI_ACTUARY_OPERATOR_CREDENTIAL"
     )
@@ -266,6 +280,14 @@ def _create_app(
         resolved_settings.operator_origin
         if settings is not None
         else os.environ.get("AI_ACTUARY_OPERATOR_ORIGIN", resolved_settings.operator_origin)
+    )
+    adk_developer_url = _loopback_http_origin(
+        (
+            resolved_settings.adk_url
+            if settings is not None
+            else os.environ.get("AI_ACTUARY_ADK_URL", resolved_settings.adk_url)
+        ),
+        purpose="ADK Developer Web URL",
     )
     supplied_secret_count = sum(
         value is not None for value in (operator_credential, adk_credential, bootstrap_token)
@@ -411,9 +433,22 @@ def _create_app(
                 detail={"code": "object_not_found", "message": "Object was not found."},
             )
         authoritative_adk_runs = _audit_adk_registry()
-        _validate_adk_entry_provenance(
-            entry, authoritative_adk=run_id in authoritative_adk_runs
-        )
+        try:
+            _validate_adk_entry_provenance(
+                entry, authoritative_adk=run_id in authoritative_adk_runs
+            )
+        except HTTPException as exc:
+            if (
+                isinstance(principal, Principal)
+                and principal.capability_class == "operator-console"
+                and run_id in authoritative_adk_runs
+                and exc.status_code == 409
+            ):
+                raise HTTPException(
+                    status_code=404,
+                    detail={"code": "object_not_found", "message": "Object was not found."},
+                ) from exc
+            raise
         return entry
 
     def _audit_adk_registry() -> set[str]:
@@ -480,7 +515,7 @@ def _create_app(
 
     @app.get("/console", response_class=HTMLResponse)
     async def operator_console() -> HTMLResponse:
-        console_html = load_operator_console_html()
+        console_html = render_operator_console_html(adk_url=adk_developer_url)
         if authority is not None:
             console_html = _inject_console_csrf_transport(console_html)
         return HTMLResponse(console_html)
@@ -574,6 +609,15 @@ def _create_app(
         )
         return response
 
+    @app.post("/adk/browser-smoke/rotate-credential")
+    async def browser_smoke_rotate_adk_credential(
+        request: BrowserSmokeCredentialRotationRequest,
+    ) -> dict[str, Any]:
+        if os.environ.get("AI_ACTUARY_BROWSER_SMOKE_RUNNER") != "1":
+            raise HTTPException(status_code=404, detail="Not found.")
+        authority.rotate("adk-developer", request.new_credential)
+        return {"ok": True, "rotated": "adk-developer"}
+
     @app.exception_handler(RequestValidationError)
     async def _request_validation_handler(
         request: Request,
@@ -612,6 +656,13 @@ def _create_app(
             operator_id=current_identity["operator_id"],
             workspace_id=current_identity["workspace_id"],
         )
+        if run_id is not None:
+            selected_for_run_id = [
+                entry for entry in all_runs if str(entry.get("run_id")) == str(run_id)
+            ]
+            for entry in selected_for_run_id:
+                if entry not in runs:
+                    runs.insert(0, entry)
         selected_entry = _select_console_run(runs, run_id)
         review_store = _get_review_store()
         with review_store.pinned_reads():
@@ -677,7 +728,7 @@ def _create_app(
                     review_delivery_dir=review_delivery_dir,
                     registry_path=resolved_settings.registry_path,
                     ownership=ownership,
-                    runner_module=runner_module,
+                    runner_module=resolved_runner_module,
                     task_contracts_module=task_contracts_module,
                     tool_registry=resolved_tool_registry,
                 )
@@ -741,7 +792,7 @@ def _create_app(
             review_delivery_dir=review_delivery_dir,
             registry_path=resolved_settings.registry_path,
             ownership=ownership,
-            runner_module=runner_module,
+            runner_module=resolved_runner_module,
             task_contracts_module=task_contracts_module,
         )
         if request.background:
@@ -832,8 +883,8 @@ def _create_app(
             operator_params["review_delivery_dir"] = request.review_delivery_dir or resolved_settings.review_delivery_dir
             operator_params["registry_path"] = resolved_settings.registry_path
             operator_params["run_id"] = _generate_api_run_id(str(entry.get("case_id") or "case"))
-            if runner_module is not None:
-                operator_params["runner_module"] = runner_module
+            if resolved_runner_module is not None:
+                operator_params["runner_module"] = resolved_runner_module
             if task_contracts_module is not None:
                 operator_params["task_contracts_module"] = task_contracts_module
             operator_params["tool_registry"] = resolved_tool_registry
@@ -871,7 +922,7 @@ def _create_app(
                     registry_path=resolved_settings.registry_path,
                     artifact_dir=request.artifact_dir,
                     review_delivery_dir=request.review_delivery_dir or resolved_settings.review_delivery_dir,
-                    runner_module=runner_module,
+                    runner_module=resolved_runner_module,
                     task_contracts_module=task_contracts_module,
                 )
             )
@@ -1174,7 +1225,7 @@ def _create_app(
                     "operator_id": "adk-developer",
                     "workspace_id": ADK_WORKSPACE_ID,
                 },
-                runner_module=runner_module,
+                    runner_module=resolved_runner_module,
                 task_contracts_module=task_contracts_module,
                 tool_registry=resolved_tool_registry,
             )
@@ -1380,7 +1431,7 @@ def _create_app(
                     "operator_id": "adk-developer",
                     "workspace_id": ADK_WORKSPACE_ID,
                 },
-                runner_module=runner_module,
+                runner_module=resolved_runner_module,
                 task_contracts_module=task_contracts_module,
                 tool_registry=resolved_tool_registry,
             )
@@ -1847,6 +1898,28 @@ def _set_operator_session_cookies(
         samesite="strict",
         path="/",
     )
+
+
+def _loopback_http_origin(raw_url: str, *, purpose: str) -> str:
+    """Return a normalized loopback-only HTTP origin with an explicit port."""
+
+    try:
+        parsed = urlsplit(raw_url.strip())
+        parsed_port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{purpose} must be a loopback HTTP origin with an explicit port.") from exc
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "localhost"}
+        or parsed_port is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise ValueError(f"{purpose} must be a loopback HTTP origin with an explicit port.")
+    return f"http://{parsed.hostname}:{parsed_port}"
 
 
 def _inject_console_csrf_transport(html: str) -> str:
@@ -3757,7 +3830,7 @@ def _console_state_payload(
 def _console_selected_run(entry: dict[str, Any] | None) -> dict[str, Any] | None:
     if entry is None:
         return None
-    return Run(
+    payload = Run(
         run_id=str(entry.get("run_id")),
         case_id=entry.get("case_id"),
         status=entry.get("status"),
@@ -3771,6 +3844,9 @@ def _console_selected_run(entry: dict[str, Any] | None) -> dict[str, Any] | None
         review_required=bool(entry.get("review_required")) or entry.get("status") == "needs_review",
         workflow_id=entry.get("workflow_id") or (entry.get("operator_params", {}) or {}).get("workflow_id"),
     ).model_dump(exclude_none=True)
+    payload.pop("artifact_root", None)
+    payload["artifact_root_ref"] = _console_artifact_root_ref(entry)
+    return payload
 
 
 def _console_run_card(entry: dict[str, Any], *, selected_run_id: str | None) -> dict[str, Any]:
@@ -4264,7 +4340,7 @@ def _console_artifact_panel(
             "present": False,
             "status": "no_run_selected",
             "error": None,
-            "artifact_root": None,
+            "artifact_root_ref": None,
             "artifact_manifest": None,
             "artifact_paths": {},
             "artifacts": [],
@@ -4305,6 +4381,7 @@ def _console_artifact_panel(
         trusted_root=trusted_root,
     )
     evidence_items = [*primary_refs, *review_refs, *decision_refs]
+    projected_manifest = _console_artifact_manifest_projection(manifest, root)
     return {
         "present": manifest is not None,
         "status": (
@@ -4315,9 +4392,9 @@ def _console_artifact_panel(
             else "manifest_missing"
         ),
         "error": manifest_error,
-        "artifact_root": artifact_root,
-        "artifact_manifest": manifest,
-        "artifact_paths": manifest.get("artifact_paths", {}) if manifest else {},
+        "artifact_root_ref": _console_artifact_root_ref(entry),
+        "artifact_manifest": projected_manifest,
+        "artifact_paths": projected_manifest.get("artifact_paths", {}) if projected_manifest else {},
         "artifacts": _artifact_logical_metadata_from_manifest(
             manifest,
             artifact_root=artifact_root,
@@ -4330,6 +4407,33 @@ def _console_artifact_panel(
         "missing_expected_artifacts": [item["artifact_id"] for item in evidence_items if not item["present"]],
         "freshness": _artifact_panel_freshness(evidence_items),
     }
+
+
+def _console_artifact_root_ref(entry: dict[str, Any] | None) -> str | None:
+    if entry is None or not entry.get("artifact_root"):
+        return None
+    return f"run:{entry.get('run_id')}:artifacts"
+
+
+def _console_artifact_manifest_projection(
+    manifest: dict[str, Any] | None,
+    artifact_root: Path | None,
+) -> dict[str, Any] | None:
+    if not manifest:
+        return None
+    payload: dict[str, Any] = {}
+    for key in ("case_id", "run_id", "workflow_id", "status"):
+        if key in manifest:
+            payload[key] = manifest[key]
+    artifact_paths: dict[str, str] = {}
+    for artifact_id, raw_ref in (manifest.get("artifact_paths") or {}).items():
+        if not isinstance(artifact_id, str) or not isinstance(raw_ref, str):
+            continue
+        logical_ref = _trusted_root_relative_artifact_ref(artifact_root, raw_ref)
+        if logical_ref is not None:
+            artifact_paths[artifact_id] = logical_ref
+    payload["artifact_paths"] = artifact_paths
+    return payload
 
 
 def _console_review_panel(

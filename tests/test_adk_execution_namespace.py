@@ -1092,7 +1092,7 @@ def _storage_snapshot(*roots: Path) -> dict[str, bytes]:
     return snapshot
 
 
-def test_cross_scope_review_decisions_have_zero_storage_side_effects(tmp_path):
+def test_operator_can_decide_adk_reviews_while_adk_cannot_decide_operator_reviews(tmp_path):
     settings = ApiSettings(
         registry_path=tmp_path / "registry.json",
         artifact_root=tmp_path / "operator-artifacts",
@@ -1123,9 +1123,9 @@ def test_cross_scope_review_decisions_have_zero_storage_side_effects(tmp_path):
         settings.adk_artifact_root,
         settings.review_store_dir,
     )
-    before_operator_denial = _storage_snapshot(*roots)
+    before_operator_decision = _storage_snapshot(*roots)
 
-    operator_denial = request(
+    operator_decision = request(
         app,
         "POST",
         f"/reviews/review-{adk_run_id}/decision",
@@ -1136,9 +1136,16 @@ def test_cross_scope_review_decisions_have_zero_storage_side_effects(tmp_path):
         json={"decision": "approved"},
     )
 
-    assert operator_denial.status_code == 404
-    assert operator_denial.json()["detail"]["code"] == "object_not_found"
-    assert _storage_snapshot(*roots) == before_operator_denial
+    assert operator_decision.status_code == 200
+    operator_payload = operator_decision.json()
+    assert operator_payload["review"]["run_id"] == adk_run_id
+    assert operator_payload["review"]["status"] == "review_decided"
+    assert operator_payload["decision"]["decision"] == "approved"
+    assert {
+        artifact["artifact_id"]
+        for artifact in operator_payload["decision"].get("artifacts", [])
+    } == {"review_decision", "review_decision_markdown"}
+    assert _storage_snapshot(*roots) != before_operator_decision
 
     from reserving_workflow.storage.local import LocalReviewStore, LocalRunStore
 

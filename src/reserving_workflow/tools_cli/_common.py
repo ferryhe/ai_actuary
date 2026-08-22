@@ -10,6 +10,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from reserving_workflow.artifacts.storage import read_json_artifact, write_json_artifact
+from reserving_workflow.runtime.redaction import sanitize_for_runtime, sanitize_text
 
 
 class ToolCliError(Exception):
@@ -106,10 +107,10 @@ def _print_error(tool_id: str, message: str, *, category: str, details: dict[str
         "status": "error",
         "tool_id": tool_id,
         "error_category": category,
-        "message": message,
+        "message": sanitize_text(message),
     }
     if details:
-        payload["details"] = details
+        payload["details"] = sanitize_for_runtime(details)
     print(json.dumps(payload, ensure_ascii=False))
     return 1
 
