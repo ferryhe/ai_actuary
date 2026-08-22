@@ -55,6 +55,7 @@ _ADK = frozenset({"adk-developer"})
 
 
 ROUTE_CAPABILITY_MATRIX: dict[tuple[str, str], RoutePolicy] = {
+    ("GET", "/"): RoutePolicy(anonymous=True),
     ("GET", "/health"): RoutePolicy(anonymous=True),
     ("GET", "/health/preflight"): RoutePolicy(anonymous=True),
     ("GET", "/console"): RoutePolicy(anonymous=True),
