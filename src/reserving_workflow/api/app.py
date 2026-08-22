@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
@@ -136,6 +137,10 @@ def create_app(
             return LocalReviewStore(resolved_settings.review_store_dir)
         except OSError as exc:  # pragma: no cover - exercised through API surface
             raise HTTPException(status_code=503, detail="Review store unavailable.") from exc
+
+    @app.get("/", include_in_schema=False)
+    async def operator_console_root() -> RedirectResponse:
+        return RedirectResponse(url="/console", status_code=307)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
