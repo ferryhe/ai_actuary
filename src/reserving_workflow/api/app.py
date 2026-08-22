@@ -3789,6 +3789,7 @@ def _console_state_payload(
             if selected_run_id is not None and trusted_root is not None
             else None
         ),
+        browser_visible=True,
     )
     filter_option_runs = all_runs if all_runs is not None else runs
     return {
@@ -4694,6 +4695,7 @@ def _review_inbox_payload(
     review_store_root: str | Path,
     selected_run_id: str | None,
     trusted_roots: dict[str, TrustedArtifactRoot] | None = None,
+    browser_visible: bool = False,
 ) -> list[dict[str, Any]]:
     del registry_path
     reviews: list[dict[str, Any]] = []
@@ -4735,6 +4737,9 @@ def _review_inbox_payload(
         if review_id in seen_review_ids:
             continue
         seen_review_ids.add(str(review_id))
+        decision_artifacts = (review_payload.get("decision") or {}).get("artifacts", [])
+        if browser_visible:
+            decision_artifacts = _browser_visible_decision_artifacts(decision_artifacts)
         reviews.append(
             {
                 "review_id": review_id,
@@ -4743,9 +4748,7 @@ def _review_inbox_payload(
                 "workspace_id": review_payload.get("workspace_id"),
                 "status": review_payload.get("status"),
                 "decision": (review_payload.get("decision") or {}).get("decision"),
-                "decision_artifacts": _browser_visible_decision_artifacts(
-                    (review_payload.get("decision") or {}).get("artifacts", [])
-                ),
+                "decision_artifacts": decision_artifacts,
                 "review_required": review_payload.get("review_required", False),
                 "reason_codes": list(review_payload.get("reason_codes", []) or []),
                 "assigned_to": review_payload.get("assigned_to"),

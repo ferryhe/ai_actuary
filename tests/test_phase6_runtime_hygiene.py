@@ -199,6 +199,19 @@ def test_console_state_redacts_artifact_roots_at_browser_visible_boundary(tmp_pa
             )
 
     run = asyncio.run(request("POST", "/runs", json={"case_id": "visible-redaction"})).json()
+    review = asyncio.run(request("GET", f"/runs/{run['run_id']}/review")).json()["review"]
+    decision = asyncio.run(
+        request(
+            "POST",
+            f"/reviews/{review['review_id']}/decision",
+            json={
+                "decision": "changes_requested",
+                "comment": "Please rerun with updated assumptions.",
+                "decided_by": "actuary-001",
+            },
+        )
+    )
+    assert decision.status_code == 200
     state = asyncio.run(request("GET", f"/console/state?run_id={run['run_id']}")).json()
     serialized = json.dumps(state)
 
@@ -218,6 +231,11 @@ def test_console_state_redacts_artifact_roots_at_browser_visible_boundary(tmp_pa
     assert "json_path" not in state["review_panel"]
     assert "markdown_path" not in state["review_panel"]
     assert "record_path" not in state["review_panel"]
+    assert state["review_inbox"][0]["decision_artifacts"][0] == {
+        "artifact_id": "review_decision",
+        "label": "review decision",
+        "present": True,
+    }
 
 
 def test_tool_cli_error_json_sanitizes_exception_boundaries(tmp_path: Path) -> None:
