@@ -514,6 +514,11 @@ def test_workflow_source_path_raises_clear_error_when_workflow_file_is_missing(m
             return [None, None, missing_root]
 
     monkeypatch.setattr(module.Path, "resolve", lambda self: FakeResolvedPath())
+    monkeypatch.setattr(
+        module.resources,
+        "files",
+        lambda _package: (_ for _ in ()).throw(ModuleNotFoundError("workflows")),
+    )
 
     try:
         module._workflow_source_path("agent-runtimes", "openai-agents", "runner.py")
@@ -522,8 +527,8 @@ def test_workflow_source_path_raises_clear_error_when_workflow_file_is_missing(m
     else:  # pragma: no cover
         raise AssertionError("Expected _workflow_source_path to raise FileNotFoundError")
 
-    assert "workflows/" in message
-    assert "editable mode" in message
+    assert "workflows" in message
+    assert "packaged workflows resources" in message
 
 
 def test_run_governed_case_script_emits_json(tmp_path):

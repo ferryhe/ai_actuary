@@ -54,7 +54,7 @@ Still intentionally out of scope:
 │   ├── contracts/                       # control-plane and tool contracts
 │   ├── operator_handoff.md              # report-export contract
 │   ├── project-introduction.html        # standalone HTML overview and usage guide
-│   └── project-plan.md                  # current scope and next steps
+│   └── adk-local-workbench.md           # active local workbench/package/rollback guide
 ├── scripts/                             # operator CLI wrappers
 ├── schemas/actuarial-reserving/v1/      # exported JSON Schemas
 ├── src/reserving_workflow/              # core implementation
@@ -68,7 +68,7 @@ Read in this order when taking over the project:
 2. `docs/project-introduction.html`
 3. `docs/architecture.md`
 4. `docs/contracts/control-plane.md`
-5. `docs/project-plan.md`
+5. `docs/adk-local-workbench.md`
 6. `docs/operator_handoff.md`
 7. `docs/README.md`
 
@@ -110,6 +110,13 @@ pip install -e '.[dev,adk-dev]'
 python scripts/run_local_workbench.py
 ```
 
+For API-only local work in an environment without Google ADK:
+
+```bash
+pip install -e '.[dev]'
+python scripts/run_local_workbench.py --disable-adk --smoke
+```
+
 Check readiness:
 
 ```bash
@@ -139,14 +146,23 @@ adk --version  # pinned: 2.7.1
 python scripts/run_local_workbench.py
 ```
 
-The launcher binds both development interfaces to loopback only and generates
-independent in-memory `operator-console` and `adk-developer` capability
-credentials. The browser receives only a short-lived server-side session; the
-ADK client receives only its Bearer credential through the launcher-owned child
-environment:
+The launcher binds both development interfaces to loopback only and supports
+stable public port flags:
+
+```bash
+python scripts/run_local_workbench.py --api-port 8123 --adk-port 8124
+```
+
+It generates independent in-memory `operator-console` and `adk-developer`
+capability credentials. The browser receives only a short-lived server-side
+session; the ADK client receives only its Bearer credential through the
+launcher-owned child environment:
 
 - Operator Console: `http://127.0.0.1:8000/console`
 - ADK Developer Web: `http://127.0.0.1:8001`
+
+Those are defaults only. Launcher readiness messages, diagnostics, ADK logo
+text, and the Operator Console developer link use the actual configured ports.
 
 To unlock the Console, choose **Request launcher handoff** in the browser and
 paste the displayed handoff ID into the launcher's terminal prompt. The browser
@@ -155,17 +171,24 @@ bodies; no capability secret is placed in a URL, browser storage, static HTML,
 or launcher output.
 
 The Developer Web header is labeled `AI Actuary Developer (DEV)` and displays
-the fixed Operator Console address so the return path is visible in the ADK UI.
+the Operator Console return path using the actual configured API port.
 
 Use `python scripts/run_local_workbench.py --smoke` to start both processes,
-verify their health and discovery routes, and stop them. The launcher refuses
-occupied ports, reports a missing ADK extra clearly, and cleans up both child
-processes on startup failure, child failure, Ctrl-C, or SIGTERM.
+verify their health and discovery routes, and stop them. Use
+`python scripts/browser_smoke_local_workbench.py --disable-adk` for a real
+Playwright Chromium smoke of the API-only console when ADK is not installed.
+The launcher refuses occupied ports, reports a missing ADK extra clearly, and
+cleans up child processes on startup failure, child failure, Ctrl-C, or
+SIGTERM.
 
 ADK session and artifact state is explicitly isolated under ignored local
 paths: `tmp/adk-dev/sessions/sessions.db` and `tmp/adk-dev/artifacts/`. It does
 not write runtime state into `developer_workflows/` or any published workflow
-directory.
+directory. Developer cleanup is available through `ai-actuary-cleanup` and
+preserves business registry, artifact, review, and benchmark state.
+
+For installed-wheel usage, package resource checks, browser smoke evidence,
+and cleanup target rules, see [ADK local workbench](docs/adk-local-workbench.md).
 
 The code-first `ai_actuary_developer` agent retains Phase 2's 12 bounded,
 path-free read tools and adds exactly four execution tools:
@@ -179,13 +202,17 @@ Developer Web do not require credentials; chatting with it requires a Gemini
 Developer API credential, for example local `GOOGLE_API_KEY` with
 `GOOGLE_GENAI_USE_VERTEXAI=FALSE`. Do not commit credentials.
 
-Compatibility was verified against `google-adk==2.7.1` on Python 3.11: the
-code-first app loads through ADK app-info and build-graph endpoints. Visual
+Compatibility is pinned to `google-adk==2.7.1` on Python 3.11. The code-first
+app loads through ADK app-info and build-graph endpoints, and the local
+workbench keeps ADK sessions, traces, artifacts, and diagnostics under ignored
+launcher-owned state directories with owner-private permissions/ACLs. Visual
 Builder / Agent Config YAML is not generated for this code-first agent (the
-`/builder` view is empty), and PR1 does not add YAML drafts or publishing.
-ADK's built-in trace/evaluation UI also does not mean this project has wired
-trace or evaluation capabilities; PR1 configures neither. Upgrade ADK only in
-a dedicated compatibility PR.
+`/builder` view remains empty); draft validation/export uses the project-owned
+Workflow Lab described below. ADK trace/evaluation surfaces are treated as
+developer evidence: trace/correlation IDs are preserved for ADK-created runs,
+while benchmark/evaluation artifacts stay in cleanup-eligible developer state
+unless a business workflow explicitly exports them. Upgrade ADK only in a
+dedicated compatibility PR.
 
 This is local capability authentication, not production SSO/RBAC. The workbench
 is not externally hosted, CORS-enabled, or a production deployment. Credential

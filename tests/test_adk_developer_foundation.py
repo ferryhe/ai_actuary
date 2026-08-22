@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -93,13 +95,10 @@ def _google_adk_available() -> bool:
 
 
 def _load_launcher_module() -> Any:
-    script_path = REPO_ROOT / "scripts" / "run_local_workbench.py"
-    spec = importlib.util.spec_from_file_location("run_local_workbench", script_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    sys.modules.pop("reserving_workflow.cli.workbench_launcher", None)
+    from reserving_workflow.cli import workbench_launcher
+
+    return workbench_launcher
 
 
 def test_adk_is_a_python311_only_optional_extra() -> None:
@@ -183,7 +182,9 @@ def test_local_runtime_commands_pin_loopback_and_keep_state_out_of_agent_sources
     ]
     assert "--allow_origins" not in adk_command
     assert adk_command[-1] == str((tmp_path / "developer_workflows").resolve())
-    assert adk_command[adk_command.index("--logo-text") + 1] == ADK_DEVELOPER_LOGO_TEXT
+    assert adk_command[adk_command.index("--logo-text") + 1] == (
+        "AI Actuary Developer (DEV) | Console: http://127.0.0.1:8123/console"
+    )
     assert "(DEV)" in ADK_DEVELOPER_LOGO_TEXT
     assert "http://127.0.0.1:8000/console" in ADK_DEVELOPER_LOGO_TEXT
     assert (
@@ -202,12 +203,147 @@ def test_local_runtime_commands_pin_loopback_and_keep_state_out_of_agent_sources
     assert "developer_workflows" not in artifact_uri
 
 
+def test_local_runtime_prepares_private_state_directories(tmp_path: Path) -> None:
+    from reserving_workflow.adapters.adk.local_runtime import LocalWorkbenchConfig
+
+    config = LocalWorkbenchConfig.from_repo_root(tmp_path)
+    config.prepare_state_directories()
+
+    for directory in (
+        config.state_root,
+        config.session_database.parent,
+        config.artifact_directory,
+        config.diagnostics_log.parent,
+    ):
+        assert directory.is_dir()
+        if os.name != "nt":
+            assert stat.S_IMODE(directory.stat().st_mode) == stat.S_IRWXU
+
+
+def test_launcher_public_port_flags_and_disable_adk_aliases() -> None:
+    launcher = _load_launcher_module()
+
+    args = launcher.parse_args(
+        ["--api-port", "8123", "--adk-port", "8124", "--disable-adk"]
+    )
+
+    assert args.control_plane_port == 8123
+    assert args.adk_port == 8124
+    assert args.disable_adk is True
+
+
+def test_disabled_adk_smoke_checks_only_api_routes() -> None:
+    launcher = _load_launcher_module()
+    requested: list[str] = []
+
+    class _Response:
+        status = 200
+
+        def __enter__(self) -> "_Response":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def read(self) -> bytes:
+            return b"{}"
+
+    def opener(request: object, timeout: float) -> _Response:
+        del timeout
+        requested.append(request.full_url)  # type: ignore[attr-defined]
+        return _Response()
+
+    launcher.wait_for_smoke_endpoints(
+        control_plane_port=8123,
+        adk_port=None,
+        children=[_FakeProcess()],
+        timeout=0.2,
+        poll_interval=0,
+        opener=opener,
+    )
+
+    assert requested == [
+        "http://127.0.0.1:8123/health",
+        "http://127.0.0.1:8123/health/preflight",
+        "http://127.0.0.1:8123/console",
+    ]
+
+
+def test_launcher_writes_sanitized_diagnostics_log(tmp_path: Path) -> None:
+    launcher = _load_launcher_module()
+    config = launcher.LocalWorkbenchConfig.from_repo_root(tmp_path)
+
+    diagnostics = launcher.LauncherDiagnostics(config)
+    diagnostics.record(
+        "startup_failed",
+        {
+            "run_id": "logical-run",
+            "path": str(tmp_path / "secret" / "sessions.db"),
+            "message": "Authorization: Bearer sk-testsecret1234567890",
+        },
+    )
+
+    payload = json.loads(config.diagnostics_log.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["event"] == "startup_failed"
+    assert payload["details"]["run_id"] == "logical-run"
+    assert "path" not in payload["details"]
+    assert payload["details"]["message"] == "[redacted]"
+    assert str(tmp_path) not in json.dumps(payload)
+
+
+def test_launcher_diagnostics_include_versions_components_and_exit_codes(tmp_path: Path) -> None:
+    launcher = _load_launcher_module()
+    config = launcher.LocalWorkbenchConfig.from_repo_root(tmp_path)
+    diagnostics = launcher.LauncherDiagnostics(config)
+
+    diagnostics.record(
+        "preflight_ready",
+        {
+            "readiness": "preflight_ready",
+            "versions": launcher.launcher_version_summary(
+                adk_executable=None,
+                disable_adk=True,
+            ),
+            "components": {
+                "control_plane": {"status": "pending_start"},
+                "adk_developer_web": {"status": "disabled"},
+            },
+            "diagnostics_log_location": config.diagnostics_log.name,
+            "exit_code_mapping": launcher.launcher_exit_code_mapping(),
+        },
+    )
+
+    payload = json.loads(config.diagnostics_log.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["event"] == "preflight_ready"
+    details = payload["details"]
+    assert details["readiness"] == "preflight_ready"
+    assert details["versions"]["google_adk"] == "disabled"
+    assert details["components"]["control_plane"]["status"] == "pending_start"
+    assert details["components"]["adk_developer_web"]["status"] == "disabled"
+    assert details["exit_code_mapping"]["ready_or_clean_smoke"] == 0
+    assert details["exit_code_mapping"]["startup_or_runtime_failure"] == 1
+
+
 def test_runtime_requirement_error_explains_missing_extra(monkeypatch: pytest.MonkeyPatch) -> None:
     launcher = _load_launcher_module()
     monkeypatch.setattr(launcher.sys, "version_info", SimpleNamespace(major=3, minor=11))
     monkeypatch.setattr(launcher, "find_adk_spec", lambda: None)
 
     with pytest.raises(launcher.LauncherError, match=r"\[dev,adk-dev\]"):
+        launcher.validate_adk_runtime()
+
+
+def test_runtime_requirement_rejects_incompatible_adk_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _load_launcher_module()
+    monkeypatch.setattr(launcher.sys, "version_info", SimpleNamespace(major=3, minor=11))
+    monkeypatch.setattr(launcher, "find_adk_spec", lambda: object())
+    monkeypatch.setattr(launcher, "adk_distribution_version", lambda: "2.7.0")
+    monkeypatch.setattr(launcher.shutil, "which", lambda name: "adk" if name == "adk" else None)
+    monkeypatch.setattr(launcher.Path, "is_file", lambda _self: False)
+
+    with pytest.raises(launcher.LauncherError, match="google-adk==2.7.1"):
         launcher.validate_adk_runtime()
 
 

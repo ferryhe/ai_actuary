@@ -28,14 +28,24 @@ dev = [
 adk-dev = [
   "google-adk==2.7.1; python_version == '3.11'",
 ]
+browser-smoke = [
+  "playwright==1.59.0",
+]
+
+[project.scripts]
+ai-actuary-cleanup = "reserving_workflow.runtime.cleanup:main"
+ai-actuary-package-audit = "reserving_workflow.runtime.package_audit:main"
+ai-actuary-workbench = "reserving_workflow.cli.local_workbench:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["reserving_workflow*", "developer_workflows*", "workflows"]
 
 [tool.setuptools.package-data]
 "reserving_workflow.interfaces.operator_console" = ["console.html"]
 "reserving_workflow.adapters.adk" = ["data/*.json"]
 "reserving_workflow.developer_workflows" = ["**/*.yaml"]
+"workflows" = ["agent-runtimes/**/*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import importlib.resources as resources
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -551,14 +552,19 @@ def _generate_operator_run_id(task_id: str) -> str:
 def _workflow_source_path(*relative_parts: str) -> Path:
     repo_root = Path(__file__).resolve().parents[2]
     path = repo_root.joinpath("workflows", *relative_parts)
-    if not path.is_file():
-        raise FileNotFoundError(
-            "Required workflow source file is not available at "
-            f"{path}. This operator entrypoint loads workflow modules from the repository's "
-            "workflows/ directory, which may be missing in an installed package. Run from a "
-            "repository checkout or install the project in editable mode so workflows/ is present."
-        )
-    return path
+    if path.is_file():
+        return path
+    try:
+        packaged = resources.files("workflows").joinpath(*relative_parts)
+    except (ImportError, ModuleNotFoundError, FileNotFoundError, AttributeError):
+        packaged = None
+    if packaged is not None and packaged.is_file():
+        return Path(str(packaged))
+    raise FileNotFoundError(
+        "Required workflow source file is not available at "
+        f"{path} or in packaged workflows resources. Reinstall the project from a "
+        "wheel that includes workflow runtime resources."
+    )
 
 
 def _load_module(name: str, path: Path):

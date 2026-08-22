@@ -8,12 +8,15 @@ import httpx
 from conftest import create_authenticated_app
 
 from reserving_workflow.api.app import ApiSettings, _inject_console_csrf_transport
-from reserving_workflow.interfaces.operator_console import load_operator_console_html
+from reserving_workflow.interfaces.operator_console import (
+    load_operator_console_html,
+    render_operator_console_html,
+)
 
 
-EXPECTED_CONSOLE_CHARACTER_COUNT = 53_910
-EXPECTED_CONSOLE_UTF8_BYTE_COUNT = 53_938
-EXPECTED_CONSOLE_SHA256 = "0a6c0dc7ec1cb2ff38444c24f45cb3d00271759587f4d45c3870ae02b871ed27"
+EXPECTED_CONSOLE_CHARACTER_COUNT = 53_928
+EXPECTED_CONSOLE_UTF8_BYTE_COUNT = 53_956
+EXPECTED_CONSOLE_SHA256 = "50a698c75132d3ad58fd2448822c751a6d3a3330f7c7fa6fd91549adadd70bf0"
 
 
 def test_operator_console_asset_matches_reviewed_pr1_document() -> None:
@@ -44,8 +47,31 @@ def test_console_route_serves_extracted_asset_without_behavior_change(tmp_path: 
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
-    reviewed_asset = load_operator_console_html()
+    reviewed_asset = render_operator_console_html(adk_url="http://127.0.0.1:8001")
     assert response.text == _inject_console_csrf_transport(reviewed_asset)
+
+
+def test_console_route_injects_configured_adk_developer_url(tmp_path: Path) -> None:
+    app = create_authenticated_app(
+        settings=ApiSettings(
+            registry_path=tmp_path / "run-registry.json",
+            artifact_root=tmp_path / "artifacts",
+            adk_url="http://127.0.0.1:8124",
+        )
+    )
+
+    async def get_console() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            return await client.get("/console")
+
+    response = asyncio.run(get_console())
+
+    assert response.status_code == 200
+    assert 'href="http://127.0.0.1:8124"' in response.text
+    assert 'href="http://127.0.0.1:8001"' not in response.text
 
 
 def test_api_module_no_longer_embeds_console_document() -> None:
@@ -58,7 +84,7 @@ def test_api_module_no_longer_embeds_console_document() -> None:
 
 
 def test_console_links_to_loopback_developer_web_without_scripted_behavior() -> None:
-    body = load_operator_console_html()
+    body = render_operator_console_html(adk_url="http://127.0.0.1:8001")
 
     assert 'href="http://127.0.0.1:8001"' in body
     assert 'class="developer-web-link"' in body

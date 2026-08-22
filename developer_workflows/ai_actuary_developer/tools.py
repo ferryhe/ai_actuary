@@ -345,7 +345,7 @@ def start_workflow_run(
                 "message": "Confirmed start context is unavailable.",
             },
         }
-    return _invoke_execution(
+    result = _invoke_execution(
         lambda client: client.start_workflow_run(
             workflow_id=workflow_id,
             case_id=case_id,
@@ -356,6 +356,14 @@ def start_workflow_run(
             idempotency_key=idempotency_key,
         )
     )
+    _record_start_workflow_trace_span(
+        session_id=session_id,
+        invocation_id=invocation_id,
+        workflow_id=workflow_id,
+        case_id=case_id,
+        result=result,
+    )
+    return result
 
 
 def rerun_run(run_id: str, tool_context: Any) -> dict[str, Any]:
@@ -688,6 +696,57 @@ def _invoke_execution(operation: Callable[[AdkControlPlaneClient], Any]) -> dict
                 "message": "ADK control-plane tool failed safely.",
             },
         }
+
+
+def _optional_otel_trace() -> Any | None:
+    try:
+        from opentelemetry import trace
+    except Exception:
+        return None
+    return trace
+
+
+def _record_start_workflow_trace_span(
+    *,
+    session_id: str,
+    invocation_id: str,
+    workflow_id: str,
+    case_id: str,
+    result: dict[str, Any],
+) -> None:
+    """Emit a project-owned ADK trace span without making OTel a core dependency."""
+
+    data = result.get("data") if result.get("ok") is True else None
+    if not isinstance(data, dict):
+        return
+    run_id = data.get("run_id")
+    operation_id = data.get("operation_id")
+    correlation_id = data.get("correlation_id")
+    if not all(
+        isinstance(value, str) and _valid_identifier(value)
+        for value in (session_id, invocation_id, workflow_id, case_id, run_id, operation_id, correlation_id)
+    ):
+        return
+    trace = _optional_otel_trace()
+    if trace is None:
+        return
+    attributes = {
+        "gen_ai.conversation.id": session_id,
+        "gcp.vertex.agent.session_id": session_id,
+        "ai_actuary.adk.invocation_id": invocation_id,
+        "ai_actuary.run_id": run_id,
+        "ai_actuary.operation_id": operation_id,
+        "ai_actuary.correlation_id": correlation_id,
+        "ai_actuary.workflow_id": workflow_id,
+        "ai_actuary.case_id": case_id,
+    }
+    try:
+        tracer = trace.get_tracer("ai_actuary.adk")
+        with tracer.start_as_current_span("ai_actuary.start_workflow_run") as span:
+            for key, value in attributes.items():
+                span.set_attribute(key, value)
+    except Exception:
+        return
 
 
 def _valid_identifier(value: Any) -> bool:

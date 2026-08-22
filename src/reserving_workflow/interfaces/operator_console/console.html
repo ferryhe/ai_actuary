@@ -104,7 +104,7 @@
   <header>
     <h1>AI Actuary Operator Console</h1>
     <p>Symphony-style shell over runs, timeline events, artifacts, review packets, actions, and operator handoff export. Data source: <code>/console/state</code>.</p>
-    <p>Development-only: <a class="developer-web-link" href="http://127.0.0.1:8001" target="_blank" rel="noopener noreferrer">open ADK Developer Web</a>.</p>
+    <p>Development-only: <a class="developer-web-link" href="__AI_ACTUARY_ADK_DEVELOPER_WEB_URL__" target="_blank" rel="noopener noreferrer">open ADK Developer Web</a>.</p>
   </header>
   <main>
     <section aria-label="Run Queue">
@@ -869,7 +869,7 @@
       const summary = document.createElement("div");
       summary.className = "artifact-summary";
       appendSummaryCell(summary, "Manifest status", panel.present ? "present" : "missing");
-      appendSummaryCell(summary, "Artifact root", panel.artifact_root || "unavailable");
+      appendSummaryCell(summary, "Artifact ref", panel.artifact_root_ref || "unavailable");
       appendSummaryCell(summary, "Present artifacts", String((panel.freshness && panel.freshness.present_artifact_count) || 0));
       appendSummaryCell(summary, "Latest mtime", (panel.freshness && panel.freshness.latest_mtime) || "unavailable");
       container.appendChild(summary);

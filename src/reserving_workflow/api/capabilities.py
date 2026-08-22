@@ -92,6 +92,7 @@ ROUTE_CAPABILITY_MATRIX: dict[tuple[str, str], RoutePolicy] = {
     ("POST", "/adk/benchmarks/bounded"): RoutePolicy(_ADK),
     ("GET", "/adk/operations/{operation_id}"): RoutePolicy(_ADK),
     ("POST", "/adk/operations/{operation_id}/wait"): RoutePolicy(_ADK),
+    ("POST", "/adk/browser-smoke/rotate-credential"): RoutePolicy(_ADK),
 }
 
 
@@ -337,6 +338,12 @@ def object_in_scope(principal: Principal, entry: dict[str, object]) -> bool:
         source = "operator-console"
     if workspace is None:
         workspace = "default-workspace"
+    if principal.capability_class == "operator-console":
+        if str(source) == "adk-developer":
+            return secrets.compare_digest(str(workspace), "adk-development")
+        return secrets.compare_digest(str(workspace), principal.workspace_id) and secrets.compare_digest(
+            str(source), principal.source
+        )
     return secrets.compare_digest(str(workspace), principal.workspace_id) and secrets.compare_digest(
         str(source), principal.source
     )
