@@ -132,29 +132,51 @@ def test_console_state_redacts_artifact_roots_at_browser_visible_boundary(tmp_pa
             artifact_dir = Path(task.inputs["artifact_dir"])
             artifact_dir.mkdir(parents=True, exist_ok=True)
             manifest_path = artifact_dir / "run_manifest.json"
+            packet_json = artifact_dir / "review_packet.json"
+            packet_md = artifact_dir / "review_packet.md"
+            review_packet = {
+                "case_id": task.case_ref,
+                "run_id": task.run_id,
+                "status": "review_required",
+                "failed_checks": ["threshold"],
+                "packet_paths": {
+                    "json": str(packet_json),
+                    "markdown": str(packet_md),
+                },
+            }
+            packet_json.write_text(json.dumps(review_packet), encoding="utf-8")
+            packet_md.write_text("# Review Packet\n", encoding="utf-8")
             manifest_path.write_text(
                 json.dumps(
                     {
                         "case_id": task.case_ref,
                         "run_id": task.run_id,
                         "artifact_root": str(artifact_dir),
-                        "artifact_paths": {"run_manifest": "run_manifest.json"},
+                        "artifact_paths": {
+                            "run_manifest": str(manifest_path),
+                            "review_packet": str(packet_json),
+                            "review_packet_markdown": str(packet_md),
+                        },
                     }
                 ),
                 encoding="utf-8",
             )
             return {
                 "worker_result": {
-                    "status": "completed",
+                    "status": "needs_review",
                     "case_id": task.case_ref,
                     "run_id": task.run_id,
-                    "summary": "ok",
-                    "artifact_paths": {"run_manifest": str(manifest_path)},
+                    "summary": "needs review",
+                    "artifact_paths": {
+                        "run_manifest": str(manifest_path),
+                        "review_packet": str(packet_json),
+                    },
                     "metrics": {},
-                    "review_reasons": [],
+                    "review_reasons": ["threshold"],
                     "errors": [],
                 },
-                "final_output": {"case_id": task.case_ref, "worker_status": "completed"},
+                "final_output": {"case_id": task.case_ref, "worker_status": "needs_review"},
+                "review_packet": review_packet,
             }
 
     app = create_authenticated_app(
@@ -181,9 +203,21 @@ def test_console_state_redacts_artifact_roots_at_browser_visible_boundary(tmp_pa
     serialized = json.dumps(state)
 
     assert str(tmp_path) not in serialized
+    assert "packet_paths" not in serialized
     assert "artifact_root" not in state["artifact_panel"]
     assert "artifact_root" not in state["selected_run"]
     assert state["artifact_panel"]["artifact_root_ref"] == f"run:{run['run_id']}:artifacts"
+    assert state["artifact_panel"]["artifact_paths"]["run_manifest"] == "run_manifest.json"
+    assert state["artifact_panel"]["artifact_paths"]["review_packet"] == "review_packet.json"
+    assert (
+        state["artifact_panel"]["artifact_paths"]["review_packet_markdown"]
+        == "review_packet.md"
+    )
+    assert state["review_panel"]["packet"]["run_id"] == run["run_id"]
+    assert state["review_panel"]["packet"]["failed_checks"] == ["threshold"]
+    assert "json_path" not in state["review_panel"]
+    assert "markdown_path" not in state["review_panel"]
+    assert "record_path" not in state["review_panel"]
 
 
 def test_tool_cli_error_json_sanitizes_exception_boundaries(tmp_path: Path) -> None:
@@ -803,7 +837,13 @@ def test_browser_smoke_evidence_scanner_includes_result_metadata(tmp_path: Path)
     browser_smoke = _load_browser_smoke_module()
 
     (tmp_path / "result.json").write_text(
-        json.dumps({"evidence_dir": str(tmp_path / "browser-evidence")}),
+        json.dumps(
+            {
+                "evidence_dir": "/tmp/pytest-of-runner/pytest-0/browser-evidence",
+                "route": "route:runs/{run_id}/review",
+                "status": 200,
+            }
+        ),
         encoding="utf-8",
     )
 

@@ -4454,7 +4454,7 @@ def _console_review_panel(
                 trusted_root=trusted_root,
             )
         )
-    payload = review.model_dump()
+    payload = project_review(review)
     payload["present"] = bool(payload.get("review_id")) or payload.get("packet") is not None
     return payload
 
@@ -4743,7 +4743,9 @@ def _review_inbox_payload(
                 "workspace_id": review_payload.get("workspace_id"),
                 "status": review_payload.get("status"),
                 "decision": (review_payload.get("decision") or {}).get("decision"),
-                "decision_artifacts": (review_payload.get("decision") or {}).get("artifacts", []),
+                "decision_artifacts": _browser_visible_decision_artifacts(
+                    (review_payload.get("decision") or {}).get("artifacts", [])
+                ),
                 "review_required": review_payload.get("review_required", False),
                 "reason_codes": list(review_payload.get("reason_codes", []) or []),
                 "assigned_to": review_payload.get("assigned_to"),
@@ -4753,6 +4755,20 @@ def _review_inbox_payload(
             }
         )
     return sorted(reviews, key=lambda item: item.get("updated_at") or "", reverse=True)
+
+
+def _browser_visible_decision_artifacts(artifacts: Any) -> list[dict[str, Any]]:
+    if not isinstance(artifacts, list):
+        return []
+    return [
+        {
+            key: artifact[key]
+            for key in ("artifact_id", "label", "present")
+            if isinstance(artifact, dict) and key in artifact
+        }
+        for artifact in artifacts
+        if isinstance(artifact, dict)
+    ]
 
 
 def _materialize_review_record_from_id(

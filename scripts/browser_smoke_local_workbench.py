@@ -75,6 +75,7 @@ LEAK_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
         "host_path",
         re.compile(
             rb"(?i)(?:[A-Z]:(?:\\\\|\\|/)(?:Project|Users|Windows|Temp)(?:\\\\|\\|/)|"
+            rb"/(?:tmp|var/tmp|private/var/(?:tmp|folders)|run/user)/[^\s\"'<>]+|"
             rb"file:(?://|\\\\)|"
             rb'\"artifact_root\"\s*:|\bartifact_root\s*[=:])'
         ),
