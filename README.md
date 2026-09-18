@@ -34,9 +34,14 @@ The boundary is stable: **numeric truth comes from the deterministic core, plann
 | Planner / orchestrator | `AI_ACTUARY_PLANNER_MODEL` (+ `OPENAI_API_KEY`, optional `OPENAI_BASE_URL`) | `gpt-5.6-luna` | import time → **restart required** |
 | Executor / Hermes worker | `AI_ACTUARY_NARRATIVE_ENABLED` (`1` on / `0` template) + `AI_ACTUARY_NARRATIVE_MODEL`, `AI_ACTUARY_NARRATIVE_BASE_URL`, `AI_ACTUARY_NARRATIVE_API_KEY` — **wording only** | `1` (enabled; `0` = deterministic template) | every call → **no restart** |
 | Reviewer | `AI_ACTUARY_REVIEW_MODEL`, `AI_ACTUARY_REVIEW_BASE_URL`, `AI_ACTUARY_REVIEW_API_KEY` | `deepseek-flash` via `https://api.deepseek.com/v1` | every call → **no restart** |
-| ADK developer chat | `AI_ACTUARY_ADK_MODEL` (`deepseek/` prefix routes through litellm) | `gpt-5.6-luna` | agent import |
+| ADK developer chat | `AI_ACTUARY_ADK_MODEL` (`deepseek/` prefix routes through litellm) | `gemini-2.5-flash` | agent import |
 
 Any OpenAI-compatible endpoint works for the reviewer, so planning and review can use different providers and models at the same time. See [Operations Manual](docs/operations-manual.md) for the full flow and [ADK Operations Manual](docs/adk-operations-manual.md) for the developer surface.
+
+Two things to know before the first run:
+
+- **Reviewer slot**: `.env.sample` points it at `deepseek-flash`, so it needs `DEEPSEEK_API_KEY`. The code default is `gpt-5.6-luna`; a slot only falls back to `DEEPSEEK_API_KEY` when its model id or base URL contains `deepseek`, otherwise it uses `OPENAI_API_KEY`.
+- **Narrative slot**: on by default, so the executor calls a model for wording on every run. Set `AI_ACTUARY_NARRATIVE_ENABLED=0` for the fully deterministic template; see [Narrative drafting](#narrative-drafting-fourth-model-slot-on-by-default).
 
 ## Current Status
 
@@ -230,7 +235,7 @@ Confirmed starts are restricted to the published `chainladder-basic` and
 `chainladder-validated` catalog workflows and are forced into the isolated
 `adk-development` workspace. The agent cannot call a direct actuarial tool,
 make review decisions, export reports, rerun, replay, benchmark, or access
-host paths. Its model is fixed to Gemini `gemini-2.5-flash`. Importing the agent and opening
+host paths. Its default model is Gemini `gemini-2.5-flash`, overridable with `AI_ACTUARY_ADK_MODEL`. Importing the agent and opening
 Developer Web do not require credentials; chatting with it requires a Gemini
 Developer API credential, for example local `GOOGLE_API_KEY` with
 `GOOGLE_GENAI_USE_VERTEXAI=FALSE`. Do not commit credentials.

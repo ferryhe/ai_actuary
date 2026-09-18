@@ -53,7 +53,7 @@ planner 与 reviewer **彼此独立**：同一次 run 可以用 `gpt-5.6-luna` �
 | `AI_ACTUARY_AI_REVIEW_ENABLED`                         | 置`0` 则完全确定性，不调模型                                                                       | `1`                           | 不需要                          |
 | `AI_ACTUARY_REVIEW_MAX_TOKENS`                         | 审阅输出预算                                                                                         | `4000`                        | 不需要                          |
 | `AI_ACTUARY_REVIEW_TIMEOUT_SECONDS`                    | 单次调用超时                                                                                         | `60`                          | 不需要                          |
-| `AI_ACTUARY_ADK_MODEL`                                 | ADK 聊天模型（`deepseek/` 前缀走 litellm）                                                         | `gpt-5.6-luna`                | 需要                            |
+| `AI_ACTUARY_ADK_MODEL`                                 | ADK 聊天模型（`deepseek/` 前缀走 litellm）                                                         | `gemini-2.5-flash`                | 需要                            |
 | `AI_ACTUARY_NARRATIVE_ENABLED`                        | 置 `1` 时允许模型改写叙述**措辞**；置 `0` 回到模板                                              | `1`（默认开启）               | 不需要                          |
 | `AI_ACTUARY_NARRATIVE_MODEL`                          | 叙述模型 id，任意 OpenAI 兼容 provider                                                            | `gpt-5.6-luna`                | 不需要                          |
 | `AI_ACTUARY_NARRATIVE_BASE_URL`                       | 叙述端点（如 `https://api.deepseek.com/v1`）                                                      | 回退 `OPENAI_BASE_URL`        | 不需要                          |

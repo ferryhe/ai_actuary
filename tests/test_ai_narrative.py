@@ -143,6 +143,14 @@ def test_supported_numbers_pass_and_unsupported_numbers_are_rejected():
     assert evidence_numbers({}, case_id="case-42") == {0.0, 1.0, 100.0, 42.0}
 
 
+def test_integer_token_cannot_match_rounded_evidence():
+    # 42.5 rounded to "42" is a different claim, so the guard must reject it.
+    assert numbers_supported(["ratio is 42"], evidence_numbers({"ratio": 42.5})) is False
+    assert numbers_supported(["ratio is 42.5"], evidence_numbers({"ratio": 42.5})) is True
+    # integer evidence is still quotable as an integer
+    assert numbers_supported(["count is 42"], evidence_numbers({"count": 42.0})) is True
+
+
 def test_model_draft_is_used_when_numbers_are_supported(monkeypatch):
     captured: dict = {}
 

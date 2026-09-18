@@ -185,7 +185,11 @@ def _number_tokens(text: str) -> list[str]:
 
 
 def _matches_evidence(token: str, value: float, allowed: set[float]) -> bool:
-    decimals = len(token.split(".")[1]) if "." in token else 0
+    if "." not in token:
+        # An integer token may only match integer evidence: rounding a
+        # non-integer value (42.5 -> 42) would hide a fabricated number.
+        return any(item == round(item) and abs(item - value) <= 1e-9 for item in allowed)
+    decimals = len(token.split(".")[1])
     for item in allowed:
         if abs(value - item) <= 1e-6 * max(1.0, abs(item)):
             return True

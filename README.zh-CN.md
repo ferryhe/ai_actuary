@@ -30,9 +30,14 @@ AI Actuary 是一个本地运行的 **智能精算工作台（Agentic Actuarial 
 | 编排器 planner | `AI_ACTUARY_PLANNER_MODEL`（配合 `OPENAI_API_KEY`，可选 `OPENAI_BASE_URL`） | `gpt-5.6-luna` | 模块 import 时 → **改后必须重启** |
 | 执行器 executor | `AI_ACTUARY_NARRATIVE_ENABLED`（`1` 开 / `0` 仅模板）+ `AI_ACTUARY_NARRATIVE_MODEL`、`AI_ACTUARY_NARRATIVE_BASE_URL`、`AI_ACTUARY_NARRATIVE_API_KEY`——**只改措辞** | `1`（默认开启；`0` 回到确定性模板） | 每次调用时 → **改 `.env` 不用重启** |
 | 审阅器 reviewer | `AI_ACTUARY_REVIEW_MODEL`、`AI_ACTUARY_REVIEW_BASE_URL`、`AI_ACTUARY_REVIEW_API_KEY` | `deepseek-flash`，端点 `https://api.deepseek.com/v1` | 每次调用时 → **改 `.env` 不用重启** |
-| ADK 开发面聊天 | `AI_ACTUARY_ADK_MODEL`（`deepseek/` 前缀走 litellm） | `gpt-5.6-luna` | agent import 时 |
+| ADK 开发面聊天 | `AI_ACTUARY_ADK_MODEL`（`deepseek/` 前缀走 litellm） | `gemini-2.5-flash` | agent import 时 |
 
 reviewer 只要求是 OpenAI 兼容端点，因此**规划与审阅可以同时使用不同厂商、不同模型**（例如 planner 用 `gpt-5.6-luna`、reviewer 用 `deepseek-flash`）。关键区别：planner 的变量在进程启动时固化，reviewer 的变量每次调用实时读取。
+
+首次运行前要知道两件事：
+
+- **审阅槽**：`.env.sample` 把它指向 `deepseek-flash`，因此需要 `DEEPSEEK_API_KEY`。源码默认值是 `gpt-5.6-luna`；只有当某个槽的模型 id 或端点包含 `deepseek` 时才会回退到 `DEEPSEEK_API_KEY`，否则使用 `OPENAI_API_KEY`。
+- **叙述槽**：默认开启，即每次 run 都会调用模型改写措辞。想要完全确定性，设 `AI_ACTUARY_NARRATIVE_ENABLED=0`（或 CLI `--narrative-model off`），详见下文「叙述生成」小节。
 
 ---
 

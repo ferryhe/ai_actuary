@@ -62,7 +62,7 @@ Planner and reviewer are configured **independently**: one run can plan with
 | `AI_ACTUARY_AI_REVIEW_ENABLED` | `0` keeps packets purely deterministic | `1` | no |
 | `AI_ACTUARY_REVIEW_MAX_TOKENS` | reviewer output budget | `4000` | no |
 | `AI_ACTUARY_REVIEW_TIMEOUT_SECONDS` | per-call timeout | `60` | no |
-| `AI_ACTUARY_ADK_MODEL` | ADK chat model (`deepseek/` prefix → litellm) | `gpt-5.6-luna` | yes |
+| `AI_ACTUARY_ADK_MODEL` | ADK chat model (`deepseek/` prefix → litellm) | `gemini-2.5-flash` | yes |
 | `AI_ACTUARY_NARRATIVE_ENABLED` | `1` lets a model rewrite narrative **wording** only; `0` restores the template | `1` (enabled) | no |
 | `AI_ACTUARY_NARRATIVE_MODEL` | narrative model id, any OpenAI-compatible provider | `gpt-5.6-luna` | no |
 | `AI_ACTUARY_NARRATIVE_BASE_URL` | narrative endpoint (e.g. `https://api.deepseek.com/v1`) | falls back to `OPENAI_BASE_URL` | no |

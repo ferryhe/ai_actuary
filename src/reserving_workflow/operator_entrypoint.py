@@ -429,19 +429,25 @@ def _attach_ai_review(result: dict[str, Any], *, artifact_dir: str | Path) -> No
         # No persisted packet on disk: nothing to enrich or rewrite.
         return
     output_dir = Path(str(packet_json)).expanduser().resolve().parent
-    ai_review = generate_ai_review(review_packet, output_dir=output_dir)
-    review_packet["ai_review"] = ai_review
-    review_packet["ai_suggestion"] = build_ai_suggestion_payload(ai_review)
-    write_review_packet_files(review_packet, output_dir=output_dir)
-    result["ai_review"] = ai_review
-    _register_artifact_paths(
-        result,
-        artifact_dir=artifact_dir,
-        paths={
-            "ai_review": str(output_dir / "ai_review.json"),
-            "ai_review_markdown": str(output_dir / "ai_review.md"),
-        },
-    )
+    try:
+        ai_review = generate_ai_review(review_packet, output_dir=output_dir)
+        review_packet["ai_review"] = ai_review
+        review_packet["ai_suggestion"] = build_ai_suggestion_payload(ai_review)
+        write_review_packet_files(review_packet, output_dir=output_dir)
+        result["ai_review"] = ai_review
+        _register_artifact_paths(
+            result,
+            artifact_dir=artifact_dir,
+            paths={
+                "ai_review": str(output_dir / "ai_review.json"),
+                "ai_review_markdown": str(output_dir / "ai_review.md"),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Advisory only: a review-side failure must never break the run.
+        failure = {"status": "failed", "error": f"ai_review_attach_failed: {exc}"}
+        review_packet["ai_review"] = failure
+        result["ai_review"] = failure
 
 
 def _register_artifact_paths(

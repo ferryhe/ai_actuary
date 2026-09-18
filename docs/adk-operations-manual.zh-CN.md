@@ -63,7 +63,7 @@ python scripts/run_local_workbench.py --no-adk-web    # 启 ADK 后端，但不�
 
 | 变量 | 含义 | 默认值 | 是否需重启 |
 | --- | --- | --- | --- |
-| `AI_ACTUARY_ADK_MODEL` | ADK 聊天 agent 使用的模型 | `gpt-5.6-luna` | 需要（import 时读取） |
+| `AI_ACTUARY_ADK_MODEL` | ADK 聊天 agent 使用的模型 | `gemini-2.5-flash` | 需要（import 时读取） |
 | `AI_ACTUARY_ADK_CREDENTIAL` | ADK 执行客户端的能力凭证 | 启动器生成 | 需要 |
 | `AI_ACTUARY_ADK_URL` | ADK Developer Web 的回环地址 | `http://127.0.0.1:8001` | 需要 |
 | `DEEPSEEK_API_KEY` | 模型 id 以 `deepseek/` 开头时必需（走 litellm 路由） | — | 需要 |
