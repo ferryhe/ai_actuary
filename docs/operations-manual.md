@@ -42,6 +42,11 @@ handoff ID shown in the browser into the launcher terminal. The ID is not a
 credential. Programmatic clients must implement the body-bootstrap session,
 CSRF, Host, and Origin contract (ADR 0003).
 
+The handoff flow stays available for the lifetime of the process, so an expired
+Operator session can be renewed without restarting the workbench. Only the
+direct token exchange (`/auth/operator/exchange`) is single-use, and rotating
+the bootstrap still clears sessions and pending handoffs.
+
 ---
 
 ## 3. Configuration reference

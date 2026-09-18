@@ -208,6 +208,11 @@ and launcher exchange their private one-time values only in loopback JSON
 bodies; no capability secret is placed in a URL, browser storage, static HTML,
 or launcher output.
 
+The handoff flow stays available for the lifetime of the process, so an expired
+Operator session can be renewed without restarting the workbench. Only the
+direct token exchange (`/auth/operator/exchange`) is single-use, and rotating
+the bootstrap still clears sessions and pending handoffs.
+
 The Developer Web header is labeled `AI Actuary Developer (DEV)` and displays
 the Operator Console return path using the actual configured API port.
 

@@ -23,7 +23,7 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from reserving_workflow.artifacts.storage import write_json_artifact, write_text_artifact
 from reserving_workflow.llm_client import (
@@ -160,16 +160,27 @@ def _call_review_model(review_packet: dict[str, Any], settings: dict[str, Any]) 
             summary="AI review unavailable.",
             error=error or "empty_model_response",
         )
-    return AiReviewResult(
-        status="ok",
-        model=settings["model"],
-        base_url=settings["base_url"],
-        summary=str(payload.get("summary") or ""),
-        focus_points=[
-            AiReviewFocusPoint.model_validate(item) for item in payload.get("focus_points") or []
-        ],
-        suggested_actions=[str(item) for item in payload.get("suggested_actions") or []],
-    )
+    try:
+        return AiReviewResult(
+            status="ok",
+            model=settings["model"],
+            base_url=settings["base_url"],
+            summary=str(payload.get("summary") or ""),
+            focus_points=[
+                AiReviewFocusPoint.model_validate(item) for item in payload.get("focus_points") or []
+            ],
+            suggested_actions=[str(item) for item in payload.get("suggested_actions") or []],
+        )
+    except ValidationError as exc:
+        # A malformed reply is a provider-side shape deviation, not a run failure:
+        # degrade to `failed` so the caller keeps its deterministic result.
+        return AiReviewResult(
+            status="failed",
+            model=settings["model"],
+            base_url=settings["base_url"],
+            summary="AI review unavailable.",
+            error=f"malformed_model_reply: {exc}",
+        )
 
 
 def _render_user_prompt(review_packet: dict[str, Any]) -> str:

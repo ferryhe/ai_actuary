@@ -220,7 +220,11 @@ def build_experience_study_review_packet(
         output_dir=artifact_root,
         case_summary=summary,
     )
-    ai_review = generate_ai_review(packet, output_dir=artifact_root, case_id=case_id, run_id=run_id)
+    try:
+        ai_review = generate_ai_review(packet, output_dir=artifact_root, case_id=case_id, run_id=run_id)
+    except Exception as exc:  # noqa: BLE001
+        # Advisory only: a malformed or failing review reply must never fail the run.
+        ai_review = {"status": "failed", "error": f"ai_review_failed: {exc}"}
     packet["ai_review"] = ai_review
     packet["ai_suggestion"] = build_ai_suggestion_payload(ai_review)
     return write_review_packet_files(packet, output_dir=artifact_root)
@@ -242,7 +246,11 @@ def run_minimax_experience_study(
 
     validated = ExperienceStudyToolInput.model_validate(inputs)
     artifact_base = resolve_artifact_root(artifact_dir)
-    artifact_root = (artifact_base / run_id).resolve()
+    # `artifact_dir` is already per-run (`<root>/<case_id>/<run_id>`), so only
+    # append the run id when the caller passed a case-level directory. Otherwise
+    # the run id would be nested twice.
+    artifact_root = artifact_base if artifact_base.name == run_id else artifact_base / run_id
+    artifact_root = artifact_root.resolve()
     artifact_root.relative_to(artifact_base)
     artifact_root.mkdir(parents=True, exist_ok=True)
     task_id = f"operator-{case_id}"
