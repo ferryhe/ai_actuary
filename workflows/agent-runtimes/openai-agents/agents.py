@@ -18,7 +18,7 @@ class GovernedCaseSummary(BaseModel):
     case_id: str
     worker_status: str
     deterministic_method: str
-    cited_values: dict[str, float] = Field(default_factory=dict)
+    cited_values: dict[str, float | str | bool] = Field(default_factory=dict)
     review_reasons: list[str] = Field(default_factory=list)
     artifact_manifest_path: str | None = None
     narrative_summary: str

@@ -397,7 +397,7 @@ def test_launcher_approved_browser_handoff_binds_claim_and_rejects_adk_or_replay
     assert "set-cookie" not in replay.headers
 
 
-def test_browser_handoff_expires_and_operator_rotation_revokes_pending_claim(
+def test_browser_handoff_outlives_bootstrap_window_and_rotation_revokes_pending_claim(
     tmp_path, monkeypatch
 ):
     clock = [100.0]
@@ -414,9 +414,8 @@ def test_browser_handoff_expires_and_operator_rotation_revokes_pending_claim(
     )
     assert request.status_code == 200
     handoff_id = request.json()["handoff_id"]
-    clock[0] = 102.0
 
-    expired = Client(app).request(
+    approved = Client(app).request(
         "POST",
         "/auth/operator/handoff/approve",
         headers={"Origin": "http://testserver"},
@@ -425,10 +424,39 @@ def test_browser_handoff_expires_and_operator_rotation_revokes_pending_claim(
             "bootstrap_token": configured.operator_bootstrap_token,
         },
     )
-    assert expired.status_code == 401
-    assert expired.json()["detail"]["code"] == "bootstrap_invalid"
-    assert "set-cookie" not in expired.headers
-    assert configured.operator_bootstrap_token not in expired.text
+    assert approved.status_code == 200
+    assert "set-cookie" not in approved.headers
+    assert configured.operator_bootstrap_token not in approved.text
+
+    clock[0] = 102.0
+
+    expired_claim = Client(app).request(
+        "POST",
+        "/auth/operator/handoff/claim",
+        headers={"Origin": "http://testserver"},
+        json={"handoff_id": handoff_id, "claim_token": claim_token},
+    )
+    assert expired_claim.status_code == 401
+    assert expired_claim.json()["detail"]["code"] == "bootstrap_invalid"
+    assert "set-cookie" not in expired_claim.headers
+
+    renewed = Client(app).request(
+        "POST",
+        "/auth/operator/handoff/request",
+        headers={"Origin": "http://testserver"},
+        json={"claim_token": claim_token},
+    )
+    assert renewed.status_code == 200
+    renewed_approval = Client(app).request(
+        "POST",
+        "/auth/operator/handoff/approve",
+        headers={"Origin": "http://testserver"},
+        json={
+            "handoff_id": renewed.json()["handoff_id"],
+            "bootstrap_token": configured.operator_bootstrap_token,
+        },
+    )
+    assert renewed_approval.status_code == 200
 
     rotated_settings = settings(tmp_path / "rotated")
     rotated_app = create_app(settings=rotated_settings)

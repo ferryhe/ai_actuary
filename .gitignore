@@ -10,3 +10,6 @@ tmp/
 .env
 .env.*
 !.env.example
+!.env.sample
+*.log
+*.log.err

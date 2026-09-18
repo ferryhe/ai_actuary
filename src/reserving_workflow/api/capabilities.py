@@ -182,20 +182,16 @@ class CapabilityAuthority:
         valid = secrets.compare_digest(candidate_digest, self._bootstrap_digest)
         if self._bootstrap_used or time.monotonic() >= self._bootstrap_expires_at or not valid:
             raise ValueError("bootstrap_invalid")
+        self._bootstrap_used = True
         return self._issue_session()
 
     def create_bootstrap_handoff(self, claim_token: str) -> tuple[str, int]:
         now = time.monotonic()
         self._discard_expired_handoffs(now)
-        if self._bootstrap_used or now >= self._bootstrap_expires_at:
-            raise ValueError("bootstrap_invalid")
         if len(self._bootstrap_handoffs) >= 16:
             raise ValueError("bootstrap_unavailable")
         handoff_id = secrets.token_urlsafe(24)
-        expires_at = min(
-            self._bootstrap_expires_at,
-            now + self._bootstrap_ttl_seconds,
-        )
+        expires_at = now + self._bootstrap_ttl_seconds
         self._bootstrap_handoffs[handoff_id] = _BootstrapHandoff(
             claim_digest=_secret_digest(claim_token),
             expires_at=expires_at,
@@ -212,15 +208,15 @@ class CapabilityAuthority:
         )
         handoff = self._bootstrap_handoffs.get(handoff_id)
         if (
-            self._bootstrap_used
-            or now >= self._bootstrap_expires_at
-            or not valid_bootstrap
+            not valid_bootstrap
             or handoff is None
             or handoff.used
             or handoff.expires_at <= now
         ):
             raise ValueError("bootstrap_invalid")
         handoff.approved = True
+        # The handoff flow stays available for the lifetime of the process so an
+        # expired session can be renewed; only the direct token exchange is single-use.
         self._bootstrap_used = True
 
     def claim_bootstrap_handoff(
@@ -253,7 +249,6 @@ class CapabilityAuthority:
         }
 
     def _issue_session(self) -> tuple[str, str, int]:
-        self._bootstrap_used = True
         session_id = secrets.token_urlsafe(32)
         csrf_token = secrets.token_urlsafe(32)
         ttl = max(1, int(self._session_ttl_seconds))

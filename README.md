@@ -1,5 +1,7 @@
 # AI Actuary
 
+English · [中文说明](README.zh-CN.md) · [Operations Manual](docs/operations-manual.md) · [中文操作手册](docs/operations-manual.zh-CN.md) · [ADK Manual](docs/adk-operations-manual.md)
+
 AI Actuary is a local **Agentic Actuarial Workbench** prototype. It runs deterministic actuarial reserving tools, records every run as auditable artifacts, exposes a small FastAPI control plane, and provides a lightweight operator console for creating runs, inspecting evidence, handling reviews, rerunning cases, and exporting handoff reports.
 
 The project’s operating model is simple:
@@ -10,9 +12,31 @@ The project’s operating model is simple:
 
 ## Project Positioning
 
-- **Calculation Core** owns deterministic actuarial truth, governance rules, benchmark scoring, and artifact contracts.
-- **OpenAI Planner** owns planning, routing, and governed orchestration.
-- **Hermes Workers** own execution loops, artifact packaging, review handoff generation, and operator-facing runtime flows.
+**Calculation Core** owns deterministic actuarial truth, governance rules, benchmark scoring, and artifact contracts.
+**OpenAI Planner** owns planning, routing, and governed orchestration.
+**Hermes Workers** own execution loops, artifact packaging, review handoff generation, and operator-facing runtime flows.
+
+In other words, four roles are kept separate on purpose:
+
+| Role | Component | Calls a model? | Owns |
+| --- | --- | --- | --- |
+| **Orchestrator** (OpenAI Planner) | `workflows/agent-runtimes/openai-agents/` — OpenAI Agents SDK | Yes | route selection, a bounded `AgentExecutionPlan`, calling the worker boundary, assembling governed output |
+| **Executor** (Hermes Workers) | `workflows/agent-runtimes/hermes-worker/` | one narrative slot, **on by default**, wording only | running the actuarial tool chain, packaging artifacts, building the review packet, replay/batch boundaries |
+| **Reviewer** (AI review) | `src/reserving_workflow/review/ai_reviewer.py` | Yes, only when a run is `needs_review` | reading the deterministic packet and telling the human what to look at |
+| **Human actuary** | Operator Console | — | approve / reject / request changes; owns the decision |
+
+The boundary is stable: **numeric truth comes from the deterministic core, planning comes from the orchestrator, execution and packaging come from the executor, and the decision belongs to a human.** The reviewer is advisory only — it can never change a number.
+
+### Model assignment (planner and executor are configured independently)
+
+| Slot | Environment variable | Default in `.env.sample` | Read |
+| --- | --- | --- | --- |
+| Planner / orchestrator | `AI_ACTUARY_PLANNER_MODEL` (+ `OPENAI_API_KEY`, optional `OPENAI_BASE_URL`) | `gpt-5.6-luna` | import time → **restart required** |
+| Executor / Hermes worker | `AI_ACTUARY_NARRATIVE_ENABLED` (`1` on / `0` template) + `AI_ACTUARY_NARRATIVE_MODEL`, `AI_ACTUARY_NARRATIVE_BASE_URL`, `AI_ACTUARY_NARRATIVE_API_KEY` — **wording only** | `1` (enabled; `0` = deterministic template) | every call → **no restart** |
+| Reviewer | `AI_ACTUARY_REVIEW_MODEL`, `AI_ACTUARY_REVIEW_BASE_URL`, `AI_ACTUARY_REVIEW_API_KEY` | `deepseek-flash` via `https://api.deepseek.com/v1` | every call → **no restart** |
+| ADK developer chat | `AI_ACTUARY_ADK_MODEL` (`deepseek/` prefix routes through litellm) | `gpt-5.6-luna` | agent import |
+
+Any OpenAI-compatible endpoint works for the reviewer, so planning and review can use different providers and models at the same time. See [Operations Manual](docs/operations-manual.md) for the full flow and [ADK Operations Manual](docs/adk-operations-manual.md) for the developer surface.
 
 ## Current Status
 
@@ -27,6 +51,9 @@ The current repo state is past the original CLI proof of concept. It includes:
 - tool catalog with builtin `chainladder` and `minimax_experience_study_tool` implementations
 - workflow catalog with bounded local sequential execution
 - independent review contract and review-decision artifacts
+- experience-study runs (`minimax_experience_study_tool`) evaluated by the same constitution engine, with diagnostic thresholds and review escalation
+- optional AI review guidance (`ai_review.json` / `ai_review.md`) attached to review packets and rendered in the console, with a provider-independent reviewer model
+- model-backed narrative wording on the executor side (`AI_ACTUARY_NARRATIVE_ENABLED=1` by default): the model rewrites summary/key-point prose only, behind a numeric guard that rejects any number absent from the run evidence
 - prototype `operator_id` / `workspace_id` ownership metadata
 - bounded OpenAI planner / Hermes worker adapter seam that uses public API surfaces only
 - evidence-only operator handoff export
@@ -54,6 +81,10 @@ Still intentionally out of scope:
 │   ├── contracts/                       # control-plane and tool contracts
 │   ├── operator_handoff.md              # report-export contract
 │   ├── project-introduction.html        # standalone HTML overview and usage guide
+│   ├── operations-manual.md             # end-to-end operating manual (EN)
+│   ├── operations-manual.zh-CN.md       # end-to-end operating manual (ZH)
+│   ├── adk-operations-manual.md         # ADK developer surface: config and usage (EN)
+│   ├── adk-operations-manual.zh-CN.md   # ADK developer surface: config and usage (ZH)
 │   └── adk-local-workbench.md           # active local workbench/package/rollback guide
 ├── scripts/                             # operator CLI wrappers
 ├── schemas/actuarial-reserving/v1/      # exported JSON Schemas
@@ -65,12 +96,14 @@ Still intentionally out of scope:
 Read in this order when taking over the project:
 
 1. `README.md`
-2. `docs/project-introduction.html`
-3. `docs/architecture.md`
-4. `docs/contracts/control-plane.md`
-5. `docs/adk-local-workbench.md`
-6. `docs/operator_handoff.md`
-7. `docs/README.md`
+2. `docs/operations-manual.md` — how a run actually flows, what each step hands over, how review and AI review are produced
+3. `docs/project-introduction.html`
+4. `docs/architecture.md`
+5. `docs/contracts/control-plane.md`
+6. `docs/adk-operations-manual.md` — the ADK developer surface, what it means, how to configure it
+7. `docs/adk-local-workbench.md`
+8. `docs/operator_handoff.md`
+9. `docs/README.md`
 
 Archived material is under `docs/archive/` and is retained for history only.
 
@@ -268,6 +301,37 @@ Panel. The Console supplies its server-side session, CSRF token, and exact
 Origin automatically. Raw unauthenticated API mutations are intentionally not
 supported; programmatic clients must implement the body-bootstrap/session,
 CSRF, Host, and Origin contract frozen in ADR 0003.
+
+---
+
+## Review and AI Review (short version)
+
+Every governed run ends in one of three governance states produced by `constitution/engine.py`:
+
+```text
+pass            -> completed
+review_required -> needs_review   (review packet + optional AI review)
+fail            -> failed         (hard-constraint breach)
+```
+
+Triggers are numeric and deterministic:
+
+- **Chainladder**: `review_threshold_origin_count` (console) / `--review-threshold-origin-count` (CLI) — review when `diagnostics["origin_count"] > threshold`.
+- **Experience study**: default thresholds `{zero_denominator_count: 0, low_credibility_count: 0, max_ae_ratio: 5}` over the study diagnostics; override per run with the console field or `review_thresholds` (API).
+
+When a run is `needs_review`, the executor writes `review_packet.json` / `review_packet.md`, and the **reviewer model** (configured independently from the planner) adds `ai_review.json` / `ai_review.md` plus an `ai_suggestion` block that the console renders as **AI guidance**. The reviewer never changes numbers; if the call fails, the packet records `status=failed` and the run status is untouched.
+
+Full flow, handoff table, and configuration reference: [Operations Manual](docs/operations-manual.md) · [中文操作手册](docs/operations-manual.zh-CN.md).
+
+### Narrative drafting (fourth model slot, on by default)
+
+`AI_ACTUARY_NARRATIVE_ENABLED=1` is the default, so every run asks a model to
+rewrite the **wording** of `narrative_draft.json`. Numbers stay deterministic:
+`cited_values` are copied from the deterministic result, and every number in
+the generated text must exist in the run evidence — otherwise the draft
+silently falls back to the template. Set `AI_ACTUARY_NARRATIVE_ENABLED=0` (or
+run the CLI with `--narrative-model off`) for template wording and no model
+call. See [Operations Manual §8](docs/operations-manual.md#8-optional-model-backed-narrative-drafting-executor-side).
 
 ---
 
