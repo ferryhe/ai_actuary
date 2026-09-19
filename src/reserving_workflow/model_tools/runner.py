@@ -230,6 +230,23 @@ def build_experience_study_review_packet(
     return write_review_packet_files(packet, output_dir=artifact_root)
 
 
+def resolve_run_artifact_root(artifact_dir: str | Path, run_id: str) -> Path:
+    """Resolve the per-run artifact directory; idempotent in `run_id`.
+
+    Callers may pass either a case-level directory (`<root>/<case_id>`) or a
+    per-run one (`<root>/<case_id>/<run_id>`). Appending the run id twice would
+    register a directory the runner never writes to, which surfaces as
+    `manifest_missing` on every operator entry point.
+    """
+
+    base = resolve_artifact_root(artifact_dir)
+    run_id = str(run_id)
+    root = base if base.name == run_id else base / run_id
+    root = root.resolve()
+    root.relative_to(base)
+    return root
+
+
 def run_minimax_experience_study(
     *,
     case_id: str,
@@ -246,12 +263,7 @@ def run_minimax_experience_study(
 
     validated = ExperienceStudyToolInput.model_validate(inputs)
     artifact_base = resolve_artifact_root(artifact_dir)
-    # `artifact_dir` is already per-run (`<root>/<case_id>/<run_id>`), so only
-    # append the run id when the caller passed a case-level directory. Otherwise
-    # the run id would be nested twice.
-    artifact_root = artifact_base if artifact_base.name == run_id else artifact_base / run_id
-    artifact_root = artifact_root.resolve()
-    artifact_root.relative_to(artifact_base)
+    artifact_root = resolve_run_artifact_root(artifact_dir, run_id)
     artifact_root.mkdir(parents=True, exist_ok=True)
     task_id = f"operator-{case_id}"
     operator_params: dict[str, Any] = {

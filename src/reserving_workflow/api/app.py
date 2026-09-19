@@ -66,6 +66,7 @@ from reserving_workflow.interfaces.operator_console import (
 from reserving_workflow.model_tools import (
     MINIMAX_EXPERIENCE_STUDY_TOOL_ID,
     ExperienceStudyToolInput,
+    resolve_run_artifact_root,
     run_minimax_experience_study,
 )
 from reserving_workflow.review import (
@@ -291,21 +292,21 @@ def _create_app(
     operator_bootstrap_ttl_seconds = (
         resolved_settings.operator_bootstrap_ttl_seconds
         if settings is not None
-        else float(
-            os.environ.get(
-                "AI_ACTUARY_OPERATOR_BOOTSTRAP_TTL",
-                resolved_settings.operator_bootstrap_ttl_seconds,
-            )
+        else _env_float(
+            "AI_ACTUARY_OPERATOR_BOOTSTRAP_TTL",
+            resolved_settings.operator_bootstrap_ttl_seconds,
+            gt=0,
+            le=3600,
         )
     )
     operator_session_ttl_seconds = (
         resolved_settings.operator_session_ttl_seconds
         if settings is not None
-        else float(
-            os.environ.get(
-                "AI_ACTUARY_OPERATOR_SESSION_TTL",
-                resolved_settings.operator_session_ttl_seconds,
-            )
+        else _env_float(
+            "AI_ACTUARY_OPERATOR_SESSION_TTL",
+            resolved_settings.operator_session_ttl_seconds,
+            gt=0,
+            le=18000,
         )
     )
     supplied_secret_count = sum(
@@ -1871,6 +1872,35 @@ def _set_operator_session_cookies(
     )
 
 
+def _env_float(
+    name: str,
+    default: float,
+    *,
+    gt: float,
+    le: float,
+) -> float:
+    """Read a numeric env override with the same bounds as `ApiSettings`.
+
+    The env path must not bypass the constraints declared on `ApiSettings`:
+    an out-of-range or unparseable value is a configuration error naming the
+    variable and the expected range — never a bare traceback, never silently
+    accepted.
+    """
+
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{name} must be a number in ({gt}, {le}]; got {raw!r}"
+        ) from exc
+    if not (gt < value <= le):
+        raise ValueError(f"{name} must be in ({gt}, {le}]; got {value}")
+    return value
+
+
 def _loopback_http_origin(raw_url: str, *, purpose: str) -> str:
     """Return a normalized loopback-only HTTP origin with an explicit port."""
     try:
@@ -2760,7 +2790,10 @@ def _record_run_failure(
         else Path(artifact_dir).expanduser().resolve()
     )
     if operator_params.get("tool_id") in MODEL_COMPARISON_TOOL_RUNNERS:
-        artifact_root = (artifact_root / str(run_id)).resolve()
+        # `_default_artifact_dir` already ends with the run id, so resolve the
+        # run directory through the shared helper: it is idempotent and keeps
+        # the registered root equal to the one the model-tool runner writes.
+        artifact_root = resolve_run_artifact_root(artifact_dir, run_id)
     execution_label = execution_mode.capitalize()
     run_registry.record_run_event(
         registry_path=registry_path,

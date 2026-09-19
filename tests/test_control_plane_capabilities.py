@@ -482,3 +482,94 @@ def test_browser_handoff_outlives_bootstrap_window_and_rotation_revokes_pending_
     assert revoked.status_code == 401
     assert revoked.json()["detail"]["code"] == "bootstrap_invalid"
     assert "set-cookie" not in revoked.headers
+
+
+def test_rotation_revokes_new_handoff_minting(tmp_path, monkeypatch):
+    """Rotation is the revocation control: it must close the whole channel.
+
+    The handoff flow itself stays available for the process lifetime (so an
+    expired session can be renewed), but after a rotation even a holder of the
+    not-yet-rotated bootstrap token must not be able to mint a new session.
+    """
+
+    clock = [100.0]
+    monkeypatch.setattr(capabilities.time, "monotonic", lambda: clock[0])
+    configured = settings(tmp_path)
+    app = create_app(settings=configured)
+    app.state.capability_authority.rotate("operator-console", "rotated-operator-secret")
+
+    created = Client(app).request(
+        "POST",
+        "/auth/operator/handoff/request",
+        headers={"Origin": "http://testserver"},
+        json={"claim_token": "browser-generated-private-claim-token-0003"},
+    )
+    assert created.status_code == 401
+    assert created.json()["detail"]["code"] == "bootstrap_invalid"
+
+    approved = Client(app).request(
+        "POST",
+        "/auth/operator/handoff/approve",
+        headers={"Origin": "http://testserver"},
+        json={
+            "handoff_id": "unknown-handoff-id-after-rotation",
+            "bootstrap_token": configured.operator_bootstrap_token,
+        },
+    )
+    assert approved.status_code == 401
+    assert approved.json()["detail"]["code"] == "bootstrap_invalid"
+
+    exchanged = Client(app).request(
+        "POST",
+        "/auth/operator/bootstrap",
+        headers={"Origin": "http://testserver"},
+        json={"bootstrap_token": configured.operator_bootstrap_token},
+    )
+    assert exchanged.status_code == 401
+
+
+def test_handoff_slot_table_evicts_oldest_instead_of_denying(tmp_path, monkeypatch):
+    """Handoff creation is anonymous, so a full table must not deny renewals.
+
+    A caller that can reach loopback could otherwise occupy all 16 slots and
+    keep the console's only self-service renewal path permanently unavailable.
+    """
+
+    clock = [100.0]
+    monkeypatch.setattr(capabilities.time, "monotonic", lambda: clock[0])
+    configured = settings(tmp_path)
+    app = create_app(settings=configured)
+    client = Client(app)
+
+    handoff_ids = []
+    for index in range(17):
+        response = client.request(
+            "POST",
+            "/auth/operator/handoff/request",
+            headers={"Origin": "http://testserver"},
+            json={"claim_token": f"browser-claim-{index:02d}-{'x' * 30}"},
+        )
+        assert response.status_code == 200, response.text
+        handoff_ids.append(response.json()["handoff_id"])
+
+    stale = Client(app).request(
+        "POST",
+        "/auth/operator/handoff/approve",
+        headers={"Origin": "http://testserver"},
+        json={
+            "handoff_id": handoff_ids[0],
+            "bootstrap_token": configured.operator_bootstrap_token,
+        },
+    )
+    assert stale.status_code == 401
+
+    fresh = Client(app).request(
+        "POST",
+        "/auth/operator/handoff/approve",
+        headers={"Origin": "http://testserver"},
+        json={
+            "handoff_id": handoff_ids[-1],
+            "bootstrap_token": configured.operator_bootstrap_token,
+        },
+    )
+    assert fresh.status_code == 200

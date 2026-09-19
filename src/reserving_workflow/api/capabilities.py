@@ -134,6 +134,7 @@ class CapabilityAuthority:
         self._bootstrap_digest = _secret_digest(operator_bootstrap_token)
         self._bootstrap_expires_at = time.monotonic() + bootstrap_ttl_seconds
         self._bootstrap_used = False
+        self._bootstrap_revoked = False
         self._bootstrap_ttl_seconds = bootstrap_ttl_seconds
         self._session_ttl_seconds = session_ttl_seconds
         self._sessions: dict[str, _Session] = {}
@@ -180,7 +181,12 @@ class CapabilityAuthority:
     def exchange_bootstrap(self, bootstrap_token: str) -> tuple[str, str, int]:
         candidate_digest = _secret_digest(bootstrap_token)
         valid = secrets.compare_digest(candidate_digest, self._bootstrap_digest)
-        if self._bootstrap_used or time.monotonic() >= self._bootstrap_expires_at or not valid:
+        if (
+            self._bootstrap_revoked
+            or self._bootstrap_used
+            or time.monotonic() >= self._bootstrap_expires_at
+            or not valid
+        ):
             raise ValueError("bootstrap_invalid")
         self._bootstrap_used = True
         return self._issue_session()
@@ -188,8 +194,17 @@ class CapabilityAuthority:
     def create_bootstrap_handoff(self, claim_token: str) -> tuple[str, int]:
         now = time.monotonic()
         self._discard_expired_handoffs(now)
+        if self._bootstrap_revoked:
+            raise ValueError("bootstrap_invalid")
+        # Handoff creation is reachable anonymously, so a full slot table must
+        # not become a durable denial of the console's self-service renewal
+        # path: evict the oldest entry instead of refusing new requests.
         if len(self._bootstrap_handoffs) >= 16:
-            raise ValueError("bootstrap_unavailable")
+            oldest = min(
+                self._bootstrap_handoffs,
+                key=lambda handoff_id: self._bootstrap_handoffs[handoff_id].expires_at,
+            )
+            self._bootstrap_handoffs.pop(oldest, None)
         handoff_id = secrets.token_urlsafe(24)
         expires_at = now + self._bootstrap_ttl_seconds
         self._bootstrap_handoffs[handoff_id] = _BootstrapHandoff(
@@ -208,7 +223,8 @@ class CapabilityAuthority:
         )
         handoff = self._bootstrap_handoffs.get(handoff_id)
         if (
-            not valid_bootstrap
+            self._bootstrap_revoked
+            or not valid_bootstrap
             or handoff is None
             or handoff.used
             or handoff.expires_at <= now
@@ -275,6 +291,10 @@ class CapabilityAuthority:
             self._sessions.clear()
             self._bootstrap_handoffs.clear()
             self._bootstrap_used = True
+            # Rotation is the revocation control: the whole bootstrap channel —
+            # direct exchange and handoff minting alike — must stop working,
+            # otherwise a leaked token can still mint a new session.
+            self._bootstrap_revoked = True
 
     def verify_adk_confirmation(
         self,

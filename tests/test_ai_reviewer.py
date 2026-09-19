@@ -31,6 +31,17 @@ MALFORMED_REPLIES = {
         "summary": "looks risky",
         "focus_points": [{"title": "t", "evidence": "e"}],
     },
+    # Non-iterable values: these used to raise TypeError out of a function that
+    # documents "never raises".
+    "focus_points_is_int": {"summary": "looks risky", "focus_points": 5},
+    "focus_points_is_bool": {"summary": "looks risky", "focus_points": True},
+    "suggested_actions_is_int": {"summary": "looks risky", "suggested_actions": 5},
+    # A bare string must not be iterated into per-character "actions".
+    "suggested_actions_is_string": {
+        "summary": "looks risky",
+        "suggested_actions": "verify the tail",
+    },
+    "summary_is_dict": {"summary": {"a": 1}, "focus_points": []},
 }
 
 

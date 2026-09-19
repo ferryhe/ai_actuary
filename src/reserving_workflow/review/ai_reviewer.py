@@ -23,7 +23,7 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from reserving_workflow.artifacts.storage import write_json_artifact, write_text_artifact
 from reserving_workflow.llm_client import (
@@ -160,18 +160,30 @@ def _call_review_model(review_packet: dict[str, Any], settings: dict[str, Any]) 
             summary="AI review unavailable.",
             error=error or "empty_model_response",
         )
+    summary = payload.get("summary")
+    focus_points = payload.get("focus_points")
+    suggested_actions = payload.get("suggested_actions")
     try:
+        # Normalize before validating. Iterating a non-iterable raises, and a
+        # bare string would silently explode into per-character actions, so both
+        # must be treated as a malformed reply rather than a usable one.
+        if summary is not None and not isinstance(summary, str):
+            raise ValueError("summary must be a string")
+        if focus_points is not None and not isinstance(focus_points, list):
+            raise ValueError("focus_points must be a list")
+        if suggested_actions is not None and not isinstance(suggested_actions, list):
+            raise ValueError("suggested_actions must be a list of strings")
         return AiReviewResult(
             status="ok",
             model=settings["model"],
             base_url=settings["base_url"],
-            summary=str(payload.get("summary") or ""),
+            summary=summary or "",
             focus_points=[
-                AiReviewFocusPoint.model_validate(item) for item in payload.get("focus_points") or []
+                AiReviewFocusPoint.model_validate(item) for item in focus_points or []
             ],
-            suggested_actions=[str(item) for item in payload.get("suggested_actions") or []],
+            suggested_actions=[str(item) for item in suggested_actions or []],
         )
-    except ValidationError as exc:
+    except Exception as exc:  # noqa: BLE001
         # A malformed reply is a provider-side shape deviation, not a run failure:
         # degrade to `failed` so the caller keeps its deterministic result.
         return AiReviewResult(
