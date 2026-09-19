@@ -134,6 +134,7 @@ class CapabilityAuthority:
         self._bootstrap_digest = _secret_digest(operator_bootstrap_token)
         self._bootstrap_expires_at = time.monotonic() + bootstrap_ttl_seconds
         self._bootstrap_used = False
+        self._bootstrap_revoked = False
         self._bootstrap_ttl_seconds = bootstrap_ttl_seconds
         self._session_ttl_seconds = session_ttl_seconds
         self._sessions: dict[str, _Session] = {}
@@ -180,22 +181,32 @@ class CapabilityAuthority:
     def exchange_bootstrap(self, bootstrap_token: str) -> tuple[str, str, int]:
         candidate_digest = _secret_digest(bootstrap_token)
         valid = secrets.compare_digest(candidate_digest, self._bootstrap_digest)
-        if self._bootstrap_used or time.monotonic() >= self._bootstrap_expires_at or not valid:
+        if (
+            self._bootstrap_revoked
+            or self._bootstrap_used
+            or time.monotonic() >= self._bootstrap_expires_at
+            or not valid
+        ):
             raise ValueError("bootstrap_invalid")
+        self._bootstrap_used = True
         return self._issue_session()
 
     def create_bootstrap_handoff(self, claim_token: str) -> tuple[str, int]:
         now = time.monotonic()
         self._discard_expired_handoffs(now)
-        if self._bootstrap_used or now >= self._bootstrap_expires_at:
+        if self._bootstrap_revoked:
             raise ValueError("bootstrap_invalid")
+        # Handoff creation is reachable anonymously, so a full slot table must
+        # not become a durable denial of the console's self-service renewal
+        # path: evict the oldest entry instead of refusing new requests.
         if len(self._bootstrap_handoffs) >= 16:
-            raise ValueError("bootstrap_unavailable")
+            oldest = min(
+                self._bootstrap_handoffs,
+                key=lambda handoff_id: self._bootstrap_handoffs[handoff_id].expires_at,
+            )
+            self._bootstrap_handoffs.pop(oldest, None)
         handoff_id = secrets.token_urlsafe(24)
-        expires_at = min(
-            self._bootstrap_expires_at,
-            now + self._bootstrap_ttl_seconds,
-        )
+        expires_at = now + self._bootstrap_ttl_seconds
         self._bootstrap_handoffs[handoff_id] = _BootstrapHandoff(
             claim_digest=_secret_digest(claim_token),
             expires_at=expires_at,
@@ -210,10 +221,13 @@ class CapabilityAuthority:
         valid_bootstrap = secrets.compare_digest(
             candidate_digest, self._bootstrap_digest
         )
+        # `_bootstrap_revoked` is defence in depth here: `rotate()` clears the
+        # handoff table, so over normal HTTP traffic this branch is unreachable
+        # (no handoff survives a rotation to be approved). It still matters if a
+        # rotation ever stops clearing the table or a handoff is restored.
         handoff = self._bootstrap_handoffs.get(handoff_id)
         if (
-            self._bootstrap_used
-            or now >= self._bootstrap_expires_at
+            self._bootstrap_revoked
             or not valid_bootstrap
             or handoff is None
             or handoff.used
@@ -221,6 +235,8 @@ class CapabilityAuthority:
         ):
             raise ValueError("bootstrap_invalid")
         handoff.approved = True
+        # The handoff flow stays available for the lifetime of the process so an
+        # expired session can be renewed; only the direct token exchange is single-use.
         self._bootstrap_used = True
 
     def claim_bootstrap_handoff(
@@ -253,7 +269,6 @@ class CapabilityAuthority:
         }
 
     def _issue_session(self) -> tuple[str, str, int]:
-        self._bootstrap_used = True
         session_id = secrets.token_urlsafe(32)
         csrf_token = secrets.token_urlsafe(32)
         ttl = max(1, int(self._session_ttl_seconds))
@@ -265,7 +280,13 @@ class CapabilityAuthority:
         )
         return session_id, csrf_token, ttl
 
-    def rotate(self, capability: CapabilityClass, new_credential: str) -> None:
+    def rotate(
+        self,
+        capability: CapabilityClass,
+        new_credential: str,
+        *,
+        new_bootstrap_token: str | None = None,
+    ) -> None:
         if capability not in self._credential_digests or len(str(new_credential)) < 8:
             raise ValueError("Invalid capability rotation request")
         other: CapabilityClass = "adk-developer" if capability == "operator-console" else "operator-console"
@@ -280,6 +301,25 @@ class CapabilityAuthority:
             self._sessions.clear()
             self._bootstrap_handoffs.clear()
             self._bootstrap_used = True
+            # Rotation is the revocation control: the whole bootstrap channel —
+            # direct exchange and handoff minting alike — must stop working,
+            # otherwise a leaked token can still mint a new session. Without a
+            # fresh bootstrap token the channel stays closed for the rest of the
+            # process (recovery is a restart), which is the safe default after a
+            # suspected leak; note the revocation lives in memory only, so it is
+            # not a durable substitute for replacing the token at rest.
+            self._bootstrap_revoked = True
+            if new_bootstrap_token is not None:
+                if len(str(new_bootstrap_token)) < 8:
+                    raise ValueError("Invalid capability rotation request")
+                # Re-arm under the new credential instead of leaving the channel
+                # closed until a restart.
+                self._bootstrap_digest = _secret_digest(new_bootstrap_token)
+                self._bootstrap_expires_at = (
+                    time.monotonic() + self._bootstrap_ttl_seconds
+                )
+                self._bootstrap_used = False
+                self._bootstrap_revoked = False
 
     def verify_adk_confirmation(
         self,

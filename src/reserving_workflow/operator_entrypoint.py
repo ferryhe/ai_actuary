@@ -11,6 +11,11 @@ from typing import Any
 
 from reserving_workflow.artifacts.storage import read_json_artifact, resolve_artifact_path, write_json_artifact
 from reserving_workflow.contracts.control_plane import RerunSemantics
+from reserving_workflow.review.ai_reviewer import (
+    build_ai_suggestion_payload,
+    generate_ai_review,
+)
+from reserving_workflow.review.generator import write_review_packet_files
 
 DEFAULT_REQUIRED_ARTIFACTS = [
     "validated_input",
@@ -176,6 +181,7 @@ def run_operator_flow(
         validated_input_path=validated_input_path,
     )
     _attach_review_packet_artifacts(normalized, artifact_dir=artifact_dir)
+    _attach_ai_review(normalized, artifact_dir=artifact_dir)
     if review_delivery_dir is not None and normalized.get("status") == "needs_review" and normalized.get("review_packet"):
         try:
             delivery_module = _load_review_delivery_module()
@@ -237,6 +243,7 @@ def rerun_from_registry(
     registry_path: str | Path,
     artifact_dir: str | Path | None = None,
     review_delivery_dir: str | Path | None = None,
+    new_run_id: str | None = None,
     runner_module=None,
     task_contracts_module=None,
 ):
@@ -250,7 +257,7 @@ def rerun_from_registry(
     if review_delivery_dir is not None:
         operator_params["review_delivery_dir"] = str(review_delivery_dir)
     operator_params["registry_path"] = str(registry_path)
-    operator_params["run_id"] = _generate_operator_run_id(entry.get("task_id") or f"operator-{entry.get('case_id') or 'case'}")
+    operator_params["run_id"] = new_run_id or _generate_operator_run_id(entry.get("task_id") or f"operator-{entry.get('case_id') or 'case'}")
     if runner_module is not None:
         operator_params["runner_module"] = runner_module
     if task_contracts_module is not None:
@@ -400,6 +407,67 @@ def _attach_review_packet_artifacts(result: dict[str, Any], *, artifact_dir: str
             artifact_paths[artifact_id] = resolved_path.relative_to(artifact_root).as_posix()
         except ValueError:
             continue
+    manifest["artifact_paths"] = artifact_paths
+    write_json_artifact(manifest_path, manifest)
+
+
+def _attach_ai_review(result: dict[str, Any], *, artifact_dir: str | Path) -> None:
+    """Attach LLM review guidance to a generated review packet.
+
+    Guidance is advisory only: failures are recorded and never change the
+    run status or any deterministic number.
+    """
+
+    review_packet = result.get("review_packet")
+    if not isinstance(review_packet, dict):
+        return
+    packet_paths = review_packet.get("packet_paths")
+    if not isinstance(packet_paths, dict):
+        return
+    packet_json = packet_paths.get("json")
+    if not packet_json:
+        # No persisted packet on disk: nothing to enrich or rewrite.
+        return
+    output_dir = Path(str(packet_json)).expanduser().resolve().parent
+    try:
+        ai_review = generate_ai_review(review_packet, output_dir=output_dir)
+        review_packet["ai_review"] = ai_review
+        review_packet["ai_suggestion"] = build_ai_suggestion_payload(ai_review)
+        write_review_packet_files(review_packet, output_dir=output_dir)
+        result["ai_review"] = ai_review
+        _register_artifact_paths(
+            result,
+            artifact_dir=artifact_dir,
+            paths={
+                "ai_review": str(output_dir / "ai_review.json"),
+                "ai_review_markdown": str(output_dir / "ai_review.md"),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Advisory only: a review-side failure must never break the run.
+        failure = {"status": "failed", "error": f"ai_review_attach_failed: {exc}"}
+        review_packet["ai_review"] = failure
+        result["ai_review"] = failure
+
+
+def _register_artifact_paths(
+    result: dict[str, Any],
+    *,
+    artifact_dir: str | Path,
+    paths: dict[str, str],
+) -> None:
+    manifest_path = _resolve_manifest_path(result, artifact_dir=artifact_dir)
+    if manifest_path is None or not manifest_path.exists():
+        return
+    manifest = read_json_artifact(manifest_path)
+    artifact_root = Path(manifest.get("artifact_root") or manifest_path.parent).expanduser().resolve()
+    artifact_paths = dict(manifest.get("artifact_paths", {}) or {})
+    for artifact_id, raw_path in paths.items():
+        resolved_path = Path(raw_path).expanduser().resolve()
+        try:
+            artifact_paths[artifact_id] = resolved_path.relative_to(artifact_root).as_posix()
+        except ValueError:
+            artifact_paths[artifact_id] = str(resolved_path)
     manifest["artifact_paths"] = artifact_paths
     write_json_artifact(manifest_path, manifest)
 

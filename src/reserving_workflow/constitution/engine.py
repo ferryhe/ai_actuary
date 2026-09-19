@@ -31,7 +31,12 @@ class ConstitutionEvaluator:
         soft_guidance: list[str] = []
         review_triggers: list[str] = []
 
-        if not case_input.triangles and not case_input.metadata.get("chainladder_sample") and not case_input.metadata.get("triangle_rows"):
+        if (
+            not case_input.triangles
+            and not case_input.metadata.get("chainladder_sample")
+            and not case_input.metadata.get("triangle_rows")
+            and not case_input.metadata.get("tool_id")
+        ):
             hard_constraints.append("required_input_missing: no triangle input or approved chainladder source provided")
 
         materiality = float(case_input.run_config.get("numeric_materiality", self.default_materiality))
