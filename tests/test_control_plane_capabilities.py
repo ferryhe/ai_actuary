@@ -487,38 +487,55 @@ def test_browser_handoff_outlives_bootstrap_window_and_rotation_revokes_pending_
 def test_rotation_revokes_new_handoff_minting(tmp_path, monkeypatch):
     """Rotation is the revocation control: it must close the whole channel.
 
-    The handoff flow itself stays available for the process lifetime (so an
-    expired session can be renewed), but after a rotation even a holder of the
-    not-yet-rotated bootstrap token must not be able to mint a new session.
+    Each assertion is pinned to the `_bootstrap_revoked` guard itself, because a
+    bare 401 proves nothing here: rotation also clears the handoff table (an
+    unknown id returns 401) and sets the single-use latch (a repeat exchange
+    returns 401). Both of those are neutralized explicitly below.
     """
 
     clock = [100.0]
     monkeypatch.setattr(capabilities.time, "monotonic", lambda: clock[0])
     configured = settings(tmp_path)
     app = create_app(settings=configured)
-    app.state.capability_authority.rotate("operator-console", "rotated-operator-secret")
+    authority = app.state.capability_authority
+    claim_token = "browser-generated-private-claim-token-0003"
+
+    # Keep a handoff minted before the rotation: `rotate()` clears the table, so
+    # without re-injecting it the approve branch would be decided by "unknown
+    # id" rather than by the revoked guard.
+    handoff_id, _ = authority.create_bootstrap_handoff(claim_token)
+    surviving_handoff = authority._bootstrap_handoffs[handoff_id]
+
+    authority.rotate("operator-console", "rotated-operator-secret")
+    assert authority._bootstrap_revoked is True
 
     created = Client(app).request(
         "POST",
         "/auth/operator/handoff/request",
         headers={"Origin": "http://testserver"},
-        json={"claim_token": "browser-generated-private-claim-token-0003"},
+        json={"claim_token": claim_token},
     )
     assert created.status_code == 401
     assert created.json()["detail"]["code"] == "bootstrap_invalid"
 
+    # Token and handoff id are both valid here, so a 401 can only come from
+    # `_bootstrap_revoked`.
+    authority._bootstrap_handoffs[handoff_id] = surviving_handoff
     approved = Client(app).request(
         "POST",
         "/auth/operator/handoff/approve",
         headers={"Origin": "http://testserver"},
         json={
-            "handoff_id": "unknown-handoff-id-after-rotation",
+            "handoff_id": handoff_id,
             "bootstrap_token": configured.operator_bootstrap_token,
         },
     )
     assert approved.status_code == 401
     assert approved.json()["detail"]["code"] == "bootstrap_invalid"
 
+    # Clear the single-use latch so the exchange 401 is attributable to the
+    # revoked guard rather than to `_bootstrap_used`.
+    authority._bootstrap_used = False
     exchanged = Client(app).request(
         "POST",
         "/auth/operator/bootstrap",
@@ -526,6 +543,57 @@ def test_rotation_revokes_new_handoff_minting(tmp_path, monkeypatch):
         json={"bootstrap_token": configured.operator_bootstrap_token},
     )
     assert exchanged.status_code == 401
+
+
+def test_rotation_with_a_new_bootstrap_token_rearms_the_channel(tmp_path, monkeypatch):
+    """Rotation alone closes the channel for the rest of the process.
+
+    Passing a fresh bootstrap token re-arms it, which is what keeps the
+    documented "renew an expired session without restarting" promise reachable
+    after a rotation.
+    """
+
+    clock = [100.0]
+    monkeypatch.setattr(capabilities.time, "monotonic", lambda: clock[0])
+    configured = settings(tmp_path)
+    app = create_app(settings=configured)
+    authority = app.state.capability_authority
+    new_bootstrap = "rotated-bootstrap-token-that-is-independent"
+
+    authority.rotate(
+        "operator-console",
+        "rotated-operator-secret",
+        new_bootstrap_token=new_bootstrap,
+    )
+    assert authority._bootstrap_revoked is False
+    assert authority._bootstrap_used is False
+
+    created = Client(app).request(
+        "POST",
+        "/auth/operator/handoff/request",
+        headers={"Origin": "http://testserver"},
+        json={"claim_token": "browser-generated-private-claim-token-0004"},
+    )
+    assert created.status_code == 200
+    approved = Client(app).request(
+        "POST",
+        "/auth/operator/handoff/approve",
+        headers={"Origin": "http://testserver"},
+        json={
+            "handoff_id": created.json()["handoff_id"],
+            "bootstrap_token": new_bootstrap,
+        },
+    )
+    assert approved.status_code == 200
+
+    # The superseded bootstrap is no longer accepted anywhere.
+    stale = Client(app).request(
+        "POST",
+        "/auth/operator/bootstrap",
+        headers={"Origin": "http://testserver"},
+        json={"bootstrap_token": configured.operator_bootstrap_token},
+    )
+    assert stale.status_code == 401
 
 
 def test_handoff_slot_table_evicts_oldest_instead_of_denying(tmp_path, monkeypatch):

@@ -237,13 +237,24 @@ def resolve_run_artifact_root(artifact_dir: str | Path, run_id: str) -> Path:
     per-run one (`<root>/<case_id>/<run_id>`). Appending the run id twice would
     register a directory the runner never writes to, which surfaces as
     `manifest_missing` on every operator entry point.
+
+    This is deliberately pure path arithmetic: it never touches the filesystem.
+    The failure handler calls it too, and a handler whose only job is to record
+    a failure must not create directories or die on an unusable path (a parent
+    component that is really a file would raise `NotADirectoryError` and lose
+    the failure event). Creating the directory is the runner's job.
     """
 
-    base = resolve_artifact_root(artifact_dir)
+    base = Path(artifact_dir).expanduser().resolve()
     run_id = str(run_id)
     root = base if base.name == run_id else base / run_id
     root = root.resolve()
-    root.relative_to(base)
+    try:
+        root.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(
+            f"run artifact root escapes artifact dir: {run_id!r}"
+        ) from exc
     return root
 
 

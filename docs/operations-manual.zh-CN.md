@@ -34,7 +34,7 @@ python scripts/run_local_workbench.py
 
 控制台首次打开是锁定状态：点 **Request launcher handoff**，把浏览器里显示的 handoff ID 粘回启动器终端即可解锁（ID 不是凭证）。程序化调用需要实现 body-bootstrap 会话、CSRF、Host、Origin 契约（ADR 0003）。
 
-handoff 流程在整个进程生命周期内都可用，因此 Operator 会话过期后可以重新发起解锁，无需重启工作台；只有直接 token 交换（`/auth/operator/exchange`）是一次性的，rotate bootstrap 仍会清空会话与待领取的 handoff。
+handoff 流程在整个进程生命周期内都可用，因此 Operator 会话过期后可以重新发起解锁，无需重启工作台；只有直接 token 交换（`/auth/operator/bootstrap`）是一次性的。轮换 operator-console 凭据会关闭整条 bootstrap 通道（直接交换与 handoff 铸造都不可用）直到进程结束：轮换时传入新的 bootstrap token 可重新武装，否则需重启工作台。该撤销仅存在于内存，不能替代更换落地的 token。
 
 ---
 

@@ -221,6 +221,10 @@ class CapabilityAuthority:
         valid_bootstrap = secrets.compare_digest(
             candidate_digest, self._bootstrap_digest
         )
+        # `_bootstrap_revoked` is defence in depth here: `rotate()` clears the
+        # handoff table, so over normal HTTP traffic this branch is unreachable
+        # (no handoff survives a rotation to be approved). It still matters if a
+        # rotation ever stops clearing the table or a handoff is restored.
         handoff = self._bootstrap_handoffs.get(handoff_id)
         if (
             self._bootstrap_revoked
@@ -276,7 +280,13 @@ class CapabilityAuthority:
         )
         return session_id, csrf_token, ttl
 
-    def rotate(self, capability: CapabilityClass, new_credential: str) -> None:
+    def rotate(
+        self,
+        capability: CapabilityClass,
+        new_credential: str,
+        *,
+        new_bootstrap_token: str | None = None,
+    ) -> None:
         if capability not in self._credential_digests or len(str(new_credential)) < 8:
             raise ValueError("Invalid capability rotation request")
         other: CapabilityClass = "adk-developer" if capability == "operator-console" else "operator-console"
@@ -293,8 +303,23 @@ class CapabilityAuthority:
             self._bootstrap_used = True
             # Rotation is the revocation control: the whole bootstrap channel —
             # direct exchange and handoff minting alike — must stop working,
-            # otherwise a leaked token can still mint a new session.
+            # otherwise a leaked token can still mint a new session. Without a
+            # fresh bootstrap token the channel stays closed for the rest of the
+            # process (recovery is a restart), which is the safe default after a
+            # suspected leak; note the revocation lives in memory only, so it is
+            # not a durable substitute for replacing the token at rest.
             self._bootstrap_revoked = True
+            if new_bootstrap_token is not None:
+                if len(str(new_bootstrap_token)) < 8:
+                    raise ValueError("Invalid capability rotation request")
+                # Re-arm under the new credential instead of leaving the channel
+                # closed until a restart.
+                self._bootstrap_digest = _secret_digest(new_bootstrap_token)
+                self._bootstrap_expires_at = (
+                    time.monotonic() + self._bootstrap_ttl_seconds
+                )
+                self._bootstrap_used = False
+                self._bootstrap_revoked = False
 
     def verify_adk_confirmation(
         self,

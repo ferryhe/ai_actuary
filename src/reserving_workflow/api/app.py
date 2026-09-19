@@ -2779,6 +2779,9 @@ def _record_run_failure(
     if registry_path is None:
         return
     case_id = operator_params.get("case_id")
+    # Every HTTP path injects a run id; the fallback only keeps the event
+    # addressable when a caller omits it. Deriving the artifact root is pure
+    # path arithmetic, so a synthesized id never touches the filesystem.
     run_id = operator_params.get("run_id") or _generate_api_run_id(str(case_id or "case"))
     default_failure_dir = f"./tmp/api-artifacts/{execution_mode}-failed"
     artifact_dir = operator_params.get("artifact_dir") or default_failure_dir
@@ -2793,7 +2796,13 @@ def _record_run_failure(
         # `_default_artifact_dir` already ends with the run id, so resolve the
         # run directory through the shared helper: it is idempotent and keeps
         # the registered root equal to the one the model-tool runner writes.
-        artifact_root = resolve_run_artifact_root(artifact_dir, run_id)
+        # The helper is pure path arithmetic (no mkdir, no I/O); if the path is
+        # unusable, keep the unresolved root and still record the failure —
+        # losing the event would defeat the handler's only purpose.
+        try:
+            artifact_root = resolve_run_artifact_root(artifact_dir, run_id)
+        except (OSError, ValueError):
+            pass
     execution_label = execution_mode.capitalize()
     run_registry.record_run_event(
         registry_path=registry_path,

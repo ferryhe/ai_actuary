@@ -210,8 +210,11 @@ or launcher output.
 
 The handoff flow stays available for the lifetime of the process, so an expired
 Operator session can be renewed without restarting the workbench. Only the
-direct token exchange (`/auth/operator/exchange`) is single-use, and rotating
-the bootstrap still clears sessions and pending handoffs.
+direct token exchange (`/auth/operator/bootstrap`) is single-use. Rotating the
+operator-console credential closes the whole bootstrap channel — direct exchange
+and handoff minting alike — for the rest of the process; rotate with a new
+bootstrap token to re-arm it, otherwise restart the workbench. That revocation
+lives in memory only, so it does not replace changing the token at rest.
 
 The Developer Web header is labeled `AI Actuary Developer (DEV)` and displays
 the Operator Console return path using the actual configured API port.
