@@ -28,6 +28,8 @@
     .status { min-height: 18px; margin: 8px 0 16px; color: var(--muted); font-size: 13px; }
     .status.error { color: var(--danger); }
     .status.ok { color: var(--ok); }
+    .status.warning { color: #b54708; }
+    .degraded-item { border: 1px solid #fedf89; background: #fffaeb; border-radius: 9px; padding: 10px; margin-top: 8px; color: #b54708; font-size: 13px; }
     pre, .panel-body { white-space: pre-wrap; word-break: break-word; background: #f8fafc; border-radius: 8px; padding: 12px; max-height: 360px; overflow: auto; }
     .timeline-list { margin: 0; padding: 0; list-style: none; }
     .timeline-list li { padding: 8px 0; border-bottom: 1px solid var(--border); }
@@ -121,6 +123,7 @@
         <label>workspace_id<input name="workspace_id" value="default-workspace"></label>
         <label>created_by<input name="created_by" placeholder="defaults to operator_id"></label>
         <label>review_threshold_origin_count<input id="review-threshold-input" name="review_threshold_origin_count" type="number" min="0" step="1" placeholder="optional"></label>
+        <label>review_thresholds (JSON, non-chainladder tools)<input id="review-thresholds-json-input" name="review_thresholds" placeholder='{"max_ae_ratio": 5}'></label>
         <label><input name="background" type="checkbox" checked> background</label>
         <button id="create-run-button" class="primary" type="submit">Create run</button>
       </form>
@@ -139,13 +142,14 @@
         </label>
         <button type="submit">Apply filters</button>
       </form>
+      <div id="console-degraded" class="status warning" role="status" hidden></div>
       <h2>Run Queue</h2>
       <div id="run-queue" class="empty">Loading runs…</div>
       <h2>Review Inbox</h2>
       <div id="review-inbox" class="empty">Loading reviews…</div>
     </section>
     <div class="workspace">
-      <section aria-label="Experience Study Results" class="result-section"><h2>Experience Study Results</h2><div id="result-panel" class="result-panel">Loading…</div></section>
+      <section aria-label="Run Results" class="result-section"><h2 id="result-panel-title">Run Results</h2><div id="result-panel" class="result-panel">Loading…</div></section>
       <section aria-label="Timeline"><h2>Timeline</h2><div id="timeline" class="panel-body">Loading…</div></section>
       <section aria-label="Artifact Evidence Panel"><h2>Artifact Evidence Panel</h2><div id="artifact-panel" class="panel-body">Loading…</div></section>
       <section aria-label="Review Panel" class="review-section">
@@ -200,6 +204,31 @@
       document.getElementById("review-panel").textContent = message;
       document.getElementById("review-inbox").textContent = message;
       document.getElementById("action-panel").textContent = message;
+      resetReviewDecisionForm();
+      renderDegraded([]);
+    }
+
+    function resetReviewDecisionForm() {
+      document.getElementById("review-id-input").value = "";
+      document.getElementById("submit-review-decision").disabled = true;
+      const chip = document.getElementById("review-decision-status");
+      chip.className = "review-status-chip";
+      chip.textContent = "Pending review";
+    }
+
+    function renderDegraded(entries) {
+      const banner = document.getElementById("console-degraded");
+      if (!entries || entries.length === 0) {
+        banner.hidden = true;
+        banner.textContent = "";
+        banner.removeAttribute("title");
+        return;
+      }
+      banner.hidden = false;
+      banner.textContent = `${entries.length} review record(s) are unreadable. The rest of the console is unaffected.`;
+      banner.title = entries
+        .map((item) => `${item.run_id || "unknown run"} [${item.review_id || "unknown review"}]: ${(item.error && item.error.code) || "unknown_error"}`)
+        .join("\n");
     }
 
     function getConsoleFilters() {
@@ -382,6 +411,14 @@
       }
       inbox.className = "";
       for (const review of reviews) {
+        if (review.error) {
+          const broken = document.createElement("div");
+          broken.className = "degraded-item";
+          broken.textContent = `${review.case_id || "unknown case"} - review unavailable (${review.error.code || "unknown_error"})`;
+          broken.title = review.error.message || "";
+          inbox.appendChild(broken);
+          continue;
+        }
         const link = document.createElement("a");
         link.className = "run-card review-link";
         link.href = reviewDetailsUrl(review);
@@ -395,12 +432,15 @@
       const selector = document.getElementById("tool-selector");
       const sampleInput = document.getElementById("sample-name-input");
       const thresholdInput = document.getElementById("review-threshold-input");
+      const thresholdsJsonInput = document.getElementById("review-thresholds-json-input");
       const backgroundInput = document.querySelector('input[name="background"]');
       const tool = toolCatalogById.get(selector.value);
       const defaults = tool && tool.console_defaults ? tool.console_defaults : {};
       sampleInput.value = defaults.sample_name || (selector.value === "chainladder" ? "RAA" : "");
       thresholdInput.disabled = selector.value !== "chainladder";
       if (thresholdInput.disabled) thresholdInput.value = "";
+      thresholdsJsonInput.disabled = selector.value === "chainladder";
+      if (thresholdsJsonInput.disabled) thresholdsJsonInput.value = "";
       if (typeof defaults.background === "boolean") {
         backgroundInput.checked = defaults.background;
       }
@@ -580,6 +620,12 @@
       const container = document.getElementById("review-panel");
       container.innerHTML = "";
       const packet = panel && panel.packet && typeof panel.packet === "object" ? panel.packet : {};
+      if (panel && panel.error) {
+        container.textContent = `Review record unavailable (${panel.error.code || "unknown_error"}): ${panel.error.message || "no detail provided"}`;
+        container.className = "review-panel empty";
+        resetReviewDecisionForm();
+        return;
+      }
       if (!panel || panel.status === "not_available" || panel.status === "not_required") {
         container.textContent = "The selected run does not require human review.";
         container.className = "review-panel empty";
@@ -643,6 +689,7 @@
           "decision_note", "decision_options", "deterministic_outputs", "deterministic_result",
           "draft_narrative", "failed_checks", "narrative_draft", "recommendation", "review_checklist",
           "review_reasons", "run_id", "status", "workspace_id", "ai_suggestion", "ai_recommendation",
+          "ai_review", "packet_paths",
         ]);
         const extraPacket = Object.fromEntries(Object.entries(packet).filter(([key]) => !consumedKeys.has(key)));
         if (Object.keys(extraPacket).length) {
@@ -692,18 +739,28 @@
       }
     }
 
-    function appendSummaryCell(container, label, value) {
+    function appendSummaryCell(container, label, value, rawHint) {
       const cell = document.createElement("div");
       const title = document.createElement("strong");
       title.textContent = label;
       const content = document.createElement("span");
       content.textContent = value;
+      if (rawHint !== undefined && rawHint !== null && rawHint !== "") {
+        content.title = String(rawHint);
+      }
       cell.append(title, content);
       container.appendChild(cell);
     }
 
     function projectionText(value) {
       return value === null || value === undefined || value === "" ? "unavailable" : String(value);
+    }
+
+    function formatResultValue(value) {
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+      }
+      return projectionText(value);
     }
 
     function formatResultGroup(groupValues) {
@@ -716,14 +773,19 @@
 
     function renderResultPanel(panel) {
       const container = document.getElementById("result-panel");
+      const titleEl = document.getElementById("result-panel-title");
       container.innerHTML = "";
+      const panelTitle = panel && typeof panel.panel_title === "string" && panel.panel_title
+        ? panel.panel_title
+        : "Run Results";
+      titleEl.textContent = panelTitle;
       if (!panel || panel.status === "no_run_selected") {
         container.textContent = "Select a run to inspect projected results.";
         container.className = "result-panel empty";
         return;
       }
       if (panel.status === "not_available") {
-        container.textContent = "Experience Study results are not applicable to this run.";
+        container.textContent = `${panelTitle} results are not applicable to this run.`;
         container.className = "result-panel empty";
         return;
       }
@@ -743,10 +805,22 @@
 
       const summary = document.createElement("div");
       summary.className = "result-summary";
-      appendSummaryCell(summary, "Model", projectionText(panel.model));
-      appendSummaryCell(summary, "Population", projectionText(panel.population_id));
-      appendSummaryCell(summary, "Period", projectionText(panel.period));
-      appendSummaryCell(summary, "Result count", projectionText(panel.result_count));
+      const summaryRows = Array.isArray(panel.summary) ? panel.summary : [];
+      if (summaryRows.length) {
+        for (const row of summaryRows) {
+          appendSummaryCell(
+            summary,
+            projectionText(row.label),
+            formatResultValue(row.value),
+            typeof row.value === "number" ? String(row.value) : undefined,
+          );
+        }
+      } else {
+        appendSummaryCell(summary, "Model", projectionText(panel.model));
+        appendSummaryCell(summary, "Population", projectionText(panel.population_id));
+        appendSummaryCell(summary, "Period", projectionText(panel.period));
+        appendSummaryCell(summary, "Result count", projectionText(panel.result_count));
+      }
       container.appendChild(summary);
 
       const narrativeHeading = document.createElement("h3");
@@ -769,10 +843,12 @@
 
       const results = Array.isArray(panel.results) ? panel.results : [];
       if (!results.length) {
-        const empty = document.createElement("div");
-        empty.className = "empty";
-        empty.textContent = "No projected results are available.";
-        container.appendChild(empty);
+        if (!summaryRows.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "No projected results are available.";
+          container.appendChild(empty);
+        }
         return;
       }
       const tableWrap = document.createElement("div");
@@ -879,10 +955,10 @@
         warning.className = "empty";
         warning.textContent = "Run artifact root exists, but run_manifest.json is missing. Known evidence refs are still shown below.";
         container.appendChild(warning);
-      } else if (panel.status === "manifest_unreadable") {
+      } else if (panel.error) {
         const warning = document.createElement("div");
         warning.className = "status error";
-        warning.textContent = panel.error && panel.error.message ? panel.error.message : "Run manifest could not be read safely.";
+        warning.textContent = `${panel.error.code || "manifest_unreadable"}: ${panel.error.message || "Run manifest could not be read safely."}`;
         container.appendChild(warning);
       }
 
@@ -933,6 +1009,7 @@
         selectedRunId = state.selected_run_id;
         setFilterOptions("operator-filter", state.filters && state.filters.available_operator_ids, state.filters && state.filters.operator_id);
         setFilterOptions("workspace-filter", state.filters && state.filters.available_workspace_ids, state.filters && state.filters.workspace_id);
+        renderDegraded(state.degraded && state.degraded.active ? state.degraded.review_entries : []);
         renderRunQueue(state);
         renderReviewInbox(state.review_inbox || []);
         renderTimeline(state.timeline || []);
@@ -975,6 +1052,21 @@
           return;
         }
         payload.inputs.review_threshold_origin_count = thresholdNumber;
+      }
+      const thresholdsJsonValue = String(formData.get("review_thresholds") || "").trim();
+      if (toolId !== "chainladder" && thresholdsJsonValue) {
+        let parsedThresholds = null;
+        try {
+          parsedThresholds = JSON.parse(thresholdsJsonValue);
+        } catch (error) {
+          setOperationStatus('review_thresholds must be valid JSON, e.g. {"max_ae_ratio": 5}.', "error");
+          return;
+        }
+        if (!parsedThresholds || typeof parsedThresholds !== "object" || Array.isArray(parsedThresholds)) {
+          setOperationStatus("review_thresholds must be a JSON object of metric -> number.", "error");
+          return;
+        }
+        payload.review_thresholds = parsedThresholds;
       }
       setOperationStatus("Creating governed run…");
       try {

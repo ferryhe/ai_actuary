@@ -1,11 +1,8 @@
 """FastAPI control plane for operator-facing AI Actuary runs.
-
 This module intentionally wraps the existing operator/artifact/registry
 boundaries instead of introducing a second runtime implementation.
 """
-
 from __future__ import annotations
-
 import math
 import hashlib
 import os
@@ -16,13 +13,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal
 from urllib.parse import urlsplit
-
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, ValidationError
-
 from reserving_workflow import operator_entrypoint
 from reserving_workflow.api.capabilities import (
     CapabilityAuthority,
@@ -71,6 +66,7 @@ from reserving_workflow.interfaces.operator_console import (
 from reserving_workflow.model_tools import (
     MINIMAX_EXPERIENCE_STUDY_TOOL_ID,
     ExperienceStudyToolInput,
+    resolve_run_artifact_root,
     run_minimax_experience_study,
 )
 from reserving_workflow.review import (
@@ -122,12 +118,19 @@ from reserving_workflow.validation import (
     validate_chainladder_case,
 )
 from reserving_workflow.workflows import build_builtin_workflow_catalog
-
 DEFAULT_OPERATOR_ID = "local-actuary"
 DEFAULT_WORKSPACE_ID = "default-workspace"
 MODEL_COMPARISON_TOOL_RUNNERS = {
     MINIMAX_EXPERIENCE_STUDY_TOOL_ID: run_minimax_experience_study,
 }
+CHAINLADDER_TOOL_ID = "chainladder"
+RESULT_PANEL_TITLES = {
+    MINIMAX_EXPERIENCE_STUDY_TOOL_ID: "Experience Study Results",
+    CHAINLADDER_TOOL_ID: "Chainladder Results",
+}
+DEFAULT_RESULT_PANEL_TITLE = "Run Results"
+SUPPORTED_RESULT_PANEL_TOOL_IDS = frozenset(RESULT_PANEL_TITLES)
+RESULT_ARTIFACT_NOT_REGISTERED_CODE = "artifact_not_registered"
 MAX_RESULT_ARTIFACT_BYTES = 1_000_000
 MAX_PROJECTED_RESULTS = 1_000
 UNAVAILABLE = "unavailable"
@@ -144,7 +147,6 @@ ADK_STEP_JSON_ARTIFACTS = (
 
 class ApiSettings(BaseModel):
     """Runtime settings for the local FastAPI control plane."""
-
     registry_path: str | Path = Field(default="./tmp/run-registry.json")
     artifact_root: str | Path = Field(default="./tmp/api-artifacts")
     review_delivery_dir: str | Path | None = None
@@ -157,8 +159,8 @@ class ApiSettings(BaseModel):
     operator_origin: str = "http://127.0.0.1:8000"
     adk_url: str = DEFAULT_ADK_DEVELOPER_WEB_URL
     capability_enforcement: bool | None = None
-    operator_session_ttl_seconds: float = Field(default=900.0, gt=0, le=3600.0)
-    operator_bootstrap_ttl_seconds: float = Field(default=60.0, gt=0, le=300.0)
+    operator_session_ttl_seconds: float = Field(default=900.0, gt=0, le=18000.0)
+    operator_bootstrap_ttl_seconds: float = Field(default=300.0, gt=0, le=3600.0)
     adk_benchmark_input_byte_limit: int = Field(default=65_536, gt=0)
     adk_benchmark_total_byte_limit: int = Field(default=1_000_000, gt=0)
     adk_benchmark_output_byte_limit: int = Field(default=100_000, gt=0)
@@ -181,6 +183,7 @@ class RunCreateRequest(BaseModel):
     sample_name: str | None = None
     method: str | None = None
     review_threshold_origin_count: int | None = None
+    review_thresholds: dict[str, float] | None = None
     user_prompt: str | None = None
     review_delivery_dir: str | Path | None = None
     background: bool = False
@@ -235,7 +238,6 @@ class BrowserSmokeCredentialRotationRequest(BaseModel):
 
 class AdkOperationWaitRequest(BaseModel):
     model_config = {"extra": "forbid"}
-
     timeout_seconds: float = Field(default=1.0, ge=0, le=30)
 
 
@@ -251,11 +253,9 @@ def _create_app(
     workflow_catalog=None,
 ) -> FastAPI:
     """Create the FastAPI control plane app.
-
     Test and future runtime callers can inject runner/task-contract modules so
     the API layer remains a transport wrapper over the existing operator core.
     """
-
     resolved_settings = settings or ApiSettings()
     resolved_replay_module = replay_module or replay_helpers
     resolved_batch_runner_module = batch_runner_module
@@ -289,6 +289,26 @@ def _create_app(
         ),
         purpose="ADK Developer Web URL",
     )
+    operator_bootstrap_ttl_seconds = (
+        resolved_settings.operator_bootstrap_ttl_seconds
+        if settings is not None
+        else _env_float(
+            "AI_ACTUARY_OPERATOR_BOOTSTRAP_TTL",
+            resolved_settings.operator_bootstrap_ttl_seconds,
+            gt=0,
+            le=3600,
+        )
+    )
+    operator_session_ttl_seconds = (
+        resolved_settings.operator_session_ttl_seconds
+        if settings is not None
+        else _env_float(
+            "AI_ACTUARY_OPERATOR_SESSION_TTL",
+            resolved_settings.operator_session_ttl_seconds,
+            gt=0,
+            le=18000,
+        )
+    )
     supplied_secret_count = sum(
         value is not None for value in (operator_credential, adk_credential, bootstrap_token)
     )
@@ -301,8 +321,8 @@ def _create_app(
         operator_credential=str(operator_credential),
         adk_credential=str(adk_credential),
         operator_bootstrap_token=str(bootstrap_token),
-        session_ttl_seconds=resolved_settings.operator_session_ttl_seconds,
-        bootstrap_ttl_seconds=resolved_settings.operator_bootstrap_ttl_seconds,
+        session_ttl_seconds=operator_session_ttl_seconds,
+        bootstrap_ttl_seconds=operator_bootstrap_ttl_seconds,
     )
     app = FastAPI(
         title="AI Actuary Control Plane",
@@ -323,7 +343,6 @@ def _create_app(
     )
     if enforcement_enabled:
         run_registry.mark_incomplete_adk_runs_stale(resolved_settings.registry_path)
-
     @app.middleware("http")
     async def _capability_middleware(request: Request, call_next):
         request.state.principal = None
@@ -336,7 +355,6 @@ def _create_app(
             return await call_next(request)
         if not enforcement_enabled:
             return await call_next(request)
-
         expected_origin = operator_origin.rstrip("/")
         expected_host = urlsplit(expected_origin).netloc
         is_mutation = request.method.upper() not in {"GET", "HEAD"}
@@ -346,7 +364,6 @@ def _create_app(
             if is_mutation and request.headers.get("origin") != expected_origin:
                 return _safe_auth_error(403, "request_context_forbidden", "Request context is not allowed.")
             return await call_next(request)
-
         assert authority is not None
         principal = authority.authenticate_bearer(request.headers.get("authorization"))
         if principal is None:
@@ -370,7 +387,6 @@ def _create_app(
                 return _safe_auth_error(403, "csrf_forbidden", "CSRF validation failed.")
         request.state.principal = principal
         return await call_next(request)
-
     @app.exception_handler(ReviewIdentityMismatchError)
     async def _review_identity_mismatch_handler(
         _request: Request,
@@ -380,7 +396,6 @@ def _create_app(
             status_code=409,
             content={"detail": {"code": exc.code, "message": exc.message}},
         )
-
     @app.exception_handler(ArtifactProjectionReadError)
     async def _artifact_read_error_handler(
         _request: Request,
@@ -390,7 +405,6 @@ def _create_app(
             status_code=exc.status_code,
             content={"detail": {"code": exc.code, "message": exc.message}},
         )
-
     @app.exception_handler(ReviewRecordReadError)
     async def _review_record_read_error_handler(
         _request: Request,
@@ -400,13 +414,11 @@ def _create_app(
             status_code=400,
             content={"detail": {"code": exc.code, "message": exc.message}},
         )
-
     def _get_review_store() -> LocalReviewStore:
         try:
             return LocalReviewStore(resolved_settings.review_store_dir)
         except OSError as exc:  # pragma: no cover - exercised through API surface
             raise HTTPException(status_code=503, detail="Review store unavailable.") from exc
-
     def _get_scoped_entry(request: Request, run_id: str) -> dict[str, Any]:
         try:
             entry, authoritative_adk = run_registry.get_run_scope_record(
@@ -450,7 +462,6 @@ def _create_app(
                 ) from exc
             raise
         return entry
-
     def _audit_adk_registry() -> set[str]:
         try:
             return run_registry.audit_adk_registry(resolved_settings.registry_path)
@@ -459,7 +470,6 @@ def _create_app(
                 status_code=409,
                 detail={"code": exc.code, "message": "ADK registry integrity is invalid."},
             ) from exc
-
     def _validate_adk_entry_provenance(
         entry: dict[str, Any], *, authoritative_adk: bool
     ) -> None:
@@ -487,21 +497,17 @@ def _create_app(
                     status_code=409,
                     detail={"code": "adk_provenance_invalid", "message": "Run provenance is invalid."},
                 ) from exc
-
     def _trusted_list_scope(request: Request) -> tuple[str | None, str | None, str | None]:
         principal = getattr(request.state, "principal", None)
         if not isinstance(principal, Principal):
             return None, None, None
         return principal.operator_id, principal.workspace_id, principal.source
-
     @app.get("/", include_in_schema=False)
     async def operator_console_root() -> RedirectResponse:
         return RedirectResponse(url="/console", status_code=307)
-
     @app.get("/health")
     async def health() -> dict[str, Any]:
         return {"ok": True, "service": "ai-actuary-control-plane"}
-
     @app.get("/health/preflight")
     async def health_preflight() -> dict[str, Any]:
         return build_preflight_report(
@@ -516,14 +522,12 @@ def _create_app(
             default_operator_id=DEFAULT_OPERATOR_ID,
             default_workspace_id=DEFAULT_WORKSPACE_ID,
         )
-
     @app.get("/console", response_class=HTMLResponse)
     async def operator_console() -> HTMLResponse:
         console_html = render_operator_console_html(adk_url=adk_developer_url)
         if authority is not None:
             console_html = _inject_console_csrf_transport(console_html)
         return HTMLResponse(console_html)
-
     @app.post("/auth/operator/bootstrap")
     async def operator_bootstrap(request: OperatorBootstrapRequest) -> JSONResponse:
         if authority is None:
@@ -548,7 +552,6 @@ def _create_app(
             max_age=max_age,
         )
         return response
-
     @app.post("/auth/operator/handoff/request")
     async def operator_handoff_request(
         request: OperatorHandoffCreateRequest,
@@ -568,7 +571,6 @@ def _create_app(
             "handoff_id": handoff_id,
             "expires_in": expires_in,
         }
-
     @app.post("/auth/operator/handoff/approve")
     async def operator_handoff_approve(
         request: OperatorHandoffApproveRequest,
@@ -585,7 +587,6 @@ def _create_app(
                 detail={"code": "bootstrap_invalid", "message": "Bootstrap was not accepted."},
             ) from exc
         return {"ok": True}
-
     @app.post("/auth/operator/handoff/claim")
     async def operator_handoff_claim(
         request: OperatorHandoffClaimRequest,
@@ -612,7 +613,6 @@ def _create_app(
             max_age=max_age,
         )
         return response
-
     @app.post("/adk/browser-smoke/rotate-credential")
     async def browser_smoke_rotate_adk_credential(
         request: BrowserSmokeCredentialRotationRequest,
@@ -621,7 +621,6 @@ def _create_app(
             raise HTTPException(status_code=404, detail="Not found.")
         authority.rotate("adk-developer", request.new_credential)
         return {"ok": True, "rotated": "adk-developer"}
-
     @app.exception_handler(RequestValidationError)
     async def _request_validation_handler(
         request: Request,
@@ -679,36 +678,32 @@ def _create_app(
                 review_store_root=resolved_settings.review_store_dir,
                 filters=current_identity,
             )
-
     @app.get("/tools")
     async def list_tools() -> dict[str, Any]:
         tools = resolved_tool_registry.list_tool_summaries()
         return {"tool_count": len(tools), "tools": tools}
-
     @app.get("/tools/{tool_id}")
     async def get_tool(tool_id: str) -> dict[str, Any]:
         try:
             return resolved_tool_registry.get_tool(tool_id).model_dump()
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-
     @app.get("/workflows")
     async def list_workflows() -> dict[str, Any]:
         workflows = resolved_workflow_catalog.list_workflow_summaries()
         return {"workflow_count": len(workflows), "workflows": workflows}
-
     @app.get("/workflows/{workflow_id}")
     async def get_workflow(workflow_id: str) -> dict[str, Any]:
         try:
             return resolved_workflow_catalog.get_workflow(workflow_id).to_contract().model_dump()
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-
     @app.post("/runs")
     def create_run(request: RunCreateRequest, background_tasks: BackgroundTasks, http_request: Request) -> Any:
         try:
             _safe_artifact_component(request.case_id, field_name="case_id")
-            artifact_dir = request.artifact_dir or _default_artifact_dir(resolved_settings, request.case_id)
+            run_id = _generate_api_run_id(request.case_id)
+            artifact_dir = request.artifact_dir or _default_artifact_dir(resolved_settings, request.case_id, run_id)
             workflow_entry = None
             validated_tool_input = None
             ownership = _resolve_request_ownership(request, http_request)
@@ -740,9 +735,8 @@ def _create_app(
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             except ValidationError as exc:
                 raise HTTPException(status_code=400, detail=exc.errors()) from exc
+            operator_params["run_id"] = run_id
             if request.background:
-                run_id = _generate_api_run_id(request.case_id)
-                operator_params["run_id"] = run_id
                 accepted_payload = _record_background_acceptance(
                     request,
                     validated_tool_input=None,
@@ -767,7 +761,6 @@ def _create_app(
                 registry_path=resolved_settings.registry_path,
                 ownership=ownership,
             )
-            run_id = _generate_api_run_id(request.case_id)
             model_tool_params["run_id"] = run_id
             if request.background:
                 accepted_payload = _record_background_acceptance(
@@ -799,9 +792,8 @@ def _create_app(
             runner_module=resolved_runner_module,
             task_contracts_module=task_contracts_module,
         )
+        operator_params["run_id"] = run_id
         if request.background:
-            run_id = _generate_api_run_id(request.case_id)
-            operator_params["run_id"] = run_id
             accepted_payload = _record_background_acceptance(
                 request,
                 validated_tool_input=validated_tool_input,
@@ -816,7 +808,6 @@ def _create_app(
             scheduler(_run_operator_flow_background, operator_params)
             return JSONResponse(status_code=202, content=accepted_payload)
         return JSONResponse(content=operator_entrypoint.run_operator_flow(**operator_params))
-
     @app.get("/runs")
     async def list_runs(request: Request, operator_id: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
         authoritative_adk_runs = _audit_adk_registry()
@@ -860,7 +851,6 @@ def _create_app(
             "run_count": len(runs),
             "runs": summaries,
         }
-
     @app.get("/runs/{run_id}")
     async def get_run_detail(run_id: str, request: Request) -> dict[str, Any]:
         entry = _get_scoped_entry(request, run_id)
@@ -871,22 +861,21 @@ def _create_app(
             with TrustedArtifactRoot(artifact_root, namespace="manifest") as trusted_root:
                 return _run_detail_payload(entry, trusted_root=trusted_root)
         return _run_detail_payload(entry)
-
     @app.get("/runs/{run_id}/events")
     async def get_run_events(run_id: str, request: Request) -> dict[str, Any]:
         entry = _get_scoped_entry(request, run_id)
         events = [_event_from_history(run_id, item) for item in entry.get("status_history", [])]
         return {"run_id": run_id, "event_count": len(events), "events": events}
-
     @app.post("/runs/{run_id}/rerun")
     def rerun(run_id: str, request: RerunRequest, http_request: Request) -> dict[str, Any]:
         entry = _get_scoped_entry(http_request, run_id)
+        rerun_id = _generate_api_run_id(str(entry.get("case_id") or "case"))
         operator_params = dict(entry.get("operator_params", {}) or {})
         if operator_params.get("workflow_id"):
-            operator_params["artifact_dir"] = str(request.artifact_dir or entry.get("artifact_root") or _default_artifact_dir(resolved_settings, str(entry.get("case_id") or "case")))
+            operator_params["artifact_dir"] = str(request.artifact_dir or _default_artifact_dir(resolved_settings, str(entry.get("case_id") or "case"), rerun_id))
             operator_params["review_delivery_dir"] = request.review_delivery_dir or resolved_settings.review_delivery_dir
             operator_params["registry_path"] = resolved_settings.registry_path
-            operator_params["run_id"] = _generate_api_run_id(str(entry.get("case_id") or "case"))
+            operator_params["run_id"] = rerun_id
             if resolved_runner_module is not None:
                 operator_params["runner_module"] = resolved_runner_module
             if task_contracts_module is not None:
@@ -897,7 +886,6 @@ def _create_app(
             return JSONResponse(content=result)
         model_tool_id = operator_params.get("tool_id")
         if model_tool_id in MODEL_COMPARISON_TOOL_RUNNERS:
-            rerun_id = _generate_api_run_id(str(entry.get("case_id") or "case"))
             result = _run_registered_model_tool(
                 {
                     "case_id": str(entry.get("case_id") or "case"),
@@ -905,7 +893,7 @@ def _create_app(
                     "artifact_dir": str(
                         request.artifact_dir
                         or _default_artifact_dir(
-                            resolved_settings, str(entry.get("case_id") or "case")
+                            resolved_settings, str(entry.get("case_id") or "case"), rerun_id
                         )
                     ),
                     "registry_path": resolved_settings.registry_path,
@@ -924,15 +912,16 @@ def _create_app(
                 content=operator_entrypoint.rerun_from_registry(
                     run_id,
                     registry_path=resolved_settings.registry_path,
-                    artifact_dir=request.artifact_dir,
+                    artifact_dir=request.artifact_dir
+                    or _default_artifact_dir(resolved_settings, str(entry.get("case_id") or "case"), rerun_id),
                     review_delivery_dir=request.review_delivery_dir or resolved_settings.review_delivery_dir,
+                    new_run_id=rerun_id,
                     runner_module=resolved_runner_module,
                     task_contracts_module=task_contracts_module,
                 )
             )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-
     @app.get("/runs/{run_id}/artifacts")
     async def get_artifacts(run_id: str, request: Request) -> dict[str, Any]:
         entry = _get_scoped_entry(request, run_id)
@@ -944,7 +933,6 @@ def _create_app(
                 return _path_free_artifact_payload(payload) if isinstance(principal, Principal) and principal.source == ADK_SOURCE else payload
         payload = _run_artifact_metadata_payload(entry)
         return _path_free_artifact_payload(payload) if getattr(request.state, "principal", None) is not None and request.state.principal.source == ADK_SOURCE else payload
-
     @app.get("/runs/{run_id}/artifacts/{artifact_id}/projection")
     async def get_artifact_projection(run_id: str, artifact_id: str, request: Request) -> dict[str, Any]:
         if artifact_id not in ARTIFACT_PROJECTION_SPECS:
@@ -971,12 +959,10 @@ def _create_app(
                 status_code=exc.status_code,
                 detail={"code": exc.code, "message": exc.message},
             ) from exc
-
     @app.get("/runs/{run_id}/results")
     async def get_results(run_id: str, request: Request) -> dict[str, Any]:
         entry = _get_scoped_entry(request, run_id)
         return _result_panel_projection(entry)
-
     @app.get("/runs/{run_id}/review-packet")
     async def get_review_packet(run_id: str, request: Request) -> dict[str, Any]:
         entry = _get_scoped_entry(request, run_id)
@@ -994,7 +980,6 @@ def _create_app(
                 else None
             ),
         }
-
     @app.get("/runs/{run_id}/review")
     async def get_run_review(run_id: str, request: Request) -> dict[str, Any]:
         entry = _get_scoped_entry(request, run_id)
@@ -1022,7 +1007,6 @@ def _create_app(
         if isinstance(principal, Principal) and principal.source == ADK_SOURCE:
             review = project_review(Review.model_validate(review))
         return {"review": review}
-
     @app.post("/runs/{run_id}/report-export")
     async def create_run_report_export(run_id: str, request: Request) -> dict[str, Any]:
         _get_scoped_entry(request, run_id)
@@ -1035,7 +1019,6 @@ def _create_app(
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"report": report}
-
     @app.get("/reviews")
     async def list_reviews(request: Request, operator_id: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
         authoritative_adk_runs = _audit_adk_registry()
@@ -1078,8 +1061,14 @@ def _create_app(
                 if filters_are_in_scope
                 else []
             )
-        return {"review_count": len(reviews), "reviews": reviews}
-
+        return {
+            "review_count": len(reviews),
+            "reviews": reviews,
+            "degraded": {
+                "active": bool(_degraded_review_entries(reviews)),
+                "review_entries": _degraded_review_entries(reviews),
+            },
+        }
     @app.get("/reviews/{review_id}")
     async def get_review(review_id: str, request: Request) -> dict[str, Any]:
         run_id = _run_id_from_review_id(review_id)
@@ -1115,7 +1104,6 @@ def _create_app(
         if isinstance(principal, Principal) and principal.source == ADK_SOURCE:
             review = project_review(Review.model_validate(review))
         return {"review": review}
-
     @app.post("/reviews/{review_id}/decision")
     async def submit_review_decision(review_id: str, request: ReviewDecisionRequest, http_request: Request) -> dict[str, Any]:
         run_id = _run_id_from_review_id(review_id)
@@ -1136,7 +1124,6 @@ def _create_app(
             )
         except ValidationError as exc:
             raise HTTPException(status_code=400, detail=exc.errors()) from exc
-
         try:
             review_store = _get_review_store()
             review_record = review_store.get_review(review_id)
@@ -1176,7 +1163,6 @@ def _create_app(
             decision_artifacts=_decision_artifacts_for_run(run_entry),
         )
         return {"review": review, "decision": decision_record, "run_status": run_entry.get("status")}
-
     @app.post("/adk/runs")
     def start_adk_workflow_run(
         request: AdkStartRequest,
@@ -1275,7 +1261,6 @@ def _create_app(
                 status_code=400,
                 detail={"code": "adk_start_invalid", "message": "ADK start request is invalid."},
             ) from exc
-
         if created:
             operator_params["run_id"] = str(entry["run_id"])
             operator_params["provenance"] = provenance
@@ -1302,7 +1287,6 @@ def _create_app(
                 "idempotent_replay": not created,
             },
         )
-
     def _verify_adk_debug_confirmation(
         *,
         action: str,
@@ -1339,7 +1323,6 @@ def _create_app(
                 detail={"code": "confirmation_invalid", "message": "Confirmation binding is invalid."},
             )
         return idempotency_key, fingerprint, str(confirmation)
-
     @app.post("/adk/runs/{run_id}/rerun")
     def rerun_adk_run(
         run_id: str,
@@ -1478,7 +1461,6 @@ def _create_app(
                 status_code=400,
                 detail={"code": "adk_rerun_invalid", "message": "ADK rerun request is invalid."},
             ) from exc
-
         if created:
             operator_params["run_id"] = str(entry["run_id"])
             operator_params["provenance"] = provenance
@@ -1493,7 +1475,6 @@ def _create_app(
                 scheduler(_run_workflow_background, operator_params)
             except Exception as exc:
                 _record_run_failure(operator_params, exc, execution_mode="background")
-
         entry_provenance = entry.get("provenance") or {}
         return JSONResponse(
             status_code=202,
@@ -1509,7 +1490,6 @@ def _create_app(
                 "idempotent_replay": not created,
             },
         )
-
     @app.post("/adk/runs/{run_id}/replay")
     async def replay_adk_run(
         run_id: str,
@@ -1519,7 +1499,6 @@ def _create_app(
         del request
         entry = _get_scoped_entry(http_request, run_id)
         return {"replay": _adk_replay_payload(entry)}
-
     @app.post("/adk/repeatability")
     async def compare_adk_repeatability(
         request: AdkRepeatabilityRequest,
@@ -1527,7 +1506,6 @@ def _create_app(
     ) -> dict[str, Any]:
         entries = [_get_scoped_entry(http_request, run_id) for run_id in request.run_ids]
         return {"repeatability": _adk_repeatability_payload(entries)}
-
     @app.post("/adk/runs/{run_id}/report-export")
     async def export_adk_run_report(
         run_id: str,
@@ -1636,7 +1614,6 @@ def _create_app(
             status_code=202,
             content={**stored_result, "idempotent_replay": False},
         )
-
     @app.get("/adk/operations/{operation_id}")
     async def get_adk_debug_operation_status(
         operation_id: str,
@@ -1645,7 +1622,6 @@ def _create_app(
         del http_request
         operation = _get_adk_debug_operation_by_id(operation_id)
         return {"operation": _path_free_adk_operation(operation)}
-
     @app.post("/adk/operations/{operation_id}/wait")
     async def wait_adk_debug_operation(
         operation_id: str,
@@ -1655,7 +1631,6 @@ def _create_app(
         del request, http_request
         operation = _get_adk_debug_operation_by_id(operation_id)
         return {"operation": _path_free_adk_operation(operation)}
-
     def _get_adk_debug_operation_by_id(operation_id: str) -> dict[str, Any]:
         for store_path in (
             Path(app.state.evaluation_state_root) / "operations.json",
@@ -1699,7 +1674,6 @@ def _create_app(
             status_code=404,
             detail={"code": "object_not_found", "message": "Object was not found."},
         )
-
     @app.post("/adk/benchmarks/bounded")
     async def run_adk_bounded_benchmark(
         request: AdkBenchmarkRequest,
@@ -1822,7 +1796,6 @@ def _create_app(
             status_code=202,
             content={**stored_result, "idempotent_replay": False},
         )
-
     @app.exception_handler(run_registry.RegistryIntegrityError)
     async def _registry_integrity_handler(
         _request: Request,
@@ -1837,21 +1810,18 @@ def _create_app(
                 }
             },
         )
-
     @app.post("/replay")
     async def replay_case(request: ReplayRequest) -> dict[str, Any]:
         try:
             return resolved_replay_module.replay_case_from_manifest(request.manifest_path)
         except (FileNotFoundError, ValueError, KeyError, ValidationError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-
     @app.post("/repeatability")
     async def compare_repeatability(request: RepeatabilityRequest) -> dict[str, Any]:
         try:
             return resolved_replay_module.compare_repeatability(request.manifest_paths)
         except (FileNotFoundError, ValueError, KeyError, ValidationError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-
     @app.post("/benchmarks/batch")
     async def run_batch_benchmark(request: BatchBenchmarkRequest) -> dict[str, Any]:
         nonlocal resolved_batch_runner_module
@@ -1859,14 +1829,12 @@ def _create_app(
             resolved_batch_runner_module = _load_batch_runner_module()
         artifact_root = request.artifact_root or (Path(resolved_settings.artifact_root).expanduser().resolve() / "batch")
         return resolved_batch_runner_module.run_batch_benchmark(cases=request.cases, artifact_root=artifact_root)
-
     assert_route_matrix_complete(app)
     return app
 
 
 def create_app(**kwargs: Any) -> FastAPI:
     """Create a deployable fail-closed control-plane application."""
-
     return _create_app(**kwargs)
 
 
@@ -1904,9 +1872,37 @@ def _set_operator_session_cookies(
     )
 
 
+def _env_float(
+    name: str,
+    default: float,
+    *,
+    gt: float,
+    le: float,
+) -> float:
+    """Read a numeric env override with the same bounds as `ApiSettings`.
+
+    The env path must not bypass the constraints declared on `ApiSettings`:
+    an out-of-range or unparseable value is a configuration error naming the
+    variable and the expected range — never a bare traceback, never silently
+    accepted.
+    """
+
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{name} must be a number in ({gt}, {le}]; got {raw!r}"
+        ) from exc
+    if not (gt < value <= le):
+        raise ValueError(f"{name} must be in ({gt}, {le}]; got {value}")
+    return value
+
+
 def _loopback_http_origin(raw_url: str, *, purpose: str) -> str:
     """Return a normalized loopback-only HTTP origin with an explicit port."""
-
     try:
         parsed = urlsplit(raw_url.strip())
         parsed_port = parsed.port
@@ -1940,8 +1936,20 @@ def _inject_console_csrf_transport(html: str) -> str:
         }
         return nativeFetch(url, request);
       };
-      window.addEventListener("DOMContentLoaded", () => {
-        if (document.cookie.includes("ai_actuary_csrf=")) return;
+      const clearStaleSessionCookies = () => {
+        for (const name of ["ai_actuary_csrf", "ai_actuary_operator_session"]) {
+          document.cookie = `${name}=; Max-Age=0; path=/; samesite=strict`;
+        }
+      };
+      window.addEventListener("DOMContentLoaded", async () => {
+        let probe = null;
+        try {
+          probe = await nativeFetch("/console/state", { credentials: "same-origin" });
+        } catch (_probeError) {
+          return;
+        }
+        if (!probe || (probe.status !== 401 && probe.status !== 403)) return;
+        clearStaleSessionCookies();
         const panel = document.createElement("div");
         panel.setAttribute("role", "status");
         panel.style.cssText = "position:fixed;right:1rem;bottom:1rem;z-index:9999;max-width:28rem;padding:1rem;background:#102235;color:#fff;border-radius:.5rem";
@@ -1965,7 +1973,15 @@ def _inject_console_csrf_transport(html: str) -> str:
             body: JSON.stringify({ claim_token: claimToken }),
           });
           if (!requested.ok) {
-            message.textContent = "A launcher handoff is unavailable.";
+            let reason = "A launcher handoff is unavailable.";
+            try {
+              const err = await requested.json();
+              if (err && err.detail && err.detail.code) {
+                reason = err.detail.message || err.detail.code;
+              }
+            } catch (_e) {}
+            message.textContent = reason;
+            button.disabled = false;
             return;
           }
           const handoff = await requested.json();
@@ -2441,7 +2457,6 @@ def _adk_repeatability_payload(entries: list[dict[str, Any]]) -> dict[str, Any]:
                     "message": "Runs are not compatible for repeatability comparison.",
                 },
             )
-
     replays: list[dict[str, Any]] = []
     for entry in entries:
         try:
@@ -2490,8 +2505,17 @@ def _raise_adk_not_replayable() -> None:
     )
 
 
-def _default_artifact_dir(settings: ApiSettings, case_id: str) -> Path:
-    return resolve_artifact_path(settings.artifact_root, _safe_artifact_component(case_id, field_name="case_id"))
+def _default_artifact_dir(settings: ApiSettings, case_id: str, run_id: str | None = None) -> Path:
+    """Resolve a per-run artifact directory.
+
+    Sharing one directory across runs lets a newer run overwrite an older manifest,
+    which surfaces as a run identity mismatch across the whole console.
+    """
+
+    components = [_safe_artifact_component(case_id, field_name="case_id")]
+    if run_id:
+        components.append(_safe_artifact_component(run_id, field_name="run_id"))
+    return resolve_artifact_path(settings.artifact_root, Path(*components))
 
 
 def _operator_params_from_request(
@@ -2534,6 +2558,18 @@ def _operator_params_from_request(
     return params
 
 
+def _review_thresholds_from_request(request: RunCreateRequest) -> dict[str, float] | None:
+    if not request.review_thresholds:
+        return None
+    resolved: dict[str, float] = {}
+    for key, value in request.review_thresholds.items():
+        try:
+            resolved[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return resolved or None
+
+
 def _model_tool_params_from_request(
     request: RunCreateRequest,
     *,
@@ -2548,6 +2584,7 @@ def _model_tool_params_from_request(
         "inputs": dict(validated_tool_input.inputs),
         "artifact_dir": str(artifact_dir),
         "registry_path": str(registry_path),
+        "review_thresholds": _review_thresholds_from_request(request),
         "created_by": ownership["created_by"],
         "operator_id": ownership["operator_id"],
         "workspace_id": ownership["workspace_id"],
@@ -2742,6 +2779,9 @@ def _record_run_failure(
     if registry_path is None:
         return
     case_id = operator_params.get("case_id")
+    # Every HTTP path injects a run id; the fallback only keeps the event
+    # addressable when a caller omits it. Deriving the artifact root is pure
+    # path arithmetic, so a synthesized id never touches the filesystem.
     run_id = operator_params.get("run_id") or _generate_api_run_id(str(case_id or "case"))
     default_failure_dir = f"./tmp/api-artifacts/{execution_mode}-failed"
     artifact_dir = operator_params.get("artifact_dir") or default_failure_dir
@@ -2753,7 +2793,16 @@ def _record_run_failure(
         else Path(artifact_dir).expanduser().resolve()
     )
     if operator_params.get("tool_id") in MODEL_COMPARISON_TOOL_RUNNERS:
-        artifact_root = (artifact_root / str(run_id)).resolve()
+        # `_default_artifact_dir` already ends with the run id, so resolve the
+        # run directory through the shared helper: it is idempotent and keeps
+        # the registered root equal to the one the model-tool runner writes.
+        # The helper is pure path arithmetic (no mkdir, no I/O); if the path is
+        # unusable, keep the unresolved root and still record the failure —
+        # losing the event would defeat the handler's only purpose.
+        try:
+            artifact_root = resolve_run_artifact_root(artifact_dir, run_id)
+        except (OSError, ValueError):
+            pass
     execution_label = execution_mode.capitalize()
     run_registry.record_run_event(
         registry_path=registry_path,
@@ -2898,13 +2947,14 @@ def _normalize_tool_invocation(request: RunCreateRequest, *, tool_registry) -> V
         raise ValueError(
             f"Conflicting tool selectors: tool_id={request.tool_id!r} does not match legacy method={legacy_method!r}"
         )
-
     try:
         tool_registry.get_tool(tool_invocation.tool_id)
     except ValueError as exc:
         raise ValueError(f"Unknown tool_id: {tool_invocation.tool_id}") from exc
-
     merged_inputs = dict(tool_invocation.inputs)
+    inline_thresholds = merged_inputs.pop("review_thresholds", None)
+    if request.review_thresholds is None and isinstance(inline_thresholds, dict):
+        request.review_thresholds = inline_thresholds
     if request.sample_name is not None and "sample_name" not in merged_inputs:
         merged_inputs["sample_name"] = request.sample_name
     if request.review_threshold_origin_count is not None and "review_threshold_origin_count" not in merged_inputs:
@@ -2916,7 +2966,6 @@ def _normalize_tool_invocation(request: RunCreateRequest, *, tool_registry) -> V
         and "method" not in merged_inputs
     ):
         merged_inputs["method_variant"] = legacy_method
-
     if tool_invocation.tool_id == "chainladder":
         validated_inputs = ChainladderToolInput.model_validate(merged_inputs)
         case_input = build_chainladder_case_input(
@@ -2934,7 +2983,6 @@ def _normalize_tool_invocation(request: RunCreateRequest, *, tool_registry) -> V
             tool_id=tool_invocation.tool_id,
             inputs=validated_inputs.model_dump(mode="json"),
         )
-
     raise ValueError(f"Unknown tool_id: {tool_invocation.tool_id}")
 
 
@@ -2942,7 +2990,6 @@ def _run_sequential_workflow(**operator_params: Any) -> dict[str, Any]:
     provenance = operator_params.get("provenance")
     if not isinstance(provenance, dict) or provenance.get("source") != ADK_SOURCE:
         return _run_sequential_workflow_impl(**operator_params)
-
     registered_root = Path(
         os.path.abspath(os.path.expanduser(str(operator_params["artifact_dir"])))
     )
@@ -3007,7 +3054,6 @@ def _run_sequential_workflow_impl(
     final_summary = f"Workflow {workflow_id} completed for {case_id}"
     workflow_event_payload = {"workflow_id": workflow_id, "step_count": len(workflow_entry.steps)}
     resolved_workflow_inputs = dict(workflow_inputs or {})
-
     run_registry.record_run_event(
         registry_path=registry_path,
         task_id=task_id,
@@ -3064,7 +3110,6 @@ def _run_sequential_workflow_impl(
         event_type="workflow.started",
         event_payload=workflow_event_payload,
     )
-
     for step_index, step in enumerate(workflow_entry.steps, start=1):
         step_request = RunCreateRequest(
             case_id=case_id,
@@ -3202,7 +3247,6 @@ def _run_sequential_workflow_impl(
             final_status = step_status
             final_summary = f"Workflow {workflow_id} ended with status {step_status} for {case_id}"
             break
-
     if final_status == "needs_review" and isinstance(last_result, dict):
         step_review_packet = last_result.get("review_packet")
         if isinstance(step_review_packet, dict):
@@ -3231,7 +3275,6 @@ def _run_sequential_workflow_impl(
                     parent_review_packet,
                 )
             step_artifact_paths["review_packet"] = "review_packet.json"
-
     workflow_summary_payload = {
         "workflow_id": workflow_id,
         "case_id": case_id,
@@ -3300,7 +3343,6 @@ def _run_sequential_workflow_impl(
             resolve_artifact_path(artifact_root, "run_manifest.json"),
             manifest_payload,
         )
-
     _record_workflow_event(
         registry_path=registry_path,
         task_id=task_id,
@@ -3339,7 +3381,6 @@ def _run_sequential_workflow_impl(
         operator_id=operator_id,
         workspace_id=workspace_id,
     )
-
     result = {
         "ok": final_status != "failed",
         "status": final_status,
@@ -3400,7 +3441,6 @@ def _run_adk_operator_step_staged(
     task_contracts_module: Any,
 ) -> dict[str, Any]:
     """Run legacy calculation code in private staging, then publish safely."""
-
     with TemporaryDirectory(prefix="ai-actuary-adk-step-") as temporary_root:
         staging_root = Path(temporary_root)
         step_result = operator_entrypoint.run_operator_flow(
@@ -3472,7 +3512,6 @@ def _run_adk_operator_step_staged(
                 manifest,
                 namespace="manifest",
             )
-
     review_packet = step_result.get("review_packet")
     if isinstance(review_packet, dict):
         step_result["review_packet"] = {
@@ -3795,6 +3834,7 @@ def _console_state_payload(
         ),
         browser_visible=True,
     )
+    degraded_reviews = _degraded_review_entries(review_inbox)
     filter_option_runs = all_runs if all_runs is not None else runs
     return {
         "console": {
@@ -3829,6 +3869,10 @@ def _console_state_payload(
             trusted_root=trusted_root,
         ),
         "action_panel": _console_action_panel(selected_entry),
+        "degraded": {
+            "active": bool(degraded_reviews),
+            "review_entries": degraded_reviews,
+        },
     }
 
 
@@ -3881,11 +3925,14 @@ def _empty_result_panel(
     *,
     status: str,
     tool_id: Any = UNAVAILABLE,
+    panel_title: str = DEFAULT_RESULT_PANEL_TITLE,
     errors: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     return {
         "status": status,
         "tool_id": _projection_scalar(tool_id),
+        "panel_title": panel_title,
+        "summary": [],
         "model": UNAVAILABLE,
         "method": UNAVAILABLE,
         "result_count": UNAVAILABLE,
@@ -4012,10 +4059,8 @@ def _result_panel_projection(
     trusted_root: TrustedArtifactRoot | None = None,
 ) -> dict[str, Any]:
     """Project registered result artifacts into a path-free Console contract."""
-
     if entry is None:
         return _empty_result_panel(status="no_run_selected")
-
     artifact_root = entry.get("artifact_root")
     if trusted_root is None and artifact_root:
         try:
@@ -4033,11 +4078,13 @@ def _result_panel_projection(
                     )
                 ],
             )
-
     registered_tool_id = _registered_tool_id(entry)
-    if registered_tool_id not in {None, MINIMAX_EXPERIENCE_STUDY_TOOL_ID}:
-        return _empty_result_panel(status="not_available", tool_id=registered_tool_id)
-
+    if registered_tool_id not in {None, *SUPPORTED_RESULT_PANEL_TOOL_IDS}:
+        return _empty_result_panel(
+            status="not_available",
+            tool_id=registered_tool_id,
+            panel_title=_result_panel_title(registered_tool_id),
+        )
     root, manifest, manifest_error = _load_result_manifest(
         entry,
         trusted_root=trusted_root,
@@ -4048,7 +4095,6 @@ def _result_panel_projection(
             tool_id=registered_tool_id or UNAVAILABLE,
             errors=[manifest_error] if manifest_error is not None else [],
         )
-
     manifest_tool_id = manifest.get("tool_id")
     if (
         registered_tool_id is not None
@@ -4067,9 +4113,20 @@ def _result_panel_projection(
             ],
         )
     tool_id = registered_tool_id or manifest_tool_id
+    if tool_id == CHAINLADDER_TOOL_ID:
+        return _chainladder_result_panel(
+            entry,
+            root=root,
+            manifest=manifest,
+            tool_id=str(tool_id),
+            trusted_root=trusted_root,
+        )
     if tool_id != MINIMAX_EXPERIENCE_STUDY_TOOL_ID:
-        return _empty_result_panel(status="not_available", tool_id=tool_id or UNAVAILABLE)
-
+        return _empty_result_panel(
+            status="not_available",
+            tool_id=tool_id or UNAVAILABLE,
+            panel_title=_result_panel_title(tool_id),
+        )
     payloads: dict[str, dict[str, Any]] = {}
     errors: list[dict[str, str]] = []
     for artifact_id in ("validated_input", "deterministic_result", "narrative_draft"):
@@ -4092,7 +4149,6 @@ def _result_panel_projection(
                 errors.extend(identity_errors)
             else:
                 payloads[artifact_id] = payload
-
     deterministic = payloads.get("deterministic_result", {})
     raw_results = deterministic.get("results")
     projected_results: list[dict[str, Any]] = []
@@ -4123,7 +4179,6 @@ def _result_panel_projection(
             )
         else:
             projected_results = [_project_experience_result(item) for item in raw_results]
-
     result_count = deterministic.get("result_count", UNAVAILABLE)
     if result_count != UNAVAILABLE and (
         isinstance(result_count, bool)
@@ -4147,7 +4202,6 @@ def _result_panel_projection(
                 "Registered result_count does not match the results array.",
             )
         )
-
     validated_inputs = payloads.get("validated_input", {}).get("inputs")
     if not isinstance(validated_inputs, dict):
         validated_inputs = {}
@@ -4162,6 +4216,8 @@ def _result_panel_projection(
     return {
         "status": status,
         "tool_id": _projection_scalar(deterministic.get("tool_id", tool_id)),
+        "panel_title": _result_panel_title(deterministic.get("tool_id", tool_id)),
+        "summary": [],
         "model": _projection_scalar(deterministic.get("model", manifest.get("model", UNAVAILABLE))),
         "method": _projection_scalar(deterministic.get("method", UNAVAILABLE)),
         "result_count": result_count,
@@ -4172,6 +4228,142 @@ def _result_panel_projection(
         "key_points": key_points,
         "errors": errors,
     }
+
+
+def _result_panel_title(tool_id: Any) -> str:
+    if isinstance(tool_id, str):
+        return RESULT_PANEL_TITLES.get(tool_id, DEFAULT_RESULT_PANEL_TITLE)
+    return DEFAULT_RESULT_PANEL_TITLE
+
+
+def _chainladder_result_panel(
+    entry: dict[str, Any],
+    *,
+    root: Path,
+    manifest: dict[str, Any],
+    tool_id: str,
+    trusted_root: TrustedArtifactRoot | None = None,
+) -> dict[str, Any]:
+    """Project chainladder reserve evidence into a path-free Console contract."""
+    payloads: dict[str, dict[str, Any]] = {}
+    errors: list[dict[str, str]] = []
+    for artifact_id in ("validated_input", "deterministic_result", "narrative_draft"):
+        payload, error = _read_registered_result_artifact(
+            artifact_root=root,
+            manifest=manifest,
+            artifact_id=artifact_id,
+            trusted_root=trusted_root,
+        )
+        if error is not None:
+            errors.append(error)
+        elif payload is not None:
+            identity_errors = _result_artifact_identity_errors(
+                payload,
+                artifact_id=artifact_id,
+                expected_run_id=entry.get("run_id"),
+                expected_tool_id=tool_id,
+            )
+            if identity_errors:
+                errors.extend(identity_errors)
+            else:
+                payloads[artifact_id] = payload
+    deterministic = payloads.get("deterministic_result")
+    if deterministic is None:
+        panel_title = RESULT_PANEL_TITLES[CHAINLADDER_TOOL_ID]
+        blocking_errors = [
+            error
+            for error in errors
+            if error.get("code") != RESULT_ARTIFACT_NOT_REGISTERED_CODE
+        ]
+        if blocking_errors:
+            return _empty_result_panel(
+                status="error",
+                tool_id=tool_id,
+                panel_title=panel_title,
+                errors=blocking_errors,
+            )
+        return _empty_result_panel(
+            status="not_available",
+            tool_id=tool_id,
+            panel_title=panel_title,
+        )
+    reserve_summary = deterministic.get("reserve_summary")
+    if not isinstance(reserve_summary, dict):
+        errors.append(
+            _result_projection_error(
+                "deterministic_result",
+                "artifact_invalid_shape",
+                "Registered deterministic result does not contain a reserve summary.",
+            )
+        )
+        reserve_summary = {}
+    diagnostics = deterministic.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+    metadata = deterministic.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    inputs = payloads.get("validated_input", {}).get("inputs")
+    if not isinstance(inputs, dict):
+        inputs = {}
+    narrative = payloads.get("narrative_draft", {})
+    summary_rows = _chainladder_summary_rows(
+        reserve_summary=reserve_summary,
+        diagnostics=diagnostics,
+        metadata=metadata,
+        inputs=inputs,
+    )
+    raw_key_points = narrative.get("key_points")
+    key_points = (
+        [_projection_scalar(item) for item in raw_key_points[:MAX_PROJECTED_RESULTS]]
+        if isinstance(raw_key_points, list)
+        else []
+    )
+    status = "available" if not errors else ("partial" if summary_rows else "error")
+    return {
+        "status": status,
+        "tool_id": _projection_scalar(deterministic.get("tool_id", tool_id)),
+        "panel_title": RESULT_PANEL_TITLES[CHAINLADDER_TOOL_ID],
+        "model": _projection_scalar(metadata.get("backend", UNAVAILABLE)),
+        "method": _projection_scalar(deterministic.get("method", UNAVAILABLE)),
+        "result_count": len(summary_rows) if summary_rows else UNAVAILABLE,
+        "population_id": UNAVAILABLE,
+        "period": UNAVAILABLE,
+        "results": [],
+        "summary": summary_rows,
+        "narrative_summary": _projection_scalar(narrative.get("summary", UNAVAILABLE)),
+        "key_points": key_points,
+        "errors": errors,
+    }
+
+
+def _chainladder_summary_rows(
+    *,
+    reserve_summary: dict[str, Any],
+    diagnostics: dict[str, Any],
+    metadata: dict[str, Any],
+    inputs: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build bounded label/value highlights for a chainladder run."""
+    source = metadata.get("source")
+    if source in (None, ""):
+        source = inputs.get("source_file")
+    if source in (None, ""):
+        source = metadata.get("source_kind")
+    labels = (
+        ("Latest diagonal", reserve_summary.get("latest_diagonal")),
+        ("Ultimate", reserve_summary.get("ultimate")),
+        ("IBNR", reserve_summary.get("ibnr")),
+        ("Triangle source", source),
+        ("Origin periods", diagnostics.get("origin_count")),
+        ("Development periods", diagnostics.get("development_count")),
+        ("Cumulative triangle", diagnostics.get("is_cumulative")),
+        ("Valuation date", diagnostics.get("valuation_date")),
+    )
+    return [
+        {"label": label, "value": _projection_scalar(value)}
+        for label, value in labels
+    ]
 
 
 def _registered_tool_id(entry: dict[str, Any]) -> str | None:
@@ -4359,11 +4551,11 @@ def _console_artifact_panel(
     manifest_error = None
     try:
         manifest = _load_manifest_for_entry(entry, trusted_root=trusted_root)
-    except ArtifactProjectionReadError:
+    except ArtifactProjectionReadError as exc:
         manifest = None
         manifest_error = {
-            "code": "manifest_unreadable",
-            "message": "Run manifest could not be read safely.",
+            "code": getattr(exc, "code", None) or "manifest_unreadable",
+            "message": getattr(exc, "message", None) or "Run manifest could not be read safely.",
         }
     artifact_root = entry.get("artifact_root")
     root = Path(str(artifact_root)).expanduser().absolute() if artifact_root else None
@@ -4451,14 +4643,20 @@ def _console_review_panel(
     if entry is None:
         review = Review(status="not_available", review_required=False)
     else:
-        review = Review.model_validate(
-            _review_payload_for_run(
-                entry,
-                review_store=review_store,
-                review_store_root=review_store_root,
-                trusted_root=trusted_root,
+        try:
+            review = Review.model_validate(
+                _review_payload_for_run(
+                    entry,
+                    review_store=review_store,
+                    review_store_root=review_store_root,
+                    trusted_root=trusted_root,
+                )
             )
-        )
+        except (ReviewIdentityMismatchError, ArtifactProjectionReadError) as exc:
+            degraded = _degraded_review_payload(entry, exc)
+            degraded["present"] = True
+            degraded["packet"] = None
+            return degraded
     payload = project_review(review)
     payload["present"] = bool(payload.get("review_id")) or payload.get("packet") is not None
     return payload
@@ -4691,6 +4889,40 @@ def _list_review_payloads(
     )
 
 
+def _degraded_review_payload(entry: dict[str, Any], exc: Exception) -> dict[str, Any]:
+    """Fallback inbox entry so one unreadable review cannot fail the whole console."""
+
+    run_id = str(entry.get("run_id") or "")
+    return {
+        "review_id": f"unresolved:{run_id}",
+        "run_id": run_id,
+        "case_id": entry.get("case_id"),
+        "workspace_id": entry.get("workspace_id"),
+        "status": "review_unavailable",
+        "decision": None,
+        "decision_artifacts": [],
+        "review_required": bool(entry.get("review_required")) or entry.get("status") == "needs_review",
+        "reason_codes": [],
+        "assigned_to": entry.get("operator_id"),
+        "created_at": entry.get("created_at"),
+        "updated_at": entry.get("updated_at"),
+        "error": {
+            "code": getattr(exc, "code", None) or "review_unavailable",
+            "message": getattr(exc, "message", None) or str(exc),
+        },
+    }
+
+
+def _degraded_review_entries(reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collect per-review degradation records for aggregate surfaces."""
+
+    return [
+        {"run_id": item.get("run_id"), "review_id": item.get("review_id"), "error": item.get("error")}
+        for item in reviews
+        if item.get("error")
+    ]
+
+
 def _review_inbox_payload(
     *,
     registry_path: str | Path | None,
@@ -4708,33 +4940,36 @@ def _review_inbox_payload(
         run_id = str(entry.get("run_id"))
         trusted_root = (trusted_roots or {}).get(run_id)
         artifact_root = entry.get("artifact_root")
-        if trusted_root is None and artifact_root:
-            try:
-                with TrustedArtifactRoot(
-                    artifact_root,
-                    namespace="review_packet",
-                ) as pinned_root:
+        try:
+            if trusted_root is None and artifact_root:
+                try:
+                    with TrustedArtifactRoot(
+                        artifact_root,
+                        namespace="review_packet",
+                    ) as pinned_root:
+                        review_payload = _review_payload_for_run(
+                            entry,
+                            review_store=review_store,
+                            review_store_root=review_store_root,
+                            trusted_root=pinned_root,
+                        )
+                except ArtifactProjectionReadError as exc:
+                    if exc.code != "review_packet_missing":
+                        raise
                     review_payload = _review_payload_for_run(
                         entry,
                         review_store=review_store,
                         review_store_root=review_store_root,
-                        trusted_root=pinned_root,
                     )
-            except ArtifactProjectionReadError as exc:
-                if exc.code != "review_packet_missing":
-                    raise
+            else:
                 review_payload = _review_payload_for_run(
                     entry,
                     review_store=review_store,
                     review_store_root=review_store_root,
+                    trusted_root=trusted_root,
                 )
-        else:
-            review_payload = _review_payload_for_run(
-                entry,
-                review_store=review_store,
-                review_store_root=review_store_root,
-                trusted_root=trusted_root,
-            )
+        except (ReviewIdentityMismatchError, ArtifactProjectionReadError) as exc:
+            review_payload = _degraded_review_payload(entry, exc)
         review_id = review_payload.get("review_id")
         if not review_id:
             continue
@@ -4759,6 +4994,7 @@ def _review_inbox_payload(
                 "created_at": review_payload.get("created_at"),
                 "updated_at": review_payload.get("updated_at"),
                 "selected": review_payload.get("run_id") == selected_run_id,
+                "error": review_payload.get("error"),
             }
         )
     return sorted(reviews, key=lambda item: item.get("updated_at") or "", reverse=True)
@@ -4959,8 +5195,6 @@ def _artifact_logical_metadata_from_manifest(
             trusted_root=trusted_root,
         )
     ]
-
-
 _CONSOLE_ARTIFACT_SPECS: tuple[dict[str, str], ...] = (
     {"artifact_id": "run_manifest", "label": "Run manifest", "filename": "run_manifest.json", "category": "primary"},
     {"artifact_id": "validated_input", "label": "Validated input", "filename": "validated_input.json", "category": "primary"},
@@ -5053,7 +5287,6 @@ def _artifact_panel_freshness(evidence_items: list[dict[str, Any]]) -> dict[str,
 
 def _load_batch_runner_module():
     import importlib.util
-
     module_path = Path(__file__).resolve().parents[3] / "benchmarks" / "runners" / "batch_runner.py"
     spec = importlib.util.spec_from_file_location("api_batch_runner", module_path)
     if spec is None or spec.loader is None:

@@ -73,8 +73,20 @@ def _build_review_packet_from_payload(
         "artifact_links": artifact_paths,
     }
 
-    json_path = output_dir / "review_packet.json"
-    markdown_path = output_dir / "review_packet.md"
+    return write_review_packet_files(packet, output_dir=output_dir)
+
+
+def write_review_packet_files(packet: dict[str, Any], *, output_dir: str | Path) -> dict[str, Any]:
+    """Write (or rewrite) review packet files after in-place enrichment.
+
+    Used again once AI review guidance is attached so the persisted packet
+    and its markdown rendering stay in sync.
+    """
+
+    directory = Path(output_dir).expanduser().resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    json_path = directory / "review_packet.json"
+    markdown_path = directory / "review_packet.md"
     packet["packet_paths"] = {
         "json": str(json_path.resolve()),
         "markdown": str(markdown_path.resolve()),
@@ -162,6 +174,30 @@ def _render_markdown_packet(packet: dict[str, Any]) -> str:
         "",
         "## Draft narrative",
         draft_summary or "- None",
+    ])
+    ai_review = packet.get("ai_review") or {}
+    if ai_review:
+        lines.extend([
+            "",
+            "## AI review guidance",
+            f"- Model: `{ai_review.get('model')}`",
+            f"- Status: `{ai_review.get('status')}`",
+            "",
+            ai_review.get("summary") or "- None",
+        ])
+        for item in ai_review.get("focus_points") or []:
+            lines.append(f"- **[{item.get('severity', 'medium')}] {item.get('title', '')}**")
+            if item.get("rationale"):
+                lines.append(f"  - {item['rationale']}")
+            for evidence in item.get("evidence") or []:
+                lines.append(f"  - evidence: {evidence}")
+        actions = ai_review.get("suggested_actions") or []
+        if actions:
+            lines.extend(["", "### Suggested actions"])
+            lines.extend([f"- {item}" for item in actions])
+        if ai_review.get("error"):
+            lines.extend(["", f"- error: {ai_review['error']}"])
+    lines.extend([
         "",
         "## Artifact links",
     ])

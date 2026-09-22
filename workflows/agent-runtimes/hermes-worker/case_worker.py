@@ -8,9 +8,10 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from reserving_workflow.ai_narrative import narrative_writer_from_env
 from reserving_workflow.calculators import ChainladderAdapter, ChainladderAdapterError
 from reserving_workflow.constitution import evaluate_case_constitution
-from reserving_workflow.narrative import build_narrative_draft
+from reserving_workflow.narrative import build_narrative_draft_with_meta
 from reserving_workflow.schemas import ReservingCaseInput
 
 SUPPORTED_TASK = "run_case"
@@ -50,7 +51,9 @@ def run_case_worker(task: Any):
             },
         )
         deterministic_result = ChainladderAdapter().calculate(case_input)
-        narrative_draft = build_narrative_draft(case_input, deterministic_result)
+        narrative_draft, narrative_meta = build_narrative_draft_with_meta(
+            case_input, deterministic_result, narrative_writer=narrative_writer_from_env()
+        )
         constitution_check = evaluate_case_constitution(
             case_input,
             deterministic_result,
@@ -96,6 +99,8 @@ def run_case_worker(task: Any):
                 "adapter": "local-callable",
                 "calculator_backend": deterministic_result.metadata.get("backend"),
                 "artifact_dir": str(artifact_dir),
+                "narrative_source": narrative_meta.get("source"),
+                "narrative_model": narrative_meta.get("model"),
             },
         )
     except (ChainladderAdapterError, KeyError, ValidationError, ValueError) as exc:

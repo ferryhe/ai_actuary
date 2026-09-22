@@ -997,6 +997,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    from dotenv import load_dotenv
+
+    load_dotenv(REPO_ROOT / ".env", override=False)
     args = parse_args(argv)
     config = LocalWorkbenchConfig.from_repo_root(
         REPO_ROOT,
@@ -1029,6 +1032,7 @@ def _capability_child_environments(
             "AI_ACTUARY_OPERATOR_CREDENTIAL": operator_credential,
             "AI_ACTUARY_ADK_CREDENTIAL": adk_credential,
             "AI_ACTUARY_OPERATOR_BOOTSTRAP_TOKEN": bootstrap_token,
+            "AI_ACTUARY_OPERATOR_BOOTSTRAP_TTL": "1800",
             "AI_ACTUARY_OPERATOR_ORIGIN": (
                 f"http://{LOOPBACK_HOST}:{config.control_plane_port}"
             ),

@@ -42,6 +42,16 @@ the credential generation and immediately invalidates the old bearer and all
 sessions derived from it. Rotation does not mutate already accepted business
 runs.
 
+For `operator-console`, a rotation also closes the whole bootstrap channel: the
+single-use direct exchange (`/auth/operator/bootstrap`) and the browser handoff
+minting path both refuse afterwards, so a bootstrap token suspected of leaking
+cannot mint a new session. Passing a new bootstrap token to that same rotation
+re-arms the channel under the new credential; without one the channel stays
+closed for the remainder of the process and recovery is a restart. The
+revocation is in-memory state, so it is a containment step, not a durable
+substitute for replacing the token at rest — a restart reads configuration
+again.
+
 ## Authorization semantics
 
 Every registered application route and HTTP method is present in one

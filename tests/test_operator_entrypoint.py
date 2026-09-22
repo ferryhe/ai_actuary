@@ -68,6 +68,31 @@ def _load_module():
     return module
 
 
+def test_attach_ai_review_records_failure_without_raising(tmp_path, monkeypatch):
+    module = _load_module()
+    packet_dir = tmp_path / "artifacts"
+    packet_dir.mkdir()
+    packet_json = packet_dir / "review_packet.json"
+    packet_json.write_text("{}", encoding="utf-8")
+    result = {
+        "review_packet": {
+            "case_id": "operator-case",
+            "packet_paths": {"json": str(packet_json)},
+        }
+    }
+
+    def explode(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(module, "generate_ai_review", explode)
+
+    module._attach_ai_review(result, artifact_dir=tmp_path)
+
+    assert result["ai_review"]["status"] == "failed"
+    assert "ai_review_attach_failed" in result["ai_review"]["error"]
+    assert result["review_packet"]["ai_review"]["status"] == "failed"
+
+
 def test_build_operator_task_creates_run_case_task(tmp_path):
     module = _load_module()
 

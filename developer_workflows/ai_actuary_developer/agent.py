@@ -13,7 +13,7 @@ from . import tools as read_tools
 
 _CONTROL_PLANE_BASE_URL = read_tools.CONTROL_PLANE_BASE_URL
 _CONSOLE_URL = f"{_CONTROL_PLANE_BASE_URL}/console"
-_MODEL_NAME = "gemini-2.5-flash"
+_MODEL_NAME = os.environ.get("AI_ACTUARY_ADK_MODEL", "gemini-2.5-flash")
 
 
 def describe_development_environment() -> dict[str, str]:

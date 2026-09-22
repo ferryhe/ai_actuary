@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
+
+# Override with AI_ACTUARY_PLANNER_MODEL in .env (read at import time, restart required).
+DEFAULT_PLANNER_MODEL = os.environ.get("AI_ACTUARY_PLANNER_MODEL", "gpt-5.6-luna")
 
 DEFAULT_PLANNER_CONFIG = {
     "runtime": "openai-agents",
     "use_real_api": True,
-    "model": "gpt-4.1-mini",
+    "model": DEFAULT_PLANNER_MODEL,
     "workflow_name": "ai-actuary-governed-workflow",
     "tracing_disabled": False,
 }
